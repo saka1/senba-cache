@@ -13,3 +13,11 @@ criterion = { version = "0.8", default-features = false }
 [[bench]]
 name = "micro"
 harness = false
+
+# samply / perf annotate でソース行と asm を対応させるための debuginfo。
+# bench は release プロファイルから派生するので両方に入れておく。
+[profile.release]
+debug = "line-tables-only"
+
+[profile.bench]
+debug = "line-tables-only"

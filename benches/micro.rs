@@ -2,16 +2,28 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::hint::black_box;
+use std::time::Duration;
 use senba_cache::Cache;
 use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v0::SieveCache as V0;
 use senba_cache::workload::zipf::ZipfGen;
 
-const SKEWS: &[f64] = &[1.05, 1.1, 1.2];
-const CAPS: &[usize] = &[1024, 8192, 65536];
-const ZIPF_KEYS: u64 = 100_000;
-const TRACE_LEN: usize = 200_000;
+const SKEWS: &[f64] = &[1.05, 1.2];
+const CAPS: &[usize] = &[1024, 16384];
+const ZIPF_KEYS: u64 = 50_000;
+const TRACE_LEN: usize = 50_000;
 const SEED: u64 = 42;
+
+fn quick_group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut g = c.benchmark_group(name);
+    g.sample_size(20)
+        .warm_up_time(Duration::from_millis(300))
+        .measurement_time(Duration::from_secs(2));
+    g
+}
 
 fn insert_only_for<C: Cache<u64, u64>>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
@@ -38,7 +50,7 @@ fn insert_only_for<C: Cache<u64, u64>>(
 }
 
 fn bench_insert_only(c: &mut Criterion) {
-    let mut group = c.benchmark_group("insert_only");
+    let mut group = quick_group(c, "insert_only");
     for &skew in SKEWS {
         for &cap in CAPS {
             let trace: Vec<u64> = ZipfGen::new(skew, ZIPF_KEYS, SEED).take(TRACE_LEN).collect();
@@ -104,7 +116,7 @@ fn mixed_for<C: Cache<u64, u64>>(
 }
 
 fn bench_mixed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("mixed_80r_20w");
+    let mut group = quick_group(c, "mixed_80r_20w");
     for &skew in SKEWS {
         for &cap in CAPS {
             let ops = make_mixed_ops(skew, TRACE_LEN, 0.8);
