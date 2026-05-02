@@ -43,6 +43,19 @@ fn assert_eviction_streams_eq(
     }
 }
 
+/// 最小再現: cap=3, トレース [1,2,3,1,2,4,5]。
+/// insert(4) で victim=3 (= 当時の tail-1, つまり最新エントリ) を evict したあと、
+/// v0 は hand=3 のまま insert(4) で qpos=3 に新エントリを置くため、hand が
+/// 新エントリ "4" を指してしまう。次の insert(5) で v0 は 4 を即 evict する一方、
+/// orig は hand=None → tail から再開し 1 を evict する。
+#[test]
+fn v0_diverges_when_victim_is_newest_entry() {
+    let trace: Vec<u64> = vec![1, 2, 3, 1, 2, 4, 5];
+    let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    assert_eviction_streams_eq(&orig, &v0, "minimal repro");
+}
+
 #[test]
 fn v0_matches_orig_on_synthetic_zipf() {
     for &(skew, cap) in &[

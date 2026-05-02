@@ -2,7 +2,101 @@
 
 - 日付: 2026-05-03
 - きっかけ: ベンチマーク・ハーネス基盤 (spec: `docs/superpowers/specs/2026-05-03-bench-harness-design.md`) を構築し、`sieve_orig` を oracle とした差分テストを初めて流したところ、複数の入力で `sieve_v0` の evict 列が `sieve_orig` と一致しないことを確認。
-- ステータス: ハーネスは完成。`sieve_v0` 側の修正は本レポート時点で未着手 (次セッション持ち越し)。
+- ステータス (2026-05-03 追記): 原因究明完了。最小再現 7 req を `tests/oracle.rs::v0_diverges_when_victim_is_newest_entry` に追加し、`sieve_v0.rs:189` に 1 行のラップ条件を足す対症修正で oracle 全 3 件 + 既存単体 37 件が green になることを確認。以下 [原因](#原因-2026-05-03-追記) 節を参照。設計面の再考 (= "order_cap = cap*2 でコンパクションをサボる" 方針自体の是非) は別論として残置。
+
+## 原因 (2026-05-03 追記)
+
+### 一行サマリ
+
+**`sieve_v0::evict_one` は victim が "当時の最新エントリ" (= `qpos == tail - 1`) だったとき、次回 hand の起点として `tail` を保存する。続く `insert` が `qpos = tail` に新エントリを置くため、hand が新規挿入したエントリ自身を指してしまい、次の eviction で即 victim にされる。**
+
+`sieve_orig` ではこの場合 `hand = victim.prev = None` になり、次回は **tail (最古)** から再開する。両者は完全に逆方向の victim を選ぶ。
+
+### 最小再現
+
+cap=3、トレース `[1, 2, 3, 1, 2, 4, 5]` の 6 ステップ目 (= `insert(5)`) で発散する。`tests/oracle.rs::v0_diverges_when_victim_is_newest_entry` 参照。
+
+| step | req | sieve_orig | sieve_v0 |
+|---:|---|---|---|
+| 0 | insert 1 | None | None |
+| 1 | insert 2 | None | None |
+| 2 | insert 3 | None | None |
+| 3 | insert 1 (re-insert) | None (visited=1) | None (visited=1) |
+| 4 | insert 2 (re-insert) | None (visited=1) | None (visited=1) |
+| 5 | insert 4 | evict 3 | evict 3 |
+| 6 | insert 5 | **evict 1** | **evict 4** ← 分岐 |
+
+step 5 直後の状態:
+
+- orig: list (oldest→newest) = `[1(visited=0), 2(visited=0), 4(visited=0)]`, `hand = None` (= 直前 victim 3 が head だったため `victim.prev = None`)
+- v0: `order = [1, 2, _, 4, _, _]` (`_` = tombstone), `tail = 4`, **`hand = 3`** (= 直前 victim 3 の `qpos + 1`)
+- ここで v0 の `order[3] = 4`、つまり **hand は新規挿入された "4" の位置を指している**
+
+step 6 の evict:
+
+- orig: `hand = None` → `cur = tail = 1`, `1.freq = 0`, victim = 1。
+- v0: `hand = 3` → `pos = 3`, `tombstone[3] = false`, `visited[3] = false`, **victim = 4 (= 直前に挿入されたばかりのエントリ)**。
+
+### なぜこのバグが unit test を素通りしたか — order_cap = cap * 2 とコンパクションの "救済" 効果
+
+これはユーザーが指摘した「v0 はコンパクションを見越してキャパを大きく取っている部分があり、そこで *ズル* をしている可能性」の正体でもある。
+
+`evict_one` 直後に `maybe_compact` が走り、その閾値は `dead >= len || tail == order.len()`。コンパクションは hand 位置を再計算する:
+
+```rust
+// sieve_v0.rs:204-243 抜粋
+let old_hand = self.hand.min(old_tail);
+let mut new_hand: Option<usize> = None;
+for old_pos in 0..old_tail {
+    if self.tombstone.get(old_pos) { continue; }
+    if new_hand.is_none() && old_pos >= old_hand {
+        new_hand = Some(write);
+    }
+    ...
+}
+self.hand = if self.len == 0 { 0 } else { new_hand.unwrap_or(0) };
+```
+
+ここで **問題のシナリオ (victim が tail-1) では `old_hand == old_tail` になるので、ループ中に `old_pos >= old_hand` を満たす live エントリは存在せず、`new_hand` は `None` のまま。結果として `hand = 0` にリセット** される。これは偶然 orig の「hand=None → tail から再開」と等価な挙動になる。
+
+つまり **コンパクションがバグを覆い隠している**:
+
+| cap | dead が len に追いつく速度 | バグ顕在化の条件 |
+|---|---|---|
+| 2 | 毎回の eviction (1 dead, 1 live) でただちに compact | 顕在化しない |
+| 3 | 2 回目の eviction で compact | 1 回目の eviction が "victim=tail-1" シナリオ かつ その次の eviction で発覚 |
+| ≥ 4 | dead が len/2 を越えるまで蓄積 | 高頻度で顕在化 |
+
+`order_cap = capacity * 2` という設計は「tombstone を貯める余裕を作る」目的だが、**結果として `dead >= len` 経由のコンパクションを cap 中盤以降で頻発させ、本バグを隠蔽する側に働いていた**。`sieve_v0` の単体テスト 14 件はすべて cap ≤ 3 か、または "再 insert を伴わない churn テスト" (= visited bit が立たないので hand が tail-1 まで進まない) なので、バグ条件を一切踏まない。
+
+これが「単体テスト 18 件 pass なのに oracle で落ちる」の正体。
+
+### 対症修正 (適用済み)
+
+最小修正は `evict_one` の victim 確定ブロック末尾で、`hand += 1` のあとに wrap を一段強める:
+
+```rust
+// sieve_v0.rs:189
+self.hand += 1;
+if self.hand >= self.tail {
+    self.hand = 0;
+}
+```
+
+これで「victim が tail-1 だった」場合に hand=0 が次回 evict 開始位置として保存され、以降の `insert` が tail を伸ばしても hand は新規エントリを指さない。orig の `hand = None → tail` セマンティクスと等価になる。
+
+検証結果 (この 1 行だけを足した状態):
+
+| 項目 | 結果 |
+|---|---|
+| `cargo test --lib` | 37 件 pass |
+| `cargo test --test oracle` | 3 件 pass (`v0_diverges_when_victim_is_newest_entry`、合成 Zipf 4 (skew,cap), bundled Zipf 3 cap) |
+
+### 残タスク / 設計上の論点
+
+1. **対症修正で済ませてよいか**: 本修正は orig の hand semantics に v0 を寄せる最小パッチ。設計レビュー観点では `order_cap = cap * 2` (= tombstone を貯めて periodic compact する方針) 自体が "compaction が暗黙に hand 不変条件を補正する" という不安定な前提に依存しており、その前提が今回崩れた。本修正でテストは緑になるが、`order_cap` を `cap` ぴったりにする / tombstone をやめて linked list に戻す / SIEVE の hand を別表現にする、等の選択肢を比較する余地は残る。
+2. **get/insert 混在シナリオ**: 今回の oracle テストは `insert` のみ。`get` 経路の visited bit 更新は未テスト。`get` で同じバグが新たに表面化するかは要追加検証。
+3. **CLI 集計値の再測定**: 旧レポートの C 章 (cap=256 で v0 のほうが hit が +2,038) は本バグ起因の "見かけ上の成績" 。修正後に再計測すると orig と完全一致するはず。性能 (`elapsed_ns`) の劣化傾向は別議論。
 
 ## TL;DR
 
@@ -94,43 +188,26 @@ cargo run --release --bin bench -- \
 
 `tests/oracle.rs::assert_eviction_streams_eq` は最初の divergence index と前後 3 要素を panic message に乗せる設計なので、ログがそのまま **最小化の取っ掛かり** になる。
 
-## 仮説
+## 仮説 (旧、いずれも 2026-05-03 検証で結論済み)
 
-未検証のメモ。次セッションで詰める。
+1. **compaction 時の hand 位置保存** — **半分当たり**。compaction の `new_hand = None → 0` フォールバックは、実は orig の `hand=None → tail` セマンティクスと等価。問題はコンパクションが走らない時、hand が `tail` のまま放置され、次の `insert` が `qpos=tail` に新エントリを置くことで hand が新エントリを指すこと。
+2. **wrap-around の方向** — 当たり。両者とも oldest → newest で同方向。
+3. **eviction 時の hand 移動** — 当たり。`hand += 1` 後に「tail を超えていたら 0 にラップ」の処理が抜けていた (= 上の 1 と同じ問題の別表現)。
 
-1. **compaction 時の hand 位置保存**
-   - `sieve_v0::compact()` は `old_hand = self.hand.min(old_tail)` で現 hand 位置を確定し、走査中に `old_pos >= old_hand` を満たす最初の生存 entry を新 hand とする (`sieve_v0.rs:204-243`)。
-   - `sieve_orig` の hand は entry への直接ポインタなので、compaction 概念がない。両者の semantics 対応付けが正しいか要確認。
-   - 特に `old_hand` が tombstone を踏んでいたとき (= 圧縮で消える entry を指していたとき) の「次の生存 entry を新 hand にする」処理が、orig の `Sieve_remove_obj` 相当の「hand を obj.prev に逃がす」セマンティクスと一致しているか。
-2. **wrap-around の方向**
-   - `sieve_orig` は **tail → head** (古い → 新しい) に hand を進める。
-   - `sieve_v0` は logical queue で `hand` を `+1` していくので、これは「古い → 新しい」(配列先頭=古い、tail=新しい) の方向と一致しているはず。要確認。
-3. **eviction 時の hand 移動**
-   - `sieve_orig::evict_one` (sieve_orig.rs:187-210) は victim 確定後に `self.hand = node.prev` を保存してから unlink。
-   - `sieve_v0::evict_one` (sieve_v0.rs:157-196) は victim を確定したら `self.hand += 1` して、tombstone を立てて return する。
-   - 両者の「次回 hand の起点」が、同じ論理位置を指しているか要再検算。
+## 次セッションの作業候補 (2026-05-03 改訂)
 
-## 次セッションの作業候補
-
-優先順:
-
-1. **最小再現の生成**
-   - 合成 Zipf 5644 req は長すぎる。`tests/oracle.rs` のロジックで「不一致になる最短プレフィクス」を二分探索するヘルパを追加し、必要 req 数を 1〜数百行に切り詰める。
-   - キー数も `keys=10000` でなく数十まで縮められれば、トレースを test source に直書きできる。
-2. **`sieve_v0` の修正方針決定**
-   - compaction を伴わない単純シナリオで orig と一致するなら、compaction が原因。一致しないなら eviction 本体が原因。
-   - 上記の最小再現を `cap=2`〜`cap=4` レベルに絞り込めれば、紙の上で hand の動きを追って原因を確定できる。
-3. **修正後、 `tests/oracle.rs` を緑にする**
-   - 緑になれば `sieve_v0` は `sieve_orig` と挙動同値。性能比較が初めて意味を持つ。
-4. **(任意) get/insert 混在シナリオの oracle テスト追加**
-   - 今回は insert-only。get で visited bit を立てる経路の差は未検証。
+1. **対症修正のレビュー** ([原因](#原因-2026-05-03-追記) 節の 1 行) — 既に oracle 全 3 件 + 単体 37 件 green。レビュー後に commit するか、より大きな設計変更で巻き取るか判断。
+2. **設計再考** — `order_cap = cap * 2` + tombstone + periodic compaction 方針自体を維持するか。「コンパクションが偶発的に hand 不変条件を補正する」という暗黙依存を断ち切れるなら、別 variant (`sieve_v1`) として別実装したほうが綺麗な可能性。
+3. **get/insert 混在シナリオの oracle テスト追加** — 今回の oracle は `insert` のみ。`get` 経路に同種のバグが潜んでいないか別途検証。
+4. **CLI 集計値の再測定** — 修正後、cap=256 で v0 と orig が完全一致するか確認し、本レポート C 章の数値が消えること (バグ起因の見かけ上の hit 増しだったこと) を裏付ける。
 
 ## ハーネス側の確認結果 (参考)
 
 | 項目 | コマンド | 結果 |
 |---|---|---|
 | 既存単体テスト | `cargo test --lib` | 37 件 pass (BitSet 8, sieve_orig 12, sieve_v0 14, workload::zipf 3) |
-| 差分ハーネス | `cargo test --test oracle` | 2 件 fail (= 本レポート対象) |
+| 差分ハーネス (修正前) | `cargo test --test oracle` | 2 件 fail (= 本レポート対象) |
+| 差分ハーネス (1 行修正後) | `cargo test --test oracle` | 3 件 pass (最小再現テスト追加込み) |
 | Criterion | `cargo bench --no-run` | コンパイル pass |
 | CLI | `cargo build --release --bin bench` | OK |
 | `cargo check` | | clean |
@@ -138,4 +215,4 @@ cargo run --release --bin bench -- \
 
 依存追加: `rand = "0.9"`, `rand_distr = "0.5"`, `criterion = "0.5"` (dev)。
 
-ハーネスは「次の variant を入れたら oracle が即走る」状態。`sieve_v0` 修正後にこのレポートを close できる。
+ハーネスは「次の variant を入れたら oracle が即走る」状態。`sieve_v0` の対症修正は本セッションで適用済み (sieve_v0.rs:189 の wrap 1 行) — 設計再考まで含めるかは次セッションに持ち越し。

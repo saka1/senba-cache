@@ -187,6 +187,9 @@ where
             self.dead += 1;
             self.len -= 1;
             self.hand += 1;
+            if self.hand >= self.tail {
+                self.hand = 0;
+            }
             let entry = self.entries[eid].take().expect("live slot must have entry");
             self.index.remove(&entry.key);
             self.free_list.push(eid);
