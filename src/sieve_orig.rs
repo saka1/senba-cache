@@ -1,25 +1,31 @@
 //! NSDI'24 SIEVE オリジナル実装に忠実な Rust ポート。
 //!
-//! 参考: temp/NSDI24-SIEVE/libCacheSim/libCacheSim/cache/eviction/Sieve.c
+//! 参考: external/NSDI24-SIEVE/libCacheSim/libCacheSim/cache/eviction/Sieve.c
 //!
 //! - 双方向連結リスト (head=新しい / tail=古い)
 //! - 各エントリは visited bit (`freq`: 0 or 1) を持つ
 //! - 単一の hand ポインタ (`hand`) が tail から prev 方向 (head 側) に進む
 //! - 安全 Rust では生ポインタ双方向リストを書きづらいので、
-//!   arena (`Vec<Option<Node>>`) + `Option<NodeId>` index で代替。
+//!   arena (`Vec<Option<Node>>`) + `NodeId` で代替。
+//! - リンク (prev/next/head/tail/hand) は原典の `obj_t*` (NULL 可) に倣って、
+//!   `NodeId = u32` + sentinel `NIL = u32::MAX` で表現する。`Option<u32>` は
+//!   alignment で 8B になり原典の 8B ポインタと同サイズだが、sentinel 表現の方が
+//!   「値そのものに NULL 情報が乗る」という C ポインタの性質に近く、
+//!   かつ 4B/リンクで詰められる。
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
 type NodeId = u32;
+const NIL: NodeId = u32::MAX;
 
 #[derive(Debug)]
 struct Node<K, V> {
     key: K,
     value: V,
     freq: u8,
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
+    prev: NodeId, // NIL when no previous link
+    next: NodeId, // NIL when no next link
 }
 
 pub struct SieveCache<K, V> {
@@ -27,9 +33,9 @@ pub struct SieveCache<K, V> {
     index: HashMap<K, NodeId>,
     nodes: Vec<Option<Node<K, V>>>,
     free_list: Vec<NodeId>,
-    head: Option<NodeId>,
-    tail: Option<NodeId>,
-    hand: Option<NodeId>,
+    head: NodeId, // NIL when list is empty
+    tail: NodeId, // NIL when list is empty
+    hand: NodeId, // NIL when not yet positioned (= 原典 cache->cache_specific が NULL の状態)
     len: usize,
 }
 
@@ -44,9 +50,9 @@ where
             index: HashMap::with_capacity(capacity),
             nodes: Vec::with_capacity(capacity),
             free_list: Vec::new(),
-            head: None,
-            tail: None,
-            hand: None,
+            head: NIL,
+            tail: NIL,
+            hand: NIL,
             len: 0,
         }
     }
@@ -95,8 +101,8 @@ where
             key: key.clone(),
             value,
             freq: 0,
-            prev: None,
-            next: None,
+            prev: NIL,
+            next: NIL,
         });
         self.link_at_head(id);
         self.index.insert(key, id);
@@ -109,7 +115,7 @@ where
     /// hand が削除対象を指していた場合は obj.prev に逃がす。
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let id = self.index.remove(key)?;
-        if self.hand == Some(id) {
+        if self.hand == id {
             self.hand = self.node(id).prev;
         }
         self.unlink(id);
@@ -152,16 +158,16 @@ where
         let old_head = self.head;
         {
             let n = self.node_mut(id);
-            n.prev = None;
+            n.prev = NIL;
             n.next = old_head;
         }
-        if let Some(h) = old_head {
-            self.node_mut(h).prev = Some(id);
+        if old_head != NIL {
+            self.node_mut(old_head).prev = id;
         } else {
             // 空リストだった
-            self.tail = Some(id);
+            self.tail = id;
         }
-        self.head = Some(id);
+        self.head = id;
     }
 
     /// `id` をリストから外す。head/tail も必要なら更新する。
@@ -170,30 +176,36 @@ where
             let n = self.node(id);
             (n.prev, n.next)
         };
-        match prev {
-            Some(p) => self.node_mut(p).next = next,
-            None => self.head = next,
+        if prev != NIL {
+            self.node_mut(prev).next = next;
+        } else {
+            self.head = next;
         }
-        match next {
-            Some(n) => self.node_mut(n).prev = prev,
-            None => self.tail = prev,
+        if next != NIL {
+            self.node_mut(next).prev = prev;
+        } else {
+            self.tail = prev;
         }
         let n = self.node_mut(id);
-        n.prev = None;
-        n.next = None;
+        n.prev = NIL;
+        n.next = NIL;
     }
 
     /// 原典 Sieve_evict (Sieve.c L218-232) を忠実に移植。
     fn evict_one(&mut self) -> Option<(K, V)> {
         // 初回 or 1周完了後は tail から開始
-        let mut cur = self.hand.or(self.tail)?;
+        let mut cur = if self.hand != NIL { self.hand } else { self.tail };
+        if cur == NIL {
+            return None;
+        }
 
         loop {
             let node = self.node_mut(cur);
             if node.freq > 0 {
                 node.freq = 0;
                 let prev = node.prev;
-                cur = prev.or(self.tail).expect("non-empty list during eviction");
+                cur = if prev != NIL { prev } else { self.tail };
+                debug_assert!(cur != NIL, "non-empty list during eviction");
             } else {
                 break;
             }
@@ -396,7 +408,8 @@ mod tests {
         // insert(4) は tail=1 から走査し全 freq を落として 1 を victim にする。
         // 削除前に hand = 1.prev = 2 が保存される。
         let _ = cache.insert(4, "d");
-        let hand_id = cache.hand.expect("hand should be set after eviction");
+        let hand_id = cache.hand;
+        assert_ne!(hand_id, NIL, "hand should be set after eviction");
         assert_eq!(cache.node(hand_id).key, 2, "hand should track key=2");
 
         // hand が指す 2 を remove → hand は 2.prev に逃げる必要がある。
@@ -421,7 +434,6 @@ mod tests {
         // しかし実際は freq=1 になるだけで位置不変。
         // ただし freq=1 は visited entry survives first pass を引き起こすので、
         // 次の挿入で evict されるのは 2 になる。
-        // (これは "位置不変 + freq=1" の組合せの観測可能な帰結)
         let evicted = cache.insert(3, "c");
         assert_eq!(evicted, Some((2, "b")));
         assert!(cache.contains_key(&1));
@@ -442,17 +454,14 @@ mod tests {
         assert_eq!(evicted, Some((1, "a")));
 
         // 状態: list = [4(head), 3(visited), 2] (tail=2)
-        // 次の evict では hand = (前の victim 1).prev = None なので tail から再開し、
+        // 次の evict では hand = (前の victim 1).prev = NIL なので tail から再開し、
         // 2 (freq=0) が即 victim になる。
         let evicted2 = cache.insert(5, "e");
         assert_eq!(evicted2, Some((2, "b")));
 
         // 状態: list = [5, 4, 3(visited)] (tail=3)
         // 続けて挿入。3 は visited なので freq を落としつつ通過、
-        // hand は head 側に進み、prev=None でラップ → tail から再走査。
-        // 4 (freq=0) が victim になる… ではなく、
-        // hand = (前の victim 2).prev = None だったので tail (= 3) から再開、
-        // 3.freq を 0 に落として prev (= 4) に進み、4.freq=0 で victim。
+        // hand は head 側に進み、prev=NIL でラップ → tail から再走査。
         let evicted3 = cache.insert(6, "f");
         assert_eq!(evicted3, Some((4, "d")));
         assert!(cache.contains_key(&3));

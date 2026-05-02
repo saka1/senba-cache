@@ -9,11 +9,14 @@ import os
 import sys
 
 ROOT = "target/criterion"
-GROUPS = ["insert_only", "mixed_80r_20w"]
-IMPLS = ["orig", "v0"]
-SKEWS = ["1.05", "1.2"]   # benches/micro.rs の SKEWS と一致させる
-CAPS = ["1024", "16384"]  # benches/micro.rs の CAPS と一致させる
-TRACE_LEN = 50_000        # benches/micro.rs の TRACE_LEN と一致させる
+GROUPS = ["insert_only"]
+IMPLS = ["orig", "v0", "v1", "v2"]
+# 以下 3 定数は benches/micro.rs の SKEWS / CAP_RATIOS / TRACE_LEN と一致させる。
+SKEWS = ["0.6", "0.8", "1", "1.2"]
+N_KEYS = 100_000
+CAP_RATIOS = [0.001, 0.01, 0.1]
+CAPS = [str(round(N_KEYS * r)) for r in CAP_RATIOS]
+TRACE_LEN = 1_000_000
 
 
 def load(group, impl, skew, cap):
@@ -49,17 +52,28 @@ def main():
         print(f"{r['group']:<14} {r['impl']:<5} {r['skew']:<5} {r['cap']:>6} "
               f"{r['mean_ms']:>10.3f} {r['ns_per_op']:>8.1f} {r['mops_s']:>8.1f}")
 
-    print("\n=== orig vs v0 (same group/skew/cap) ===")
-    print(f"{'group':<14} {'skew':<5} {'cap':>6} {'orig(ms)':>10} {'v0(ms)':>10} {'v0/orig':>8}")
+    def find(grp, impl, skew, cap):
+        return next((r for r in rows if r["group"] == grp and r["impl"] == impl
+                     and r["skew"] == skew and r["cap"] == cap), None)
+
+    print("\n=== orig / v0 / v1 / v2 並べて比較 (same group/skew/cap) ===")
+    print(f"{'group':<14} {'skew':<5} {'cap':>6} "
+          f"{'orig(ms)':>9} {'v0(ms)':>9} {'v1(ms)':>9} {'v2(ms)':>9} "
+          f"{'v0/orig':>8} {'v1/orig':>8} {'v2/orig':>8} {'v2/v0':>7}")
     keys = sorted({(r["group"], r["skew"], r["cap"]) for r in rows})
     for grp, skew, cap in keys:
-        o = next((r for r in rows if r["group"] == grp and r["impl"] == "orig"
-                  and r["skew"] == skew and r["cap"] == cap), None)
-        v = next((r for r in rows if r["group"] == grp and r["impl"] == "v0"
-                  and r["skew"] == skew and r["cap"] == cap), None)
-        if o and v:
-            print(f"{grp:<14} {skew:<5} {cap:>6} {o['mean_ms']:>10.3f} "
-                  f"{v['mean_ms']:>10.3f} {v['mean_ms']/o['mean_ms']:>7.2f}x")
+        o = find(grp, "orig", skew, cap)
+        v = find(grp, "v0", skew, cap)
+        w = find(grp, "v1", skew, cap)
+        x = find(grp, "v2", skew, cap)
+        if o and v and w and x:
+            print(f"{grp:<14} {skew:<5} {cap:>6} "
+                  f"{o['mean_ms']:>9.3f} {v['mean_ms']:>9.3f} "
+                  f"{w['mean_ms']:>9.3f} {x['mean_ms']:>9.3f} "
+                  f"{v['mean_ms']/o['mean_ms']:>7.2f}x "
+                  f"{w['mean_ms']/o['mean_ms']:>7.2f}x "
+                  f"{x['mean_ms']/o['mean_ms']:>7.2f}x "
+                  f"{x['mean_ms']/v['mean_ms']:>6.2f}x")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
-use senba_cache::{Cache, sieve_orig, sieve_v0};
+use senba_cache::{Cache, sieve_orig, sieve_v0, sieve_v1, sieve_v2};
 
 fn run<C: Cache<u64, u64>>(
     trace: impl Iterator<Item = u64>,
@@ -81,5 +81,112 @@ fn v0_matches_orig_on_bundled_zipf() {
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace_b, cap);
         assert_eviction_streams_eq(&orig, &v0, &format!("bundled cap={cap}"));
+    }
+}
+
+// v1 (word-scan eviction) は v0 と同じレイアウトを取るはずなので、
+// v0 が落ちた最小再現も同じ形で落ちる。
+#[test]
+fn v1_diverges_when_victim_is_newest_entry() {
+    let trace: Vec<u64> = vec![1, 2, 3, 1, 2, 4, 5];
+    let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    assert_eviction_streams_eq(&orig, &v1, "minimal repro (v1)");
+}
+
+#[test]
+fn v1_matches_v0_on_synthetic_zipf() {
+    for &(skew, cap) in &[
+        (1.05_f64, 64usize),
+        (1.1, 128),
+        (1.2, 256),
+        (1.5, 1024),
+    ] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace_a, cap);
+        let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&v0, &v1, &format!("v1 vs v0 zipf skew={skew} cap={cap}"));
+    }
+}
+
+#[test]
+fn v1_matches_orig_on_synthetic_zipf() {
+    for &(skew, cap) in &[
+        (1.05_f64, 64usize),
+        (1.1, 128),
+        (1.2, 256),
+        (1.5, 1024),
+    ] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &v1, &format!("v1 vs orig zipf skew={skew} cap={cap}"));
+    }
+}
+
+#[test]
+fn v1_matches_orig_on_bundled_zipf() {
+    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    for &cap in &[256usize, 1024, 4096] {
+        let trace_a = file::from_path(path).unwrap().take(100_000);
+        let trace_b = file::from_path(path).unwrap().take(100_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &v1, &format!("v1 bundled cap={cap}"));
+    }
+}
+
+// v2 (= v0 + order の Option 剥がし) も同じ minimal divergence を踏むはず。
+#[test]
+fn v2_diverges_when_victim_is_newest_entry() {
+    let trace: Vec<u64> = vec![1, 2, 3, 1, 2, 4, 5];
+    let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    let v2 = run::<sieve_v2::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    assert_eviction_streams_eq(&orig, &v2, "minimal repro (v2)");
+}
+
+#[test]
+fn v2_matches_v0_on_synthetic_zipf() {
+    for &(skew, cap) in &[
+        (1.05_f64, 64usize),
+        (1.1, 128),
+        (1.2, 256),
+        (1.5, 1024),
+    ] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace_a, cap);
+        let v2 = run::<sieve_v2::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&v0, &v2, &format!("v2 vs v0 zipf skew={skew} cap={cap}"));
+    }
+}
+
+#[test]
+fn v2_matches_orig_on_synthetic_zipf() {
+    for &(skew, cap) in &[
+        (1.05_f64, 64usize),
+        (1.1, 128),
+        (1.2, 256),
+        (1.5, 1024),
+    ] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let v2 = run::<sieve_v2::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &v2, &format!("v2 vs orig zipf skew={skew} cap={cap}"));
+    }
+}
+
+#[test]
+fn v2_matches_orig_on_bundled_zipf() {
+    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    for &cap in &[256usize, 1024, 4096] {
+        let trace_a = file::from_path(path).unwrap().take(100_000);
+        let trace_b = file::from_path(path).unwrap().take(100_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let v2 = run::<sieve_v2::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &v2, &format!("v2 bundled cap={cap}"));
     }
 }

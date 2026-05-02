@@ -44,7 +44,7 @@ src/
   sieve_orig.rs       # faithful NSDI'24 reference port  ← oracle
   sieve_v0.rs         # tombstone + compaction variant
 benches/
-  micro.rs            # criterion micro benchmarks (insert-only, 80% read mixed)
+  micro.rs            # criterion micro benchmarks (insert-only over Zipf trace)
 scripts/
   criterion_compare.py  # criterion 結果を集計して orig vs v0 の表にする
   samply_top.py         # samply 出力 JSON から hot 関数を抽出
@@ -55,23 +55,28 @@ external/
 
 ## Benchmarks
 
-`benches/micro.rs` は criterion ベースで、`insert_only` (純粋な insert ループ) と `mixed_80r_20w` (80% get / 20% insert) の 2 グループを `(skew, capacity)` の組合せで回す。試行錯誤しやすいよう sample size と measurement time は意図的に短めに設定 (1 ケース ≈ 2 秒)。
+`benches/micro.rs` は criterion ベースで、`insert_only` (Zipf トレースを `cache.insert` で連続投入) を `(skew, capacity)` の組合せで回す。設定は NSDI'24 SIEVE 論文 §5.3 / §6.1 の synthetic Zipf 実験に寄せてある (詳細は `docs/sieve-paper-workload.md`):
+
+- skew α ∈ {0.6, 0.8, 1.0, 1.2}
+- footprint N = 100,000 ユニーク object
+- trace 長 = 1,000,000 リクエスト (= footprint の 10x)
+- キャッシュ容量 = footprint の {0.1%, 1%, 10%} = {100, 1000, 10000}
 
 ```bash
 cargo bench --bench micro                    # 全ケース実行
 cargo bench --bench micro insert_only        # フィルタ
-cargo bench --bench micro -- --profile-time 5 'insert_only/v0/skew1.05/16384'
+cargo bench --bench micro -- --profile-time 5 'insert_only/v0/skew1/10000'
                                               # サンプリングをスキップして 5 秒間ループだけ回す
                                               # (プロファイラを当てるとき用)
 ```
 
-結果は `target/criterion/<group>/<case>/new/estimates.json` に残る。orig vs v0 を表にするには:
+結果は `target/criterion/<group>/<case>/new/estimates.json` に残る。4 実装を並べた比較表を出すには:
 
 ```bash
 python3 scripts/criterion_compare.py
 ```
 
-`benches/micro.rs` の定数 (`SKEWS`, `CAPS`, `TRACE_LEN`) を変えたら、`scripts/criterion_compare.py` の同名定数も合わせる。
+`benches/micro.rs` の定数 (`SKEWS`, `CAP_RATIOS`, `N_KEYS`, `TRACE_LEN`) を変えたら、`scripts/criterion_compare.py` の同名定数も合わせる。
 
 ## Profiling (samply)
 
@@ -102,10 +107,10 @@ BIN=$(ls -t target/release/deps/micro-* | grep -v '\.d$' | head -1)
 # 該当ケースを 8 秒だけ回してプロファイルを保存
 mkdir -p profiles
 samply record --save-only -o profiles/v0_worst.json --rate 4000 -- \
-  "$BIN" --bench --profile-time 8 'insert_only/v0/skew1.05/16384'
+  "$BIN" --bench --profile-time 8 'insert_only/v0/skew1/10000'
 
 samply record --save-only -o profiles/orig_worst.json --rate 4000 -- \
-  "$BIN" --bench --profile-time 8 'insert_only/orig/skew1.05/16384'
+  "$BIN" --bench --profile-time 8 'insert_only/orig/skew1/10000'
 ```
 
 `--profile-time SECS` は criterion のフラグで、warm-up / 統計分析を全部スキップしてループだけを回す。サンプリング対象を 1 ケースに絞り込むのに必須。

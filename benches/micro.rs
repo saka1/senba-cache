@@ -1,17 +1,22 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::SeedableRng;
-use rand::rngs::StdRng;
-use std::hint::black_box;
-use std::time::Duration;
 use senba_cache::Cache;
 use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v0::SieveCache as V0;
+use senba_cache::sieve_v1::SieveCache as V1;
+use senba_cache::sieve_v2::SieveCache as V2;
 use senba_cache::workload::zipf::ZipfGen;
+use std::hint::black_box;
+use std::time::Duration;
 
-const SKEWS: &[f64] = &[1.05, 1.2];
-const CAPS: &[usize] = &[1024, 16384];
-const ZIPF_KEYS: u64 = 50_000;
-const TRACE_LEN: usize = 50_000;
+// NSDI'24 SIEVE 論文 §5.3 / §6.1 の synthetic Zipf 実験に寄せた設定。
+// 詳細は docs/sieve-paper-workload.md を参照。
+//   - α は実 web workload で観測されている範囲 (0.55 - 1.5) を中心にカバー
+//   - キャッシュ容量は footprint (= ユニーク object 数) の {0.1%, 1%, 10%}
+//   - trace 長は footprint の 10x (paper の 100x には届かないがオーダ的に近づける)
+const SKEWS: &[f64] = &[0.6, 0.8, 1.0, 1.2];
+const N_KEYS: u64 = 100_000;
+const TRACE_LEN: usize = 1_000_000;
+const CAP_RATIOS: &[f64] = &[0.001, 0.01, 0.1];
 const SEED: u64 = 42;
 
 fn quick_group<'a>(
@@ -20,8 +25,8 @@ fn quick_group<'a>(
 ) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
     let mut g = c.benchmark_group(name);
     g.sample_size(20)
-        .warm_up_time(Duration::from_millis(300))
-        .measurement_time(Duration::from_secs(2));
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(3));
     g
 }
 
@@ -51,82 +56,22 @@ fn insert_only_for<C: Cache<u64, u64>>(
 
 fn bench_insert_only(c: &mut Criterion) {
     let mut group = quick_group(c, "insert_only");
+    let caps: Vec<usize> = CAP_RATIOS
+        .iter()
+        .map(|r| ((N_KEYS as f64) * r).round() as usize)
+        .collect();
     for &skew in SKEWS {
-        for &cap in CAPS {
-            let trace: Vec<u64> = ZipfGen::new(skew, ZIPF_KEYS, SEED).take(TRACE_LEN).collect();
-            group.throughput(Throughput::Elements(trace.len() as u64));
+        let trace: Vec<u64> = ZipfGen::new(skew, N_KEYS, SEED).take(TRACE_LEN).collect();
+        group.throughput(Throughput::Elements(trace.len() as u64));
+        for &cap in &caps {
             insert_only_for::<Orig<u64, u64>>(&mut group, "orig", skew, cap, &trace);
             insert_only_for::<V0<u64, u64>>(&mut group, "v0", skew, cap, &trace);
+            insert_only_for::<V1<u64, u64>>(&mut group, "v1", skew, cap, &trace);
+            insert_only_for::<V2<u64, u64>>(&mut group, "v2", skew, cap, &trace);
         }
     }
     group.finish();
 }
 
-#[derive(Clone, Copy)]
-enum Op {
-    Get(u64),
-    Insert(u64),
-}
-
-/// 80% get / 20% insert を seed 固定で事前展開。RNG コストを計測対象から除外。
-fn make_mixed_ops(skew: f64, n: usize, get_ratio: f64) -> Vec<Op> {
-    use rand::RngExt;
-    let mut rng = StdRng::seed_from_u64(SEED ^ 0xA5A5);
-    ZipfGen::new(skew, ZIPF_KEYS, SEED)
-        .take(n)
-        .map(|k| {
-            if rng.random::<f64>() < get_ratio {
-                Op::Get(k)
-            } else {
-                Op::Insert(k)
-            }
-        })
-        .collect()
-}
-
-fn mixed_for<C: Cache<u64, u64>>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    label: &str,
-    skew: f64,
-    cap: usize,
-    ops: &[Op],
-) {
-    group.bench_with_input(
-        BenchmarkId::new(format!("{label}/skew{skew}"), cap),
-        &(cap, ops),
-        |b, (cap, ops)| {
-            b.iter_batched(
-                || C::new(*cap),
-                |mut c| {
-                    for op in *ops {
-                        match *op {
-                            Op::Get(k) => {
-                                let _ = c.get(black_box(&k));
-                            }
-                            Op::Insert(k) => {
-                                let _ = c.insert(black_box(k), k);
-                            }
-                        }
-                    }
-                },
-                BatchSize::LargeInput,
-            )
-        },
-    );
-}
-
-fn bench_mixed(c: &mut Criterion) {
-    let mut group = quick_group(c, "mixed_80r_20w");
-    for &skew in SKEWS {
-        for &cap in CAPS {
-            let ops = make_mixed_ops(skew, TRACE_LEN, 0.8);
-            group.throughput(Throughput::Elements(ops.len() as u64));
-            mixed_for::<Orig<u64, u64>>(&mut group, "orig", skew, cap, &ops);
-            mixed_for::<V0<u64, u64>>(&mut group, "v0", skew, cap, &ops);
-        }
-    }
-    group.finish();
-}
-
-criterion_group!(benches, bench_insert_only, bench_mixed);
+criterion_group!(benches, bench_insert_only);
 criterion_main!(benches);

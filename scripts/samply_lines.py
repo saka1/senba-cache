@@ -8,7 +8,7 @@
 import json, sys, subprocess, collections, shutil, os
 
 BIN = "target/release/deps/micro-d82976a2858802c6"
-TARGETS = ["sieve_v0.rs", "sieve_orig.rs"]
+TARGETS = ["sieve_v0.rs", "sieve_v1.rs", "sieve_v2.rs", "sieve_orig.rs"]
 
 def addr2line_batch(binary, addrs):
     """{addr: [(fn, file, line), ...]}  inline 階層も含む。"""
@@ -134,8 +134,9 @@ def analyze(prof_path, binary, label):
 
 def main():
     cases = [
-        ("profiles/v0_worst.json", "v0 (insert_only/skew1.05/16384)"),
-        ("profiles/orig_worst.json", "orig (insert_only/skew1.05/16384)"),
+        ("profiles/orig_worst.json", "orig (insert_only/skew1/10000)"),
+        ("profiles/v0_worst.json", "v0   (insert_only/skew1/10000)"),
+        ("profiles/v2_worst.json", "v2   (insert_only/skew1/10000)"),
     ]
     results = []
     for path, label in cases:
