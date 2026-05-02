@@ -1,0 +1,3 @@
+[submodule "external/NSDI24-SIEVE"]
+	path = external/NSDI24-SIEVE
+	url = https://github.com/cacheMon/NSDI24-SIEVE.git
