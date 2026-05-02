@@ -1,8 +1,7 @@
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use std::hint::black_box;
 use senba_cache::Cache;
 use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v0::SieveCache as V0;
@@ -59,7 +58,7 @@ enum Op {
 
 /// 80% get / 20% insert を seed 固定で事前展開。RNG コストを計測対象から除外。
 fn make_mixed_ops(skew: f64, n: usize, get_ratio: f64) -> Vec<Op> {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = StdRng::seed_from_u64(SEED ^ 0xA5A5);
     ZipfGen::new(skew, ZIPF_KEYS, SEED)
         .take(n)
