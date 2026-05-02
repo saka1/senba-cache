@@ -245,6 +245,30 @@ where
     }   
 }
 
+impl<K, V> crate::Cache<K, V> for SieveCache<K, V>
+where
+    K: std::hash::Hash + Eq + Clone,
+{
+    fn new(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn get(&mut self, key: &K) -> Option<&V> {
+        self.get(key)
+    }
+    fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
+        self.insert(key, value)
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.contains_key(key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
