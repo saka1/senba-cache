@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod hash;
 pub mod sieve_orig;
 pub mod sieve_v0;
 pub mod sieve_v1;

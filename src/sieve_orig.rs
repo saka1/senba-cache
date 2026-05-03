@@ -13,6 +13,7 @@
 //!   「値そのものに NULL 情報が乗る」という C ポインタの性質に近く、
 //!   かつ 4B/リンクで詰められる。
 
+use crate::hash::Xxh3Build;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -30,7 +31,7 @@ struct Node<K, V> {
 
 pub struct SieveCache<K, V> {
     capacity: usize,
-    index: HashMap<K, NodeId>,
+    index: HashMap<K, NodeId, Xxh3Build>,
     nodes: Vec<Option<Node<K, V>>>,
     free_list: Vec<NodeId>,
     head: NodeId, // NIL when list is empty
@@ -47,7 +48,7 @@ where
         assert!(capacity > 0, "capacity must be > 0");
         Self {
             capacity,
-            index: HashMap::with_capacity(capacity),
+            index: HashMap::with_capacity_and_hasher(capacity, Xxh3Build),
             nodes: Vec::with_capacity(capacity),
             free_list: Vec::new(),
             head: NIL,

@@ -31,45 +31,10 @@
 //!   外部 Map を持たないので Map 書き換えコストが構造的にゼロ。
 
 use std::hash::{Hash, Hasher};
+use xxhash_rust::xxh3::Xxh3;
 
 /// `tags[i] == EMPTY` のとき slot は dead/empty。
 const EMPTY: u8 = 0;
-
-/// FxHash 風の弱いハッシャ。tag は 8-bit の rough filter で false-match は内側の
-/// key 等価で必ず弾けるので、SipHash の暗号的強度は不要。`u64` キーなら
-/// ~3-5ns / op で済み、SipHash の ~15-20ns / op に比べ hot path が大幅に縮む。
-#[derive(Default)]
-struct FxHasher(u64);
-
-const FX_ROT: u32 = 5;
-const FX_SEED: u64 = 0x517c_c1b7_2722_0a95;
-
-impl Hasher for FxHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.0;
-        for &b in bytes {
-            h = (h.rotate_left(FX_ROT) ^ b as u64).wrapping_mul(FX_SEED);
-        }
-        self.0 = h;
-    }
-    #[inline]
-    fn write_u64(&mut self, n: u64) {
-        self.0 = (self.0.rotate_left(FX_ROT) ^ n).wrapping_mul(FX_SEED);
-    }
-    #[inline]
-    fn write_u32(&mut self, n: u32) {
-        self.write_u64(n as u64);
-    }
-    #[inline]
-    fn write_usize(&mut self, n: usize) {
-        self.write_u64(n as u64);
-    }
-}
 
 #[derive(Debug)]
 struct Entry<K, V> {
@@ -176,7 +141,9 @@ where
 
     #[inline]
     fn tag_of(&self, key: &K) -> u8 {
-        let mut h = FxHasher::default();
+        // 全 variant で hash 戦略を XXH3 に揃える (NSDI'24 リファレンス C 実装と同じ)。
+        // tag は 8-bit の rough filter で false-match は内側の key 等価で必ず弾ける。
+        let mut h = Xxh3::new();
         key.hash(&mut h);
         let raw = h.finish();
         // 上位 8-bit を取り、最上位ビットを立てて live (= != EMPTY) を保証。
@@ -203,13 +170,11 @@ where
     fn find_scalar(&self, key: &K, tag: u8) -> Option<usize> {
         let tags = &self.tags[..self.tail];
         for (i, &t) in tags.iter().enumerate() {
-            if t == tag {
-                if let Some(e) = self.entries[i].as_ref() {
-                    if &e.key == key {
+            if t == tag
+                && let Some(e) = self.entries[i].as_ref()
+                    && &e.key == key {
                         return Some(i);
                     }
-                }
-            }
         }
         None
     }
@@ -239,11 +204,10 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let pos = i + bit;
                 // SAFETY: pos < limit == self.entries.len()。
-                if let Some(e) = unsafe { &*entries_ptr.add(pos) }.as_ref() {
-                    if &e.key == key {
+                if let Some(e) = unsafe { &*entries_ptr.add(pos) }.as_ref()
+                    && &e.key == key {
                         return Some(pos);
                     }
-                }
                 mask &= mask - 1;
             }
             i += 32;

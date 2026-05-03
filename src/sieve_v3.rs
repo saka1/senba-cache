@@ -7,12 +7,15 @@
 //! steady state (ほぼ全 visited) では word 読みが 2 倍になっていた。
 //!
 //! v3 では `find_victim_in_range` を拡張し、同一スイープ中に
-//!   - `!combined` の最初の qpos (=即 victim)
-//!   - `!tombstone` の最初の qpos (=visited 全消し後の victim 候補)
+//!
+//! - `!combined` の最初の qpos (=即 victim)
+//! - `!tombstone` の最初の qpos (=visited 全消し後の victim 候補)
+//!
 //! を同時に記録する。これで pass 3+4 を畳んで最大 2 パスで終わる。
 //!
 //! `order` の `Option` は v2 と同じ理由で外す: tombstone bitmap が同じ情報を持つ。
 
+use crate::hash::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;
@@ -24,7 +27,7 @@ struct BitSet {
 
 impl BitSet {
     fn new(nbits: usize) -> Self {
-        let num_words = (nbits + 63) / 64;
+        let num_words = nbits.div_ceil(64);
         Self {
             words: vec![0; num_words],
         }
@@ -73,7 +76,7 @@ struct Entry<K, V> {
 
 pub struct SieveCache<K, V> {
     capacity: usize,
-    index: HashMap<K, EntryId>,
+    index: HashMap<K, EntryId, Xxh3Build>,
 
     entries: Vec<Option<Entry<K, V>>>,
     free_list: Vec<EntryId>,
@@ -108,7 +111,7 @@ where
         let order_cap = capacity * 2;
         Self {
             capacity,
-            index: HashMap::with_capacity(capacity),
+            index: HashMap::with_capacity_and_hasher(capacity, Xxh3Build),
             entries: Vec::with_capacity(capacity),
             free_list: Vec::new(),
 
@@ -129,6 +132,10 @@ where
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
@@ -191,8 +198,10 @@ where
     }
 
     /// `[lo, hi)` を qpos 昇順にスイープし:
-    ///   - `!combined` (visited=0 かつ tombstone=0) の最初の qpos を `victim` に
-    ///   - `!tombstone` の最初の qpos を `first_live` に
+    ///
+    /// - `!combined` (visited=0 かつ tombstone=0) の最初の qpos を `victim` に
+    /// - `!tombstone` の最初の qpos を `first_live` に
+    ///
     /// それぞれ記録する。`victim` が見つかったら、その qpos より前の visited は
     /// word 単位で 0 にクリアされた状態でリターンする。`victim` が見つからな
     /// かった場合 (= 範囲内すべて visited か tombstone) は、範囲全体の visited

@@ -1,3 +1,4 @@
+use crate::hash::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;
@@ -9,7 +10,7 @@ struct BitSet {
 
 impl BitSet {
     fn new(nbits: usize) -> Self {
-        let num_words = (nbits + 63) / 64;
+        let num_words = nbits.div_ceil(64);
         Self {
             words: vec![0; num_words],
         }
@@ -46,7 +47,7 @@ struct Entry<K, V> {
 
 pub struct SieveCache<K, V> {
     capacity: usize,
-    index: HashMap<K, EntryId>,
+    index: HashMap<K, EntryId, Xxh3Build>,
 
     entries: Vec<Option<Entry<K, V>>>,
     free_list: Vec<EntryId>,
@@ -70,7 +71,7 @@ where
         let order_cap = capacity * 2;
         Self {
             capacity,
-            index: HashMap::with_capacity(capacity),
+            index: HashMap::with_capacity_and_hasher(capacity, Xxh3Build),
             entries: Vec::with_capacity(capacity),
             free_list: Vec::new(),
 
@@ -91,6 +92,10 @@ where
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
