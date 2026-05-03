@@ -8,7 +8,7 @@
 import json, sys, subprocess, collections, shutil, os
 
 BIN = "target/release/deps/micro-d82976a2858802c6"
-TARGETS = ["sieve_v0.rs", "sieve_v1.rs", "sieve_v2.rs", "sieve_orig.rs"]
+TARGETS = ["sieve_v0.rs", "sieve_v1.rs", "sieve_v2.rs", "sieve_v3.rs", "sieve_orig.rs"]
 
 def addr2line_batch(binary, addrs):
     """{addr: [(fn, file, line), ...]}  inline 階層も含む。"""
@@ -133,11 +133,24 @@ def analyze(prof_path, binary, label):
     return total, by_cat, dict(self_in_chain)
 
 def main():
-    cases = [
-        ("profiles/orig_worst.json", "orig (insert_only/skew1/10000)"),
-        ("profiles/v0_worst.json", "v0   (insert_only/skew1/10000)"),
-        ("profiles/v2_worst.json", "v2   (insert_only/skew1/10000)"),
-    ]
+    # CLI: scripts/samply_lines.py [profile.json[:label] ...]
+    # Default: compare orig/v1/v2/v3 at insert_only/skew1/cap10000.
+    if len(sys.argv) > 1:
+        cases = []
+        for arg in sys.argv[1:]:
+            if ":" in arg:
+                p, label = arg.split(":", 1)
+            else:
+                p = arg
+                label = os.path.basename(arg).replace(".json", "")
+            cases.append((p, label))
+    else:
+        cases = [
+            ("profiles/orig_skew1_cap10000.json", "orig (skew1/cap10000)"),
+            ("profiles/v1_skew1_cap10000.json",   "v1   (skew1/cap10000)"),
+            ("profiles/v2_skew1_cap10000.json",   "v2   (skew1/cap10000)"),
+            ("profiles/v3_skew1_cap10000.json",   "v3   (skew1/cap10000)"),
+        ]
     results = []
     for path, label in cases:
         results.append((label, *analyze(path, BIN, label)))
