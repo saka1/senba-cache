@@ -3,7 +3,7 @@
 
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
-use senba_cache::{Cache, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
+use senba_cache::{Cache, sieve_j3, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
 
 fn run<C: Cache<u64, u64>>(
     trace: impl Iterator<Item = u64>,
@@ -242,5 +242,45 @@ fn v3_matches_orig_on_bundled_zipf() {
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let v3 = run::<sieve_v3::SieveCache<u64, u64>>(trace_b, cap);
         assert_eviction_streams_eq(&orig, &v3, &format!("v3 bundled cap={cap}"));
+    }
+}
+
+// j3 (= 1 セグメント、外部 HashMap なし、tag 並列配列) が
+// 同じ trace で sieve_orig と完全に同じ evict 列を出すことを検証する。
+// J3 は SIEVE 意味論を完全に保持する設計なので、minimal repro / Zipf / bundled
+// のいずれでも oracle と一致しなければならない。
+#[test]
+fn j3_matches_orig_on_minimal_repro() {
+    let trace: Vec<u64> = vec![1, 2, 3, 1, 2, 4, 5];
+    let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    let j3 = run::<sieve_j3::SieveCache<u64, u64>>(trace.iter().copied(), 3);
+    assert_eviction_streams_eq(&orig, &j3, "minimal repro (j3)");
+}
+
+#[test]
+fn j3_matches_orig_on_synthetic_zipf() {
+    for &(skew, cap) in &[
+        (1.05_f64, 64usize),
+        (1.1, 128),
+        (1.2, 256),
+        (1.5, 1024),
+    ] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let j3 = run::<sieve_j3::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &j3, &format!("j3 vs orig zipf skew={skew} cap={cap}"));
+    }
+}
+
+#[test]
+fn j3_matches_orig_on_bundled_zipf() {
+    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    for &cap in &[256usize, 1024, 4096] {
+        let trace_a = file::from_path(path).unwrap().take(100_000);
+        let trace_b = file::from_path(path).unwrap().take(100_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let j3 = run::<sieve_j3::SieveCache<u64, u64>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &j3, &format!("j3 bundled cap={cap}"));
     }
 }

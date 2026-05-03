@@ -1,0 +1,444 @@
+{
+  "bench": "insert_only_after_fix",
+  "date": "2026-05-04",
+  "cpu": "Intel i5-12600K (AVX2)",
+  "fixes": [
+    "FxHash for tag",
+    "order_cap rounded to 32",
+    "no scalar tail in find_avx2"
+  ],
+  "results": [
+    {
+      "variant": "orig",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 37.04710125
+    },
+    {
+      "variant": "v0",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 47.158766625
+    },
+    {
+      "variant": "v1",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 46.96210875
+    },
+    {
+      "variant": "v2",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 41.89848175
+    },
+    {
+      "variant": "v3",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 46.3595875
+    },
+    {
+      "variant": "j3",
+      "skew": 0.6,
+      "cap": 100,
+      "median_ms": 19.367564875
+    },
+    {
+      "variant": "orig",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 35.39962
+    },
+    {
+      "variant": "v0",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 42.667552875
+    },
+    {
+      "variant": "v1",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 44.213682375
+    },
+    {
+      "variant": "v2",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 39.54455825
+    },
+    {
+      "variant": "v3",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 42.986657125
+    },
+    {
+      "variant": "j3",
+      "skew": 0.6,
+      "cap": 1000,
+      "median_ms": 63.932702666666664
+    },
+    {
+      "variant": "orig",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 33.5012993
+    },
+    {
+      "variant": "v0",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 43.530617125
+    },
+    {
+      "variant": "v1",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 42.598803375
+    },
+    {
+      "variant": "v2",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 38.82955275
+    },
+    {
+      "variant": "v3",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 41.408415875
+    },
+    {
+      "variant": "j3",
+      "skew": 0.6,
+      "cap": 10000,
+      "median_ms": 644.273084
+    },
+    {
+      "variant": "orig",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 34.8910304
+    },
+    {
+      "variant": "v0",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 44.55001475
+    },
+    {
+      "variant": "v1",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 44.702896375
+    },
+    {
+      "variant": "v2",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 40.68634675
+    },
+    {
+      "variant": "v3",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 43.37921675
+    },
+    {
+      "variant": "j3",
+      "skew": 0.8,
+      "cap": 100,
+      "median_ms": 19.488637041666664
+    },
+    {
+      "variant": "orig",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 31.223405299999996
+    },
+    {
+      "variant": "v0",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 39.2198725
+    },
+    {
+      "variant": "v1",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 38.5022215
+    },
+    {
+      "variant": "v2",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 35.929498099999996
+    },
+    {
+      "variant": "v3",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 38.763508625
+    },
+    {
+      "variant": "j3",
+      "skew": 0.8,
+      "cap": 1000,
+      "median_ms": 59.94242316666667
+    },
+    {
+      "variant": "orig",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 30.1789953
+    },
+    {
+      "variant": "v0",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 41.446949
+    },
+    {
+      "variant": "v1",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 35.3076389
+    },
+    {
+      "variant": "v2",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 34.1703105
+    },
+    {
+      "variant": "v3",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 37.9204653
+    },
+    {
+      "variant": "j3",
+      "skew": 0.8,
+      "cap": 10000,
+      "median_ms": 437.982574
+    },
+    {
+      "variant": "orig",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 32.0274675
+    },
+    {
+      "variant": "v0",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 39.693227625
+    },
+    {
+      "variant": "v1",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 37.677442375
+    },
+    {
+      "variant": "v2",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 35.6601018
+    },
+    {
+      "variant": "v3",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 37.970241900000005
+    },
+    {
+      "variant": "j3",
+      "skew": 1.0,
+      "cap": 100,
+      "median_ms": 19.51684090441176
+    },
+    {
+      "variant": "orig",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 24.72428328125
+    },
+    {
+      "variant": "v0",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 35.2914387
+    },
+    {
+      "variant": "v1",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 30.1232664
+    },
+    {
+      "variant": "v2",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 27.97862234920635
+    },
+    {
+      "variant": "v3",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 29.769181
+    },
+    {
+      "variant": "j3",
+      "skew": 1.0,
+      "cap": 1000,
+      "median_ms": 46.726612125
+    },
+    {
+      "variant": "orig",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 21.489988044642857
+    },
+    {
+      "variant": "v0",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 32.9991534
+    },
+    {
+      "variant": "v1",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 24.962006595588235
+    },
+    {
+      "variant": "v2",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 23.78262042857143
+    },
+    {
+      "variant": "v3",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 24.44361802631579
+    },
+    {
+      "variant": "j3",
+      "skew": 1.0,
+      "cap": 10000,
+      "median_ms": 250.943749
+    },
+    {
+      "variant": "orig",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 22.647065338345865
+    },
+    {
+      "variant": "v0",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 32.1981745
+    },
+    {
+      "variant": "v1",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 26.14662377142857
+    },
+    {
+      "variant": "v2",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 25.83044013888889
+    },
+    {
+      "variant": "v3",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 26.677319774999997
+    },
+    {
+      "variant": "j3",
+      "skew": 1.2,
+      "cap": 100,
+      "median_ms": 16.621394029411764
+    },
+    {
+      "variant": "orig",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 17.036469878571427
+    },
+    {
+      "variant": "v0",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 25.609727207386364
+    },
+    {
+      "variant": "v1",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 19.05253036607143
+    },
+    {
+      "variant": "v2",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 18.225799005050504
+    },
+    {
+      "variant": "v3",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 19.209988150735295
+    },
+    {
+      "variant": "j3",
+      "skew": 1.2,
+      "cap": 1000,
+      "median_ms": 31.614246100000003
+    },
+    {
+      "variant": "orig",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 16.974767270833336
+    },
+    {
+      "variant": "v0",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 20.810324194852942
+    },
+    {
+      "variant": "v1",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 16.649943805555555
+    },
+    {
+      "variant": "v2",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 16.710924192307694
+    },
+    {
+      "variant": "v3",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 17.148359214285716
+    },
+    {
+      "variant": "j3",
+      "skew": 1.2,
+      "cap": 10000,
+      "median_ms": 102.232079
+    }
+  ]
+}
