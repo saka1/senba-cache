@@ -8,35 +8,34 @@
 //! ## レイアウト
 //!
 //! ```text
-//! tags:    [u8;   N]   // 並列配列、0 = dead/empty、0x80..=0xFF = live tag
-//! entries: [Opt;  N]   // 並列配列、live slot のみ Some(Entry)
+//! tags:    [u8;            N]   // 0 = dead/empty、0x80..=0xFF = live tag
+//! entries: [MaybeUninit;   N]   // tags[i] != EMPTY のときだけ初期化済み
 //! ```
 //!
 //! - `N = order_cap = 2 * capacity` (compaction が走るまでの dead 比率上限 ~50%)
-//! - tag は `(hash >> 56) | 0x80` で 7-bit、SwissTable と同じ流儀。
-//! - 0 を sentinel に使い、live tag は最上位ビット必ず 1 — 1 命令の non-zero 判定で
-//!   「live か?」が分かり、SIMD broadcast 比較とも素直に共存する。
-//! - `Entry { key, value, visited: bool }` で visited は **inline**。hit-path が
-//!   別 cache line を踏まないようにするため (B1 の主張をそのまま採用)。
+//! - tag は `(hash >> 56) | 0x80` の 7-bit、SwissTable と同じ流儀。
+//! - **tag 配列が init bitmap を兼ねる**: `tags[i] == EMPTY` ⟺ `entries[i]` は
+//!   未初期化。Option を別に持つと不変条件が二重化されるので持たない。
+//! - `Entry { key, value, visited: bool }` で visited は **inline** (hit-path が
+//!   別 cache line を踏まない、B1 の主張)。
 //!
 //! ## アルゴリズム
 //!
-//! - lookup: tags を `[0, tail)` 線形スキャン。`tags[i] == tag` を満たす i で
-//!   `entries[i].key == key` を確認。LLVM が auto-vectorize して `vpcmpeqb` を
-//!   出すことを期待し、明示 SIMD は書かない (cap=100 なら scan は数 word)。
-//! - SIEVE 意味論: 配列順 = 挿入順、`hand` は配列を 0 → tail → 0 に walk。
-//!   v3 と同じ「2 パス + first_live フォールバック」で oracle (sieve_orig) と
-//!   evict 列が一致する。
-//! - compaction: `tail == order_cap` または `dead >= len` で全 live を左詰め。
-//!   外部 Map を持たないので Map 書き換えコストが構造的にゼロ。
+//! - lookup: tags を `[0, tail)` 線形スキャン。x86_64+AVX2 では `vpcmpeqb` +
+//!   `vpmovmskb` を明示。tag マッチで内側 key 等価を確認 (false-match ≈ 1/128)。
+//! - SIEVE 意味論: 配列順 = 挿入順、`hand` を 0 → tail → 0 に walk。v3 と同じ
+//!   「2 パス + first_live フォールバック」で oracle (sieve_orig) と evict 列が一致。
+//! - compaction: `tail == order_cap` で全 live を左詰め。`dead = tail - len`、
+//!   `order_cap = 2*capacity` なので「dead 比率 50%」も同タイミングで自動到達。
+//!   別カウンタは持たない。
 
-use std::hash::{Hash, Hasher};
-use xxhash_rust::xxh3::Xxh3;
+use crate::hash::Xxh3Build;
+use std::hash::{BuildHasher, Hash};
+use std::mem::MaybeUninit;
 
-/// `tags[i] == EMPTY` のとき slot は dead/empty。
+/// `tags[i] == EMPTY` のとき slot は dead/uninit。
 const EMPTY: u8 = 0;
 
-#[derive(Debug)]
 struct Entry<K, V> {
     key: K,
     value: V,
@@ -46,15 +45,18 @@ struct Entry<K, V> {
 pub struct SieveCache<K, V> {
     capacity: usize,
 
-    /// 並列配列 #1: live tag (0x80..=0xFF) または EMPTY (0)。
+    /// 並列配列 #1: live tag (0x80..=0xFF) または EMPTY (0)。init bitmap も兼ねる。
     tags: Vec<u8>,
-    /// 並列配列 #2: live slot のみ Some。
-    entries: Vec<Option<Entry<K, V>>>,
+    /// 並列配列 #2: `tags[i] != EMPTY` のときだけ初期化済み。
+    entries: Vec<MaybeUninit<Entry<K, V>>>,
 
     tail: usize, // 次の挿入位置 (= 物理 watermark)
     hand: usize, // SIEVE hand。tail を超えていたら 0 にラップ。
     len: usize,
-    dead: usize,
+
+    /// 全 variant 共通の BuildHasher (XXH3 統一、`src/hash.rs` 参照)。
+    /// 型情報をデータ構造側に持たせて hash 戦略を局所化する。
+    hasher: Xxh3Build,
 }
 
 impl<K, V> SieveCache<K, V>
@@ -70,7 +72,7 @@ where
         let raw = capacity.checked_mul(2).expect("capacity * 2 overflow");
         let order_cap = ((raw + 31) & !31).max(32);
         let mut entries = Vec::with_capacity(order_cap);
-        entries.resize_with(order_cap, || None);
+        entries.resize_with(order_cap, MaybeUninit::uninit);
         Self {
             capacity,
             tags: vec![EMPTY; order_cap],
@@ -78,7 +80,7 @@ where
             tail: 0,
             hand: 0,
             len: 0,
-            dead: 0,
+            hasher: Xxh3Build,
         }
     }
 
@@ -102,7 +104,8 @@ where
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let tag = self.tag_of(key);
         let pos = self.find(key, tag)?;
-        let entry = self.entries[pos].as_mut().expect("live tag implies Some");
+        // SAFETY: find は tags[pos] != EMPTY を確認した位置のみ返すので init 済み。
+        let entry = unsafe { self.entries[pos].assume_init_mut() };
         entry.visited = true;
         Some(&entry.value)
     }
@@ -110,7 +113,8 @@ where
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let tag = self.tag_of(&key);
         if let Some(pos) = self.find(&key, tag) {
-            let entry = self.entries[pos].as_mut().expect("live tag implies Some");
+            // SAFETY: find が tags[pos] != EMPTY を保証。
+            let entry = unsafe { self.entries[pos].assume_init_mut() };
             entry.value = value;
             entry.visited = true;
             return None;
@@ -122,12 +126,16 @@ where
             None
         };
 
-        self.maybe_compact();
+        if self.tail == self.tags.len() {
+            self.compact();
+        }
 
         let pos = self.tail;
         self.tail += 1;
         self.tags[pos] = tag;
-        self.entries[pos] = Some(Entry {
+        // SAFETY: tags[pos] は直前まで EMPTY だった (= entries[pos] は uninit)。
+        // write は drop せず上書きなので二重 drop しない。
+        self.entries[pos].write(Entry {
             key,
             value,
             visited: false,
@@ -142,12 +150,9 @@ where
     #[inline]
     fn tag_of(&self, key: &K) -> u8 {
         // 全 variant で hash 戦略を XXH3 に揃える (NSDI'24 リファレンス C 実装と同じ)。
-        // tag は 8-bit の rough filter で false-match は内側の key 等価で必ず弾ける。
-        let mut h = Xxh3::new();
-        key.hash(&mut h);
-        let raw = h.finish();
+        // tag は 8-bit の rough filter で、false-match は内側の key 等価で必ず弾ける。
         // 上位 8-bit を取り、最上位ビットを立てて live (= != EMPTY) を保証。
-        ((raw >> 56) as u8) | 0x80
+        ((self.hasher.hash_one(key) >> 56) as u8) | 0x80
     }
 
     /// `[0, tail)` を線形スキャンして key にマッチする slot を返す。
@@ -168,13 +173,14 @@ where
 
     #[inline]
     fn find_scalar(&self, key: &K, tag: u8) -> Option<usize> {
-        let tags = &self.tags[..self.tail];
-        for (i, &t) in tags.iter().enumerate() {
-            if t == tag
-                && let Some(e) = self.entries[i].as_ref()
-                    && &e.key == key {
-                        return Some(i);
-                    }
+        for (i, &t) in self.tags[..self.tail].iter().enumerate() {
+            if t == tag {
+                // SAFETY: tags[i] != EMPTY なので entries[i] は init 済み。
+                let e = unsafe { self.entries[i].assume_init_ref() };
+                if &e.key == key {
+                    return Some(i);
+                }
+            }
         }
         None
     }
@@ -184,8 +190,6 @@ where
     /// `order_cap` を 32 の倍数に丸めてあるので **scalar 末尾なし** で走り切れる。
     /// tail を超えた位置は `tags[i] == EMPTY (= 0)` で live tag (>= 0x80) と
     /// マッチし得ないため、tail を超えた SIMD ロードは false-match を起こさない。
-    /// 万一の保険として、内側の Option 検査が None を返したら次の候補へ進む
-    /// (entries[pos] for pos>=tail は常に None)。
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn find_avx2(&self, key: &K, tag: u8) -> Option<usize> {
@@ -203,11 +207,12 @@ where
             while mask != 0 {
                 let bit = mask.trailing_zeros() as usize;
                 let pos = i + bit;
-                // SAFETY: pos < limit == self.entries.len()。
-                if let Some(e) = unsafe { &*entries_ptr.add(pos) }.as_ref()
-                    && &e.key == key {
-                        return Some(pos);
-                    }
+                // SAFETY: SIMD マッチは tag != 0 を確認済み (live tag は >= 0x80)。
+                // tags[pos] != EMPTY なので entries[pos] は init 済み。
+                let e = unsafe { (*entries_ptr.add(pos)).assume_init_ref() };
+                if &e.key == key {
+                    return Some(pos);
+                }
                 mask &= mask - 1;
             }
             i += 32;
@@ -240,14 +245,15 @@ where
     }
 
     /// `[lo, hi)` を順に walk: visited を倒しつつ、最初の visited=0 な live slot
-    /// を返す。tombstone (tags[i] == 0) はスキップ。
+    /// を返す。tombstone (tags[i] == EMPTY) はスキップ。
     fn scan_evict(&mut self, lo: usize, hi: usize) -> Option<usize> {
         debug_assert!(lo <= hi && hi <= self.tail);
         for i in lo..hi {
             if self.tags[i] == EMPTY {
                 continue;
             }
-            let entry = self.entries[i].as_mut().expect("live tag implies Some");
+            // SAFETY: tags[i] != EMPTY なので entries[i] は init 済み。
+            let entry = unsafe { self.entries[i].assume_init_mut() };
             if entry.visited {
                 entry.visited = false;
             } else {
@@ -264,21 +270,16 @@ where
     }
 
     fn do_evict(&mut self, pos: usize) -> (K, V) {
-        let entry = self.entries[pos].take().expect("victim slot must be live");
+        debug_assert!(self.tags[pos] != EMPTY);
+        // SAFETY: tags[pos] != EMPTY なので init 済み。read 後は uninit 扱い。
+        let entry = unsafe { self.entries[pos].assume_init_read() };
         self.tags[pos] = EMPTY;
-        self.dead += 1;
         self.len -= 1;
         self.hand = pos + 1;
         if self.hand >= self.tail {
             self.hand = 0;
         }
         (entry.key, entry.value)
-    }
-
-    fn maybe_compact(&mut self) {
-        if self.tail == self.tags.len() || self.dead >= self.len.max(1) {
-            self.compact();
-        }
     }
 
     /// 全 live を左詰め。tags / entries を物理移動するのみで、外部 Map が
@@ -297,25 +298,42 @@ where
                 new_hand = Some(write);
             }
             if write != old_pos {
+                // SAFETY: tags[old_pos] != EMPTY なので entries[old_pos] は init。
+                // entries[write] は (write < old_pos かつ write..old_pos の間に
+                // 直前にスキップした EMPTY slot か上書き済み slot しかない)
+                // ので、ここは uninit 扱いで write に直接書く。
+                // tags[old_pos] は次のループで EMPTY 化する必要はない:
+                // self.tail = write 後の Drop は tags[..write] しか見ないため。
+                let v = unsafe { self.entries[old_pos].assume_init_read() };
+                self.entries[write].write(v);
                 self.tags[write] = self.tags[old_pos];
-                self.entries[write] = self.entries[old_pos].take();
             }
             write += 1;
         }
-        // 末尾の残骸 (旧 dead slot や移動元) を一掃。
-        for i in write..old_tail {
-            self.tags[i] = EMPTY;
-            self.entries[i] = None;
+        // 末尾の残骸 tag を一掃 (entries 側は logically uninit のまま放置で OK)。
+        for t in &mut self.tags[write..old_tail] {
+            *t = EMPTY;
         }
 
         self.tail = write;
-        self.dead = 0;
         self.hand = if self.len == 0 {
             0
         } else {
             new_hand.unwrap_or(0)
         };
         debug_assert_eq!(self.len, write);
+    }
+}
+
+impl<K, V> Drop for SieveCache<K, V> {
+    fn drop(&mut self) {
+        // tags が init bitmap。live slot だけ手で drop する。
+        for i in 0..self.tail {
+            if self.tags[i] != EMPTY {
+                // SAFETY: tags[i] != EMPTY ⟹ entries[i] は init 済み。
+                unsafe { self.entries[i].assume_init_drop() };
+            }
+        }
     }
 }
 
@@ -465,8 +483,7 @@ mod tests {
     // ---- J3 固有: tag 衝突パターン ----
 
     /// 2 つの異なる key が **同じ tag** を持っても、key 等価チェックで分離されること。
-    /// RandomState seed は実行ごとに変わるので、たくさんの key を入れて衝突を起こす確率
-    /// で攻める (1/128 衝突率なので 1000 個入れれば確実に複数ペアが同じ tag に落ちる)。
+    /// 1024 個入れれば 1/128 衝突率で複数ペアが確実に同じ tag に落ちる。
     #[test]
     fn distinct_keys_with_same_tag_are_separated() {
         let n: u64 = 1024;
@@ -489,5 +506,19 @@ mod tests {
             let _ = cache.insert(k, k);
         }
         assert!(cache.len() <= 3);
+    }
+
+    /// Drop が live slot のみ走ることの間接検証。Vec<String> を入れて leak しないこと
+    /// (miri / sanitizer なしでは valgrind 相当の検出はできないが、少なくとも
+    /// double-free / panic は起きないこと)。
+    #[test]
+    fn drop_runs_for_live_entries_only() {
+        let mut cache: SieveCache<u64, String> = SieveCache::new(4);
+        for k in 0..16u64 {
+            cache.insert(k, format!("value-{k}"));
+        }
+        // 容量超過で 12 個 evict 済み、4 個 live が残っている。
+        assert_eq!(cache.len(), 4);
+        // ここで cache が drop され、残り 4 entries の String が解放される。
     }
 }

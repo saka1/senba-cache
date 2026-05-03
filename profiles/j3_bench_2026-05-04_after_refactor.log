@@ -1,0 +1,475 @@
+   Compiling senba-cache v0.1.0 (/home/saka1/repos/senba-cache)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1.34s
+     Running benches/micro.rs (target/release/deps/micro-d7a00c2c1f67c90c)
+Benchmarking insert_only/orig/skew0.6/100
+Benchmarking insert_only/orig/skew0.6/100: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.6/100: Collecting 20 samples in estimated 3.6903 s (100 iterations)
+Benchmarking insert_only/orig/skew0.6/100: Analyzing
+insert_only/orig/skew0.6/100
+                        time:   [36.876 ms 37.180 ms 37.540 ms]
+                        thrpt:  [26.638 Melem/s 26.896 Melem/s 27.118 Melem/s]
+                 change:
+                        time:   [−4.6080% −3.6557% −2.6135%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.6836% +3.7944% +4.8305%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking insert_only/v3/skew0.6/100
+Benchmarking insert_only/v3/skew0.6/100: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.6/100: Collecting 20 samples in estimated 3.9742 s (80 iterations)
+Benchmarking insert_only/v3/skew0.6/100: Analyzing
+insert_only/v3/skew0.6/100
+                        time:   [50.270 ms 50.699 ms 51.109 ms]
+                        thrpt:  [19.566 Melem/s 19.724 Melem/s 19.893 Melem/s]
+                 change:
+                        time:   [+6.1975% +8.0255% +9.4939%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.6707% −7.4292% −5.8358%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking insert_only/j3/skew0.6/100
+Benchmarking insert_only/j3/skew0.6/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.2s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew0.6/100: Collecting 20 samples in estimated 5.2334 s (210 iterations)
+Benchmarking insert_only/j3/skew0.6/100: Analyzing
+insert_only/j3/skew0.6/100
+                        time:   [25.047 ms 25.226 ms 25.413 ms]
+                        thrpt:  [39.351 Melem/s 39.642 Melem/s 39.926 Melem/s]
+                 change:
+                        time:   [−7.4172% −6.6187% −5.7329%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.0815% +7.0878% +8.0114%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/orig/skew0.6/1000
+Benchmarking insert_only/orig/skew0.6/1000: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.6/1000: Collecting 20 samples in estimated 3.1675 s (80 iterations)
+Benchmarking insert_only/orig/skew0.6/1000: Analyzing
+insert_only/orig/skew0.6/1000
+                        time:   [39.200 ms 39.439 ms 39.700 ms]
+                        thrpt:  [25.189 Melem/s 25.356 Melem/s 25.510 Melem/s]
+                 change:
+                        time:   [−7.2805% −6.5772% −5.8103%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.1688% +7.0403% +7.8522%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew0.6/1000
+Benchmarking insert_only/v3/skew0.6/1000: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.6/1000: Collecting 20 samples in estimated 3.0716 s (60 iterations)
+Benchmarking insert_only/v3/skew0.6/1000: Analyzing
+insert_only/v3/skew0.6/1000
+                        time:   [50.228 ms 50.449 ms 50.695 ms]
+                        thrpt:  [19.726 Melem/s 19.822 Melem/s 19.909 Melem/s]
+                 change:
+                        time:   [+3.0819% +3.7235% +4.3281%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.1486% −3.5898% −2.9898%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/j3/skew0.6/1000
+Benchmarking insert_only/j3/skew0.6/1000: Warming up for 500.00 ms
+Benchmarking insert_only/j3/skew0.6/1000: Collecting 20 samples in estimated 4.3288 s (60 iterations)
+Benchmarking insert_only/j3/skew0.6/1000: Analyzing
+insert_only/j3/skew0.6/1000
+                        time:   [71.942 ms 72.642 ms 73.356 ms]
+                        thrpt:  [13.632 Melem/s 13.766 Melem/s 13.900 Melem/s]
+                 change:
+                        time:   [−1.8767% −0.8955% +0.0516%] (p = 0.10 > 0.05)
+                        thrpt:  [−0.0516% +0.9036% +1.9126%]
+                        No change in performance detected.
+Benchmarking insert_only/orig/skew0.6/10000
+Benchmarking insert_only/orig/skew0.6/10000: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.6/10000: Collecting 20 samples in estimated 3.4865 s (100 iterations)
+Benchmarking insert_only/orig/skew0.6/10000: Analyzing
+insert_only/orig/skew0.6/10000
+                        time:   [34.251 ms 34.581 ms 34.905 ms]
+                        thrpt:  [28.650 Melem/s 28.918 Melem/s 29.196 Melem/s]
+                 change:
+                        time:   [−1.4383% −0.2747% +0.9183%] (p = 0.67 > 0.05)
+                        thrpt:  [−0.9099% +0.2754% +1.4593%]
+                        No change in performance detected.
+Benchmarking insert_only/v3/skew0.6/10000
+Benchmarking insert_only/v3/skew0.6/10000: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.6/10000: Collecting 20 samples in estimated 3.6049 s (80 iterations)
+Benchmarking insert_only/v3/skew0.6/10000: Analyzing
+insert_only/v3/skew0.6/10000
+                        time:   [44.392 ms 44.682 ms 44.962 ms]
+                        thrpt:  [22.241 Melem/s 22.381 Melem/s 22.527 Melem/s]
+                 change:
+                        time:   [+5.1608% +6.0818% +7.0128%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.5532% −5.7331% −4.9076%]
+                        Performance has regressed.
+Benchmarking insert_only/j3/skew0.6/10000
+Benchmarking insert_only/j3/skew0.6/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 13.2s, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew0.6/10000: Collecting 20 samples in estimated 13.170 s (20 iterations)
+Benchmarking insert_only/j3/skew0.6/10000: Analyzing
+insert_only/j3/skew0.6/10000
+                        time:   [653.03 ms 655.92 ms 659.02 ms]
+                        thrpt:  [1.5174 Melem/s 1.5246 Melem/s 1.5313 Melem/s]
+                 change:
+                        time:   [+7.3889% +8.2158% +9.0505%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.2993% −7.5920% −6.8805%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking insert_only/orig/skew0.8/100
+Benchmarking insert_only/orig/skew0.8/100: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.8/100: Collecting 20 samples in estimated 3.6024 s (100 iterations)
+Benchmarking insert_only/orig/skew0.8/100: Analyzing
+insert_only/orig/skew0.8/100
+                        time:   [35.584 ms 35.760 ms 35.927 ms]
+                        thrpt:  [27.834 Melem/s 27.964 Melem/s 28.103 Melem/s]
+                 change:
+                        time:   [−5.9239% −5.2435% −4.5751%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.7944% +5.5336% +6.2970%]
+                        Performance has improved.
+Benchmarking insert_only/v3/skew0.8/100
+Benchmarking insert_only/v3/skew0.8/100: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.8/100: Collecting 20 samples in estimated 3.7682 s (80 iterations)
+Benchmarking insert_only/v3/skew0.8/100: Analyzing
+insert_only/v3/skew0.8/100
+                        time:   [47.420 ms 47.706 ms 47.988 ms]
+                        thrpt:  [20.839 Melem/s 20.962 Melem/s 21.088 Melem/s]
+                 change:
+                        time:   [+9.9692% +10.700% +11.464%] (p = 0.00 < 0.05)
+                        thrpt:  [−10.285% −9.6656% −9.0655%]
+                        Performance has regressed.
+Benchmarking insert_only/j3/skew0.8/100
+Benchmarking insert_only/j3/skew0.8/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.7s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew0.8/100: Collecting 20 samples in estimated 5.7045 s (210 iterations)
+Benchmarking insert_only/j3/skew0.8/100: Analyzing
+insert_only/j3/skew0.8/100
+                        time:   [26.891 ms 27.034 ms 27.221 ms]
+                        thrpt:  [36.737 Melem/s 36.990 Melem/s 37.187 Melem/s]
+                 change:
+                        time:   [−1.2308% −0.5222% +0.3365%] (p = 0.22 > 0.05)
+                        thrpt:  [−0.3353% +0.5250% +1.2461%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking insert_only/orig/skew0.8/1000
+Benchmarking insert_only/orig/skew0.8/1000: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.8/1000: Collecting 20 samples in estimated 3.2320 s (100 iterations)
+Benchmarking insert_only/orig/skew0.8/1000: Analyzing
+insert_only/orig/skew0.8/1000
+                        time:   [31.648 ms 31.871 ms 32.094 ms]
+                        thrpt:  [31.158 Melem/s 31.376 Melem/s 31.598 Melem/s]
+                 change:
+                        time:   [−2.9385% −1.7684% −0.7001%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.7050% +1.8002% +3.0274%]
+                        Change within noise threshold.
+Benchmarking insert_only/v3/skew0.8/1000
+Benchmarking insert_only/v3/skew0.8/1000: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.8/1000: Collecting 20 samples in estimated 3.2978 s (80 iterations)
+Benchmarking insert_only/v3/skew0.8/1000: Analyzing
+insert_only/v3/skew0.8/1000
+                        time:   [40.699 ms 40.880 ms 41.068 ms]
+                        thrpt:  [24.350 Melem/s 24.462 Melem/s 24.570 Melem/s]
+                 change:
+                        time:   [+0.8226% +1.7535% +2.6185%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5517% −1.7233% −0.8159%]
+                        Change within noise threshold.
+Benchmarking insert_only/j3/skew0.8/1000
+Benchmarking insert_only/j3/skew0.8/1000: Warming up for 500.00 ms
+Benchmarking insert_only/j3/skew0.8/1000: Collecting 20 samples in estimated 3.9754 s (60 iterations)
+Benchmarking insert_only/j3/skew0.8/1000: Analyzing
+insert_only/j3/skew0.8/1000
+                        time:   [65.772 ms 66.218 ms 66.693 ms]
+                        thrpt:  [14.994 Melem/s 15.102 Melem/s 15.204 Melem/s]
+                 change:
+                        time:   [−3.0864% −2.1089% −1.0803%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0921% +2.1543% +3.1847%]
+                        Performance has improved.
+Benchmarking insert_only/orig/skew0.8/10000
+Benchmarking insert_only/orig/skew0.8/10000: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew0.8/10000: Collecting 20 samples in estimated 3.4962 s (120 iterations)
+Benchmarking insert_only/orig/skew0.8/10000: Analyzing
+insert_only/orig/skew0.8/10000
+                        time:   [29.012 ms 29.233 ms 29.464 ms]
+                        thrpt:  [33.939 Melem/s 34.208 Melem/s 34.469 Melem/s]
+                 change:
+                        time:   [−5.9296% −5.1100% −4.2684%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.4587% +5.3852% +6.3034%]
+                        Performance has improved.
+Benchmarking insert_only/v3/skew0.8/10000
+Benchmarking insert_only/v3/skew0.8/10000: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew0.8/10000: Collecting 20 samples in estimated 3.6914 s (100 iterations)
+Benchmarking insert_only/v3/skew0.8/10000: Analyzing
+insert_only/v3/skew0.8/10000
+                        time:   [36.159 ms 36.356 ms 36.567 ms]
+                        thrpt:  [27.347 Melem/s 27.506 Melem/s 27.656 Melem/s]
+                 change:
+                        time:   [−1.7870% −0.2265% +0.9685%] (p = 0.80 > 0.05)
+                        thrpt:  [−0.9592% +0.2270% +1.8195%]
+                        No change in performance detected.
+Benchmarking insert_only/j3/skew0.8/10000
+Benchmarking insert_only/j3/skew0.8/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 10.2s, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew0.8/10000: Collecting 20 samples in estimated 10.155 s (20 iterations)
+Benchmarking insert_only/j3/skew0.8/10000: Analyzing
+insert_only/j3/skew0.8/10000
+                        time:   [510.98 ms 515.13 ms 519.46 ms]
+                        thrpt:  [1.9251 Melem/s 1.9413 Melem/s 1.9570 Melem/s]
+                 change:
+                        time:   [+9.2756% +10.259% +11.347%] (p = 0.00 < 0.05)
+                        thrpt:  [−10.190% −9.3045% −8.4883%]
+                        Performance has regressed.
+Benchmarking insert_only/orig/skew1/100
+Benchmarking insert_only/orig/skew1/100: Warming up for 500.00 ms
+Benchmarking insert_only/orig/skew1/100: Collecting 20 samples in estimated 3.0278 s (100 iterations)
+Benchmarking insert_only/orig/skew1/100: Analyzing
+insert_only/orig/skew1/100
+                        time:   [30.271 ms 30.440 ms 30.607 ms]
+                        thrpt:  [32.673 Melem/s 32.851 Melem/s 33.035 Melem/s]
+                 change:
+                        time:   [−2.3198% −1.5180% −0.7716%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.7776% +1.5414% +2.3749%]
+                        Change within noise threshold.
+Benchmarking insert_only/v3/skew1/100
+Benchmarking insert_only/v3/skew1/100: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew1/100: Collecting 20 samples in estimated 3.1914 s (80 iterations)
+Benchmarking insert_only/v3/skew1/100: Analyzing
+insert_only/v3/skew1/100
+                        time:   [39.587 ms 39.780 ms 39.968 ms]
+                        thrpt:  [25.020 Melem/s 25.138 Melem/s 25.261 Melem/s]
+                 change:
+                        time:   [+4.4699% +5.2913% +6.1032%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.7522% −5.0254% −4.2786%]
+                        Performance has regressed.
+Benchmarking insert_only/j3/skew1/100
+Benchmarking insert_only/j3/skew1/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.6s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew1/100: Collecting 20 samples in estimated 5.5566 s (210 iterations)
+Benchmarking insert_only/j3/skew1/100: Analyzing
+insert_only/j3/skew1/100
+                        time:   [26.508 ms 26.614 ms 26.730 ms]
+                        thrpt:  [37.412 Melem/s 37.574 Melem/s 37.724 Melem/s]
+                 change:
+                        time:   [−6.0735% −5.3052% −4.5543%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.7716% +5.6024% +6.4662%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking insert_only/orig/skew1/1000
+Benchmarking insert_only/orig/skew1/1000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.0s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/orig/skew1/1000: Collecting 20 samples in estimated 5.0057 s (210 iterations)
+Benchmarking insert_only/orig/skew1/1000: Analyzing
+insert_only/orig/skew1/1000
+                        time:   [24.529 ms 24.589 ms 24.648 ms]
+                        thrpt:  [40.572 Melem/s 40.669 Melem/s 40.768 Melem/s]
+                 change:
+                        time:   [−7.1271% −6.4560% −5.8415%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.2039% +6.9016% +7.6740%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew1/1000
+Benchmarking insert_only/v3/skew1/1000: Warming up for 500.00 ms
+Benchmarking insert_only/v3/skew1/1000: Collecting 20 samples in estimated 3.0355 s (100 iterations)
+Benchmarking insert_only/v3/skew1/1000: Analyzing
+insert_only/v3/skew1/1000
+                        time:   [30.206 ms 30.341 ms 30.475 ms]
+                        thrpt:  [32.814 Melem/s 32.959 Melem/s 33.106 Melem/s]
+                 change:
+                        time:   [+4.2114% +4.7586% +5.3728%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.0989% −4.5424% −4.0412%]
+                        Performance has regressed.
+Benchmarking insert_only/j3/skew1/1000
+Benchmarking insert_only/j3/skew1/1000: Warming up for 500.00 ms
+Benchmarking insert_only/j3/skew1/1000: Collecting 20 samples in estimated 3.1540 s (60 iterations)
+Benchmarking insert_only/j3/skew1/1000: Analyzing
+insert_only/j3/skew1/1000
+                        time:   [53.289 ms 53.564 ms 53.849 ms]
+                        thrpt:  [18.570 Melem/s 18.669 Melem/s 18.766 Melem/s]
+                 change:
+                        time:   [−5.4914% −4.3063% −3.2799%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.3912% +4.5001% +5.8105%]
+                        Performance has improved.
+Benchmarking insert_only/orig/skew1/10000
+Benchmarking insert_only/orig/skew1/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 4.5s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/orig/skew1/10000: Collecting 20 samples in estimated 4.4540 s (210 iterations)
+Benchmarking insert_only/orig/skew1/10000: Analyzing
+insert_only/orig/skew1/10000
+                        time:   [21.128 ms 21.205 ms 21.303 ms]
+                        thrpt:  [46.942 Melem/s 47.160 Melem/s 47.330 Melem/s]
+                 change:
+                        time:   [+1.0932% +1.8047% +2.5562%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.4924% −1.7727% −1.0814%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew1/10000
+Benchmarking insert_only/v3/skew1/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.3s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/v3/skew1/10000: Collecting 20 samples in estimated 5.2678 s (210 iterations)
+Benchmarking insert_only/v3/skew1/10000: Analyzing
+insert_only/v3/skew1/10000
+                        time:   [24.661 ms 24.738 ms 24.827 ms]
+                        thrpt:  [40.279 Melem/s 40.423 Melem/s 40.549 Melem/s]
+                 change:
+                        time:   [+2.7864% +3.4209% +4.0805%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.9205% −3.3077% −2.7108%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking insert_only/j3/skew1/10000
+Benchmarking insert_only/j3/skew1/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.7s, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew1/10000: Collecting 20 samples in estimated 5.6822 s (20 iterations)
+Benchmarking insert_only/j3/skew1/10000: Analyzing
+insert_only/j3/skew1/10000
+                        time:   [286.25 ms 288.08 ms 290.03 ms]
+                        thrpt:  [3.4479 Melem/s 3.4713 Melem/s 3.4935 Melem/s]
+                 change:
+                        time:   [+3.6263% +4.6566% +5.7430%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.4311% −4.4494% −3.4994%]
+                        Performance has regressed.
+Benchmarking insert_only/orig/skew1.2/100
+Benchmarking insert_only/orig/skew1.2/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 4.5s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/orig/skew1.2/100: Collecting 20 samples in estimated 4.5380 s (210 iterations)
+Benchmarking insert_only/orig/skew1.2/100: Analyzing
+insert_only/orig/skew1.2/100
+                        time:   [21.252 ms 21.335 ms 21.396 ms]
+                        thrpt:  [46.738 Melem/s 46.872 Melem/s 47.054 Melem/s]
+                 change:
+                        time:   [−1.5232% −0.8120% −0.0677%] (p = 0.04 < 0.05)
+                        thrpt:  [+0.0677% +0.8187% +1.5468%]
+                        Change within noise threshold.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew1.2/100
+Benchmarking insert_only/v3/skew1.2/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 5.7s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/v3/skew1.2/100: Collecting 20 samples in estimated 5.6929 s (210 iterations)
+Benchmarking insert_only/v3/skew1.2/100: Analyzing
+insert_only/v3/skew1.2/100
+                        time:   [27.074 ms 27.359 ms 27.582 ms]
+                        thrpt:  [36.255 Melem/s 36.551 Melem/s 36.935 Melem/s]
+                 change:
+                        time:   [−2.9377% −2.1228% −1.3516%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.3701% +2.1688% +3.0266%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking insert_only/j3/skew1.2/100
+Benchmarking insert_only/j3/skew1.2/100: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 4.4s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/j3/skew1.2/100: Collecting 20 samples in estimated 4.4412 s (210 iterations)
+Benchmarking insert_only/j3/skew1.2/100: Analyzing
+insert_only/j3/skew1.2/100
+                        time:   [20.696 ms 20.845 ms 21.016 ms]
+                        thrpt:  [47.583 Melem/s 47.973 Melem/s 48.317 Melem/s]
+                 change:
+                        time:   [−5.3336% −4.6814% −3.9601%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.1234% +4.9114% +5.6341%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking insert_only/orig/skew1.2/1000
+Benchmarking insert_only/orig/skew1.2/1000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 3.6s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/orig/skew1.2/1000: Collecting 20 samples in estimated 3.6262 s (210 iterations)
+Benchmarking insert_only/orig/skew1.2/1000: Analyzing
+insert_only/orig/skew1.2/1000
+                        time:   [17.347 ms 17.413 ms 17.490 ms]
+                        thrpt:  [57.175 Melem/s 57.427 Melem/s 57.648 Melem/s]
+                 change:
+                        time:   [+2.5824% +3.3103% +4.0681%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.9090% −3.2043% −2.5174%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew1.2/1000
+Benchmarking insert_only/v3/skew1.2/1000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 4.3s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/v3/skew1.2/1000: Collecting 20 samples in estimated 4.2650 s (210 iterations)
+Benchmarking insert_only/v3/skew1.2/1000: Analyzing
+insert_only/v3/skew1.2/1000
+                        time:   [20.123 ms 20.263 ms 20.360 ms]
+                        thrpt:  [49.115 Melem/s 49.350 Melem/s 49.694 Melem/s]
+                 change:
+                        time:   [+4.9746% +6.0457% +6.9667%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.5129% −5.7010% −4.7389%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking insert_only/j3/skew1.2/1000
+Benchmarking insert_only/j3/skew1.2/1000: Warming up for 500.00 ms
+Benchmarking insert_only/j3/skew1.2/1000: Collecting 20 samples in estimated 3.2773 s (100 iterations)
+Benchmarking insert_only/j3/skew1.2/1000: Analyzing
+insert_only/j3/skew1.2/1000
+                        time:   [32.342 ms 32.496 ms 32.646 ms]
+                        thrpt:  [30.631 Melem/s 30.773 Melem/s 30.920 Melem/s]
+                 change:
+                        time:   [−6.1241% −5.2891% −4.4814%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.6917% +5.5845% +6.5236%]
+                        Performance has improved.
+Benchmarking insert_only/orig/skew1.2/10000
+Benchmarking insert_only/orig/skew1.2/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 3.3s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/orig/skew1.2/10000: Collecting 20 samples in estimated 3.2708 s (210 iterations)
+Benchmarking insert_only/orig/skew1.2/10000: Analyzing
+insert_only/orig/skew1.2/10000
+                        time:   [15.442 ms 15.539 ms 15.645 ms]
+                        thrpt:  [63.917 Melem/s 64.352 Melem/s 64.759 Melem/s]
+                 change:
+                        time:   [−1.7930% −0.9538% −0.0742%] (p = 0.04 < 0.05)
+                        thrpt:  [+0.0743% +0.9629% +1.8257%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking insert_only/v3/skew1.2/10000
+Benchmarking insert_only/v3/skew1.2/10000: Warming up for 500.00 ms
+
+Warning: Unable to complete 20 samples in 3.0s. You may wish to increase target time to 3.6s, enable flat sampling, or reduce sample count to 10.
+Benchmarking insert_only/v3/skew1.2/10000: Collecting 20 samples in estimated 3.5726 s (210 iterations)
+Benchmarking insert_only/v3/skew1.2/10000: Analyzing
+insert_only/v3/skew1.2/10000
+                        time:   [17.028 ms 17.071 ms 17.111 ms]
+                        thrpt:  [58.443 Melem/s 58.579 Melem/s 58.726 Melem/s]
+                 change:
+                        time:   [+1.2112% +2.3137% +3.3955%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.2840% −2.2614% −1.1967%]
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking insert_only/j3/skew1.2/10000
+Benchmarking insert_only/j3/skew1.2/10000: Warming up for 500.00 ms
+Benchmarking insert_only/j3/skew1.2/10000: Collecting 20 samples in estimated 4.7497 s (40 iterations)
+Benchmarking insert_only/j3/skew1.2/10000: Analyzing
+insert_only/j3/skew1.2/10000
+                        time:   [119.14 ms 120.22 ms 121.39 ms]
+                        thrpt:  [8.2377 Melem/s 8.3183 Melem/s 8.3937 Melem/s]
+                 change:
+                        time:   [+8.4515% +9.8263% +11.144%] (p = 0.00 < 0.05)
+                        thrpt:  [−10.027% −8.9472% −7.7929%]
+                        Performance has regressed.
+
