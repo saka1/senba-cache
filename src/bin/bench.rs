@@ -8,6 +8,10 @@
 //!   cargo run --release --bin bench -- \
 //!     --source file --path external/NSDI24-SIEVE/mydata/zipf/zipf_1.0 \
 //!     --capacity 4096 --variant orig,v0
+//!
+//!   cargo run --release --bin bench -- \
+//!     --source twitter --path external/twitter-cache-trace/cluster018 \
+//!     --capacity 4096 --variant orig,j5_n32
 
 use std::time::Instant;
 
@@ -98,7 +102,7 @@ fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench --source <zipf|file> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
+                    "usage: bench --source <zipf|file|twitter> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
                 );
                 std::process::exit(0);
             }
@@ -138,6 +142,20 @@ fn build_trace(args: &Args) -> Vec<u64> {
         "file" => {
             let p = args.path.as_ref().expect("--path required for --source file");
             let it = file::from_path(p).expect("open trace");
+            match args.len {
+                Some(n) => it.take(n).collect(),
+                None => it.collect(),
+            }
+        }
+        // `file` (NSDI24 zipf_1.0 = u64 1 列) と `twitter` (OSDI'20 CSV) は
+        // 別 source として扱う。auto-detect は拡張子なし trace で誤判定しうる
+        // し、将来 oracleGeneral binary を増やすときも同じパターンで分岐できる。
+        "twitter" => {
+            let p = args
+                .path
+                .as_ref()
+                .expect("--path required for --source twitter");
+            let it = file::twitter_csv_from_path(p).expect("open trace");
             match args.len {
                 Some(n) => it.take(n).collect(),
                 None => it.collect(),
