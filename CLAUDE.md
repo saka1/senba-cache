@@ -33,6 +33,17 @@ SIEVE implementations (each is a self-contained module under `src/`):
 
 Both SIEVE modules expose the same v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`, plus `remove` on `sieve_orig`) so they can be benchmarked / property-tested against each other with the same harness.
 
+## Documenting results
+
+This is a research/investigation project, not a product. Every time a meaningful experiment concludes — a benchmark run, a profiling session, an overhead analysis, a design comparison — write a report under `docs/reports/YYYY-MM-DD-<topic>.md` before moving on.
+
+A report is warranted when:
+- A benchmark produces numbers worth keeping (even if the result is "it didn't improve")
+- An investigation reaches a conclusion (root cause found, overhead quantified, design trade-off resolved)
+- A design decision is made that future experiments depend on
+
+Reports are the primary output of this project. Code and bench numbers that aren't documented are effectively lost between sessions.
+
 ## Adding a new SIEVE variant
 
 1. Add `src/sieve_<name>.rs` with the same public API as `sieve_orig`.
