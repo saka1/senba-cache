@@ -44,6 +44,8 @@ A report is warranted when:
 
 Reports are the primary output of this project. Code and bench numbers that aren't documented are effectively lost between sessions.
 
+**Index:** `docs/reports/index.md` contains a one-paragraph summary of every report. Read the index first to orient yourself without opening individual files. Whenever you add or substantially revise a report, update the corresponding entry in the index (or add a new one).
+
 ## Adding a new SIEVE variant
 
 1. Add `src/sieve_<name>.rs` with the same public API as `sieve_orig`.

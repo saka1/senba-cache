@@ -103,6 +103,46 @@ where
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let tag = self.tag_of(key);
+        self.get_with_tag(key, tag)
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
+        let tag = self.tag_of(&key);
+        self.insert_with_tag(key, value, tag)
+    }
+
+    // ---------------- hash-aware path (j4 / j5 用) ----------------
+    //
+    // j4 は shard 選択用に hash を一度計算しているのに、内部 j3 が `tag_of` で
+    // もう一度同じ key を hash していて double hash になる (sieve_j4.rs §既知の
+    // handicap)。外側で計算した hash の上位 8-bit から作った tag を直接渡す経路
+    // を生やして、その固定費をゼロにする。pub(crate) で単スレ前提のまま外に
+    // 出さない。
+
+    #[inline]
+    pub(crate) fn tag_from_hash(hash: u64) -> u8 {
+        // `tag_of` と同じ derivation。shard 選択が下位ビット、tag が上位 8-bit
+        // なので独立 entropy を保てる (sieve_j4.rs §bit 配分 と整合)。
+        ((hash >> 56) as u8) | 0x80
+    }
+
+    #[inline]
+    pub(crate) fn contains_with_hash(&self, key: &K, hash: u64) -> bool {
+        self.find(key, Self::tag_from_hash(hash)).is_some()
+    }
+
+    #[inline]
+    pub(crate) fn get_with_hash(&mut self, key: &K, hash: u64) -> Option<&V> {
+        self.get_with_tag(key, Self::tag_from_hash(hash))
+    }
+
+    #[inline]
+    pub(crate) fn insert_with_hash(&mut self, key: K, value: V, hash: u64) -> Option<(K, V)> {
+        self.insert_with_tag(key, value, Self::tag_from_hash(hash))
+    }
+
+    #[inline]
+    fn get_with_tag(&mut self, key: &K, tag: u8) -> Option<&V> {
         let pos = self.find(key, tag)?;
         // SAFETY: find は tags[pos] != EMPTY を確認した位置のみ返すので init 済み。
         let entry = unsafe { self.entries[pos].assume_init_mut() };
@@ -110,8 +150,7 @@ where
         Some(&entry.value)
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
-        let tag = self.tag_of(&key);
+    fn insert_with_tag(&mut self, key: K, value: V, tag: u8) -> Option<(K, V)> {
         if let Some(pos) = self.find(&key, tag) {
             // SAFETY: find が tags[pos] != EMPTY を保証。
             let entry = unsafe { self.entries[pos].assume_init_mut() };
