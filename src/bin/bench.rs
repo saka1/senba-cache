@@ -165,6 +165,8 @@ fn main() {
                 "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap),
                 "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap),
                 "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap),
+                "j4_n64" => drive::<J4<u64, u64, 64>>(&trace, cap),
+                "j4_n128" => drive::<J4<u64, u64, 128>>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(

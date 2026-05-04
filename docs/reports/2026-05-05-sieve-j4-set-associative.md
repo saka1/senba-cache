@@ -54,6 +54,13 @@ j4 の per-shard 容量は cap/8: 12-13 (cap=100), 125 (cap=1000), 1250 (cap=100
 > `2026-05-05-sieve-j4-crossover-and-shard-sweep.md` を参照。trade-off 図
 > (`docs/figures/j4_tradeoff_scatter.png`) と crossover map
 > (`docs/figures/j4_capsweep_ratio.png`) は本レポートの結論を視覚化したもの。
+>
+> **第二追補 (2026-05-05)**: 「per_shard と total footprint のどちらが支配
+> 変数か」を切り分ける sweep を `2026-05-05-sieve-j4-pershard-vs-footprint.md`
+> に追加。per_shard が唯一支配的で、L1d boundary は kink 要因ではないことが
+> 直接データで確認された。本レポート §読み解きの一部 (cap=10000 で per-shard
+> = 1250 が「まだ大きい」とした記述) は維持されるが、「shard 化のオーバー
+> ヘッド」を total footprint で説明する直感は **第二追補で否定** されている。
 
 ## 結果 1 — Hit ratio (set-associative tax)
 

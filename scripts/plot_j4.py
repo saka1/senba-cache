@@ -295,6 +295,152 @@ g.set_titles("skew={col_name}")
 g.figure.suptitle("Hit ratio level — orig (solid) vs j4 (dashed)", y=1.03)
 g.figure.savefig(OUT / "j4_capsweep_hitratio_level.png", dpi=150, bbox_inches="tight")
 plt.close(g.figure)
+
+# ---------------------------------------------------------------------------
+# L1d-footprint addendum (2026-05-05): is per_shard or total footprint
+# the dominant variable? Three sweeps:
+#   - cap-sweep at SHARDS=8  (per_shard scales with cap)
+#   - cap=256 fixed, SHARDS sweep (total stays L1d-resident)
+#   - large-cap × multi-SHARDS (isolate per_shard at fixed total)
+# ---------------------------------------------------------------------------
+
+# Entry width assumption for footprint estimate. SieveCache<u64,u64>:
+# Entry { key: u64, value: u64, visited: bool } padded to 24 B.
+# tags array adds 1 B per slot. order_cap = 2 * capacity (32-aligned).
+ENTRY_BYTES = 24
+TAG_BYTES = 1
+PER_SLOT_BYTES = ENTRY_BYTES + TAG_BYTES  # 25 B per slot, ×2 for order_cap
+
+
+def _footprint_kb(per_shard_cap: int, shards: int) -> float:
+    return per_shard_cap * 2 * PER_SLOT_BYTES * shards / 1024.0
+
+
+# Sweep A: cap fine sweep at SHARDS=8 ----------------------------------------
+sweepA = _read_bench_csv(PROFILES / "j4_capsweep_n8_2026-05-05.csv")
+sweepA["per_shard"] = sweepA.apply(
+    lambda r: r["capacity"] // 8 if r["variant"] == "j4_n8" else r["capacity"],
+    axis=1,
+)
+sweepA["shards"] = sweepA["variant"].map(
+    {"orig": 1, "j3": 1, "j4_n8": 8}
+)
+sweepA["footprint_kb"] = sweepA.apply(
+    lambda r: _footprint_kb(r["per_shard"], int(r["shards"])), axis=1
+)
+sweepA["ns_per_op"] = sweepA["elapsed_ns"] / (sweepA["hits"] + sweepA["misses"])
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+for ax, skew in zip(axes, [0.6, 1.0]):
+    sub = sweepA[sweepA["skew"] == skew]
+    sns.lineplot(
+        data=sub,
+        x="capacity",
+        y="ns_per_op",
+        hue="variant",
+        style="variant",
+        markers=True,
+        dashes=False,
+        palette={"orig": "#1f77b4", "j3": "#d62728", "j4_n8": "#2ca02c"},
+        hue_order=["orig", "j3", "j4_n8"],
+        ax=ax,
+    )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_title(f"skew={skew}")
+    ax.set_xlabel("total capacity (log)")
+    ax.set_ylabel("ns / op")
+    # Mark approximate L1d boundary (i5-12600K P-core L1d = 48 KB).
+    # cap that puts SHARDS=8 footprint at 48 KB: cap × 50 / 1024 = 48 → cap≈983.
+    ax.axvline(983, color="grey", linestyle=":", linewidth=1, alpha=0.7)
+    ax.text(
+        983 * 1.05, ax.get_ylim()[1] * 0.6, "L1d ≈ 48 KB", rotation=90,
+        fontsize=9, color="grey",
+    )
+fig.suptitle(
+    "Sweep A — ns/op vs cap (SHARDS=8). j3/j4 scale with per_shard, orig stays flat.",
+    y=1.02,
+)
+fig.tight_layout()
+fig.savefig(OUT / "j4_l1d_sweepA_capfine.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+
+# Sweep B: cap=256 fixed, SHARDS sweep ---------------------------------------
+sweepB = _read_bench_csv(PROFILES / "j4_smalltotal_shardsweep_2026-05-05.csv")
+sweepB["shards"] = sweepB["variant"].map(_shard_n)
+sweepB.loc[sweepB["variant"] == "orig", "shards"] = 0  # plot as horizontal line ref
+sweepB.loc[sweepB["variant"] == "j3", "shards"] = 1
+sweepB["ns_per_op"] = sweepB["elapsed_ns"] / (sweepB["hits"] + sweepB["misses"])
+
+fig, ax = plt.subplots(figsize=(10, 5.5))
+shard_only = sweepB[sweepB["shards"] >= 1].copy()
+sns.lineplot(
+    data=shard_only,
+    x="shards",
+    y="ns_per_op",
+    hue="skew",
+    style="skew",
+    markers=True,
+    dashes=False,
+    palette="viridis",
+    ax=ax,
+)
+# orig reference lines per skew
+orig_only = sweepB[sweepB["variant"] == "orig"]
+for _, row in orig_only.iterrows():
+    ax.axhline(
+        row["ns_per_op"], color="grey", linestyle="--", linewidth=1, alpha=0.5,
+    )
+    ax.text(
+        ax.get_xlim()[1] * 0.7,
+        row["ns_per_op"] * 1.02,
+        f"orig (skew={row['skew']})",
+        fontsize=9, color="grey",
+    )
+ax.set_xscale("log", base=2)
+ax.set_xlabel("SHARDS (cap=256 fixed, total ≈ 12 KB ⊂ L1d)")
+ax.set_ylabel("ns / op")
+ax.set_title(
+    "Sweep B — small-total shard sweep. Total stays in L1d at every N.\n"
+    "Time approaches a floor as N grows (per_shard → constant fixed cost)."
+)
+fig.tight_layout()
+fig.savefig(OUT / "j4_l1d_sweepB_smalltotal.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+
+# Sweep C: large cap, vary SHARDS — per_shard isolation ----------------------
+sweepC = _read_bench_csv(PROFILES / "j4_pershard_isolation_2026-05-05.csv")
+sweepC["shards"] = sweepC["variant"].map(_shard_n).astype(int)
+sweepC["per_shard"] = sweepC["capacity"] // sweepC["shards"]
+sweepC["ns_per_op"] = sweepC["elapsed_ns"] / (sweepC["hits"] + sweepC["misses"])
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+for ax, skew in zip(axes, [0.6, 1.0]):
+    sub = sweepC[sweepC["skew"] == skew]
+    sns.lineplot(
+        data=sub,
+        x="per_shard",
+        y="ns_per_op",
+        hue="capacity",
+        style="capacity",
+        markers=True,
+        dashes=False,
+        palette="rocket_r",
+        ax=ax,
+    )
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("per_shard (= cap / SHARDS)")
+    ax.set_ylabel("ns / op")
+    ax.set_title(f"skew={skew}")
+fig.suptitle(
+    "Sweep C — at fixed total cap, ns/op tracks per_shard, not total footprint.\n"
+    "Curves for cap ∈ {1024,4096,8192,16384} collapse onto a single per_shard curve.",
+    y=1.02,
+)
+fig.tight_layout()
+fig.savefig(OUT / "j4_l1d_sweepC_pershard_isolation.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+
 print(f"wrote figures to {OUT}")
 for p in sorted(OUT.glob("j4_*.png")):
     print(" -", p.name)
