@@ -7,6 +7,7 @@ use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v3::SieveCache as V3;
 use senba_cache::sieve_j3::SieveCache as J3;
 use senba_cache::sieve_j4::SieveCache as J4;
+use senba_cache::sieve_j5::SieveCache as J5;
 use senba_cache::workload::zipf::ZipfGen;
 use std::hint::black_box;
 use std::time::Duration;
@@ -79,5 +80,32 @@ fn bench_insert_only(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_insert_only);
+/// Worst-case memory-fairness bench: orig vs j5 at u64,u64 (smallest entries,
+/// where j3's 2x order_cap slack is most punishing). Compares:
+///
+/// - `orig` @ nominal cap (baseline, link 8B/entry, no slack)
+/// - `orig_2x` @ 2 * cap (handicap: more live entries AND more bytes than j5)
+/// - `j5` @ nominal cap (target, 2x slack via j3 internals)
+///
+/// If j5 still beats `orig_2x` on ns/op, j5 is faster *despite* being given
+/// less memory. If `orig_2x` wins, the 2x slack is paying for the speed.
+fn bench_mem_fair(c: &mut Criterion) {
+    let mut group = quick_group(c, "mem_fair_u64");
+    let caps: Vec<usize> = CAP_RATIOS
+        .iter()
+        .map(|r| ((N_KEYS as f64) * r).round() as usize)
+        .collect();
+    for &skew in SKEWS {
+        let trace: Vec<u64> = ZipfGen::new(skew, N_KEYS, SEED).take(TRACE_LEN).collect();
+        group.throughput(Throughput::Elements(trace.len() as u64));
+        for &cap in &caps {
+            insert_only_for::<Orig<u64, u64>>(&mut group, "orig", skew, cap, &trace);
+            insert_only_for::<Orig<u64, u64>>(&mut group, "orig_2x", skew, cap * 2, &trace);
+            insert_only_for::<J5<u64, u64>>(&mut group, "j5", skew, cap, &trace);
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_insert_only, bench_mem_fair);
 criterion_main!(benches);
