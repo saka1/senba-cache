@@ -19,6 +19,7 @@ use senba_cache::Cache;
 use senba_cache::sieve_j3::SieveCache as J3;
 use senba_cache::sieve_j4::SieveCache as J4;
 use senba_cache::sieve_j5::SieveCache as J5;
+use senba_cache::sieve_j6::SieveCache as J6;
 use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v0::SieveCache as V0;
 use senba_cache::sieve_v3::SieveCache as V3;
@@ -199,6 +200,19 @@ fn main() {
                 "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap),
                 "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap),
                 "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap),
+                "j6" => drive::<J6<u64, u64>>(&trace, cap),
+                "j6_n1" => drive::<J6<u64, u64, 1>>(&trace, cap),
+                "j6_n2" => drive::<J6<u64, u64, 2>>(&trace, cap),
+                "j6_n4" => drive::<J6<u64, u64, 4>>(&trace, cap),
+                "j6_n8" => drive::<J6<u64, u64, 8>>(&trace, cap),
+                "j6_n16" => drive::<J6<u64, u64, 16>>(&trace, cap),
+                "j6_n32" => drive::<J6<u64, u64, 32>>(&trace, cap),
+                "j6_n64" => drive::<J6<u64, u64, 64>>(&trace, cap),
+                "j6_n128" => drive::<J6<u64, u64, 128>>(&trace, cap),
+                "j6_n256" => drive::<J6<u64, u64, 256>>(&trace, cap),
+                "j6_n512" => drive::<J6<u64, u64, 512>>(&trace, cap),
+                "j6_n1024" => drive::<J6<u64, u64, 1024>>(&trace, cap),
+                "j6_n2048" => drive::<J6<u64, u64, 2048>>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(

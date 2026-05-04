@@ -14,6 +14,7 @@
 | j3 系列 (Map なし SIMD) | sieve-j3-bench |
 | j4 系列 (set-associative j3) | sieve-j4-set-associative, sieve-j4-crossover-and-shard-sweep, sieve-j4-pershard-vs-footprint |
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
+| j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 
 ---
 
@@ -122,3 +123,11 @@ j5 が 2-3x 圧勝 (SIMD scan + shard 並列が pointer chase を支配、memory
 **per_shard ≈ 125 (cap=1000)**: 拮抗、±数 ns。**per_shard = 1250 (cap=10000)**: j5 完敗 (低 skew で 3x 遅い、
 線形 scan が L1d を踏み外す)。large-cap で j5 を使うなら per_shard を SIMD chunk に保て、
 という Pareto 結論をメモリ公平条件で再確認。
+
+### 2026-05-05-sieve-j6-m21-twitter.md
+M2.1 (visited を tag バイトの bit6 に同居させ Entry padding を消す) の単独実装 `sieve_j6` を
+Twitter cluster018 × cap ∈ {1024, 4096, 16384} × per_shard ∈ {32, 64, 128} で j5 と AB。
+**全 9 cell で j5 より +2.5〜+11.3 ns/op 遅化**、improvement-ideas の「hit-path 改善」予想は棄却。
+劣化幅は per_shard (= scan 長) に比例し、AVX2 経路の `vpand` 1 命令増 + visited クリア RMW の
+port 競合疑惑が候補。correctness は確定 (j5 と外部完全一致 — hits/misses/evictions が同一)。
+inline footprint -28% は構造的に達成。次は memory-fair sweep で「同じメモリ予算で j6 が j5 を抜くか」を測る。
