@@ -222,6 +222,65 @@ g.figure.suptitle("j5 trial spread (5 trials per cell)", y=1.02)
 g.figure.savefig(OUT / "j5_twitter_trial_spread.png", dpi=150, bbox_inches="tight")
 plt.close(g.figure)
 
+# ---------------------------------------------------------------------------
+# Plot 6: champion (per_shard=32) vs orig — hit ratio across capacity.
+# One subplot per cluster, x=capacity (log2), y=hit_ratio.
+# ---------------------------------------------------------------------------
+champ = j5[j5["per_shard"] == 32].copy()
+import numpy as np
+fig, axes = plt.subplots(2, len(CLUSTERS), figsize=(5.2 * len(CLUSTERS), 8.0),
+                         sharey=False)
+for col, cluster in enumerate(CLUSTERS):
+    sub_o = orig[orig["cluster"] == cluster].sort_values("capacity")
+    sub_c = champ[champ["cluster"] == cluster].sort_values("capacity")
+    caps = sub_o["capacity"].tolist()
+    x = np.arange(len(caps))
+    width = 0.38
+
+    # Row 0: hit ratio
+    ax = axes[0, col]
+    hr_o = sub_o["hr_orig"].values * 100
+    hr_c = sub_c.set_index("capacity").loc[caps, "hit_ratio"].values * 100
+    ax.bar(x - width / 2, hr_o, width, color="#888888", label="orig")
+    ax.bar(x + width / 2, hr_c, width, color="#d7301f", label="j5 (per_shard=32)")
+    for i, (a, b) in enumerate(zip(hr_o, hr_c)):
+        ax.text(i, max(a, b) + 1.0, f"{b - a:+.2f}pp",
+                ha="center", va="bottom", fontsize=9, color="#d7301f")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(c) for c in caps])
+    ax.set_xlabel("capacity")
+    ax.set_ylabel("hit ratio (%)" if col == 0 else "")
+    ax.set_title(cluster)
+    ax.set_ylim(0, max(hr_o.max(), hr_c.max()) * 1.18)
+    ax.grid(True, axis="y", alpha=0.4)
+    ax.legend(loc="lower right", fontsize=9)
+
+    # Row 1: ns/op
+    ax = axes[1, col]
+    ns_o = sub_o["ns_orig"].values
+    ns_c = sub_c.set_index("capacity").loc[caps, "ns_per_op"].values
+    ax.bar(x - width / 2, ns_o, width, color="#888888", label="orig")
+    ax.bar(x + width / 2, ns_c, width, color="#1f78b4", label="j5 (per_shard=32)")
+    for i, (a, b) in enumerate(zip(ns_o, ns_c)):
+        d = b - a
+        ax.text(i, max(a, b) + 0.6, f"{d:+.1f} ns",
+                ha="center", va="bottom", fontsize=9, color="#1f78b4")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(c) for c in caps])
+    ax.set_xlabel("capacity")
+    ax.set_ylabel("ns / op" if col == 0 else "")
+    ax.set_ylim(0, max(ns_o.max(), ns_c.max()) * 1.18)
+    ax.grid(True, axis="y", alpha=0.4)
+    ax.legend(loc="lower right", fontsize=9)
+
+fig.suptitle(
+    "orig vs j5 (per_shard=32) by cluster — hit ratio (top) and ns/op (bottom)",
+    y=1.00,
+)
+fig.tight_layout()
+fig.savefig(OUT / "j5_twitter_pershard32_vs_orig.png", dpi=150, bbox_inches="tight")
+plt.close(fig)
+
 print(f"wrote figures to {OUT}")
 for p in sorted(OUT.glob("j5_twitter_*.png")):
     print(" -", p.name)
