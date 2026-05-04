@@ -6,7 +6,10 @@
 //! - 各エントリは visited bit (`freq`: 0 or 1) を持つ
 //! - 単一の hand ポインタ (`hand`) が tail から prev 方向 (head 側) に進む
 //! - 安全 Rust では生ポインタ双方向リストを書きづらいので、
-//!   arena (`Vec<Option<Node>>`) + `NodeId` で代替。
+//!   arena (`Vec<MaybeUninit<Node>>` + `free_list`) + `NodeId` で代替。
+//!   live/dead は `free_list` が単一の真実源で、Option discriminant の
+//!   二重符号化は持たない (`Option<Node>` は u64+u64 ノードで 40B、
+//!   MaybeUninit なら 32B)。
 //! - リンク (prev/next/head/tail/hand) は原典の `obj_t*` (NULL 可) に倣って、
 //!   `NodeId = u32` + sentinel `NIL = u32::MAX` で表現する。`Option<u32>` は
 //!   alignment で 8B になり原典の 8B ポインタと同サイズだが、sentinel 表現の方が
@@ -16,6 +19,7 @@
 use crate::hash::Xxh3Build;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::mem::MaybeUninit;
 
 type NodeId = u32;
 const NIL: NodeId = u32::MAX;
@@ -32,7 +36,9 @@ struct Node<K, V> {
 pub struct SieveCache<K, V> {
     capacity: usize,
     index: HashMap<K, NodeId, Xxh3Build>,
-    nodes: Vec<Option<Node<K, V>>>,
+    /// `free_list` に入っている id のスロットだけが論理的に未初期化。
+    /// 他のスロット (= live なノード) は `assume_init_*` で安全にアクセスできる。
+    nodes: Vec<MaybeUninit<Node<K, V>>>,
     free_list: Vec<NodeId>,
     head: NodeId, // NIL when list is empty
     tail: NodeId, // NIL when list is empty
@@ -129,27 +135,35 @@ where
 
     #[inline]
     fn node(&self, id: NodeId) -> &Node<K, V> {
-        self.nodes[id as usize].as_ref().expect("live node")
+        // SAFETY: 呼び出し元が `id` が live (= alloc_node 後 / free_node 前) で
+        // あることを保証する。本モジュール内では index に登録されている id か、
+        // alloc 直後の id しか node()/node_mut() に渡さない。
+        unsafe { self.nodes[id as usize].assume_init_ref() }
     }
 
     #[inline]
     fn node_mut(&mut self, id: NodeId) -> &mut Node<K, V> {
-        self.nodes[id as usize].as_mut().expect("live node")
+        // SAFETY: 同上。
+        unsafe { self.nodes[id as usize].assume_init_mut() }
     }
 
     fn alloc_node(&mut self, node: Node<K, V>) -> NodeId {
         if let Some(id) = self.free_list.pop() {
-            self.nodes[id as usize] = Some(node);
+            self.nodes[id as usize].write(node);
             id
         } else {
             let id = self.nodes.len() as NodeId;
-            self.nodes.push(Some(node));
+            self.nodes.push(MaybeUninit::new(node));
             id
         }
     }
 
     fn free_node(&mut self, id: NodeId) -> Node<K, V> {
-        let node = self.nodes[id as usize].take().expect("live node");
+        // SAFETY: 呼び出し元が `id` が live なスロットだと保証する
+        // (eviction / remove 時に index から取り出した id のみ渡される)。
+        // この時点でスロットは論理的に未初期化となり、free_list に積まれて
+        // 次の alloc_node で再利用される。
+        let node = unsafe { self.nodes[id as usize].assume_init_read() };
         self.free_list.push(id);
         node
     }
@@ -220,6 +234,23 @@ where
         self.index.remove(&node.key);
         self.len -= 1;
         Some((node.key, node.value))
+    }
+}
+
+impl<K, V> Drop for SieveCache<K, V> {
+    fn drop(&mut self) {
+        // `MaybeUninit` は Drop を自動で走らせないので、live なノードを
+        // 連結リスト経由で辿って明示的に落とす。free_list に積まれている
+        // スロットは論理的に未初期化なので触らない。
+        let mut cur = self.head;
+        while cur != NIL {
+            // SAFETY: head から next を辿って到達するスロットは live。
+            let next = unsafe { self.nodes[cur as usize].assume_init_ref().next };
+            unsafe {
+                self.nodes[cur as usize].assume_init_drop();
+            }
+            cur = next;
+        }
     }
 }
 

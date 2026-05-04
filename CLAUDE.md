@@ -28,7 +28,7 @@ Layout:
 
 SIEVE implementations (each is a self-contained module under `src/`):
 
-- `src/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/libCacheSim/libCacheSim/cache/eviction/Sieve.c`). Doubly-linked list (head=newest, tail=oldest) + single hand pointer + per-entry `freq` visited bit. Implemented in safe Rust via an arena (`Vec<Option<Node>>`) with `Option<NodeId>` prev/next. **Treat this as the spec / oracle** — when adding a new variant, its hit/miss behavior on any trace must match `sieve_orig` exactly.
+- `src/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/libCacheSim/libCacheSim/cache/eviction/Sieve.c`). Doubly-linked list (head=newest, tail=oldest) + single hand pointer + per-entry `freq` visited bit. Implemented in safe Rust via an arena (`Vec<MaybeUninit<Node>>` + `free_list`) with `NodeId = u32` prev/next (`NIL = u32::MAX` sentinel). **Treat this as the spec / oracle** — when adding a new variant, its hit/miss behavior on any trace must match `sieve_orig` exactly.
 - `src/sieve_v0.rs` — first experimental variant. Single contiguous `Vec` "logical queue" with tombstone marking + periodic compaction, instead of a linked list. Same external API as `sieve_orig` for direct comparison.
 
 Both SIEVE modules expose the same v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`, plus `remove` on `sieve_orig`) so they can be benchmarked / property-tested against each other with the same harness.
