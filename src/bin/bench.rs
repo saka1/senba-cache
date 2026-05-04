@@ -197,6 +197,8 @@ fn main() {
                 "j5_n128" => drive::<J5<u64, u64, 128>>(&trace, cap),
                 "j5_n256" => drive::<J5<u64, u64, 256>>(&trace, cap),
                 "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap),
+                "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap),
+                "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(
