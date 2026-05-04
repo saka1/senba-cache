@@ -1,32 +1,132 @@
-# SIEVE 実装 改善アイディアブレスト (2026-05-04)
+# SIEVE 実装 改善アイディア (living doc)
 
-- 日付: 2026-05-04
-- 出発点: `2026-05-03-sieve-v3-profile.md` で v3 が orig に勝てない理由を
-  hit-path / evict / compact の各 phase に分解した。その結果を踏まえて、
-  次に試す改善方向を **広く** 並べる。1 案にコミットせず、軸ごとに複数
-  バリエーションを書き出して ROI を比較する場とする。
-- スコープ: 実装案だけでなく「測り直すべき計測軸」「アルゴリズムの再設計」
-  も含む。
+このドキュメントは date-stamped レポートではなく、現時点で活きている改善案の倉庫。
+日付つきの実験レポートは `docs/reports/` 側を参照する。
+旧名 `2026-05-04-improvement-ideas.md` を起源とし、以降の進捗をその場で反映する。
+関心の中心は **M 章「j5 メモリフットプリント削減」**。下方の A〜J は
+orig/v3 ベースライン時代のブレスト原文を履歴として温存している。
 
-## headroom の地図 (skew1/cap10000、`samply_phases.py` より)
+## 状況サマリ (〜2026-05-05)
 
-```
-     OTHER (HashMap+std)  ████████████████████████████████  80-89%
-     HIT path             █                                  1.5-4.7%
-     EVICT 内 bookkeeping  ███                                7-9%
-     COMPACT              █                                  0-3.4%
-     INSERT-NEW           █                                  1.8-2.1%
-```
+| 系列 | 結論 | 主レポート |
+|---|---|---|
+| `sieve_orig` | 著者参照 (NSDI'24) を `Vec<MaybeUninit<Node>>` 化した忠実ポート。oracle と速度ベースラインの両用 | `sieve-orig-overhead-analysis` |
+| `sieve_v0`〜`v3` | 連結リスト → array 化 + bit-parallel scan + 2-pass 等。**いずれも orig に劣る or 同等**で系列終了 | `v0-divergence`, `v3-bench`, `v3-profile` |
+| `sieve_j3` (旧 J3) | 外部 HashMap 廃止、tag SIMD scan 全 inline。**cap≤1000 で orig 比 0.7×** | `sieve-j3-bench` |
+| `sieve_j4` (旧 J2) | j3 を 8 shards 並べた set-associative。per_shard sweet spot ∈ [32, 64] | `sieve-j4-*` (3 本) |
+| `sieve_j5` | j4 から double-hash 排除 (`j3::*_with_hash`)。Δ ≈ −7 ns/op 安定。**Twitter trace で orig を二重勝ち**するセル発見 | `sieve-j5-doublehash-ab`, `j5-pershard-pareto`, `j5-twitter-pareto` |
+| memfair | j5 inline 34 B/cap vs orig 25 B/cap。「j5 の優位は memory hand-out 由来でない」を確定 | `j5-vs-orig-2x-memfair` |
 
-軸ごとの命名:
+速度ベースラインは `sieve_orig` から `sieve_j5` に移行済み。
+次の関心は **「j5 の inline footprint を削って orig と memory-fair に勝つ」**。
 
-- **A**: HashMap 層 — 一番太いが SIEVE と直交
-- **B**: hit path — req の 78% に効く、orig は 1 byte で済んでいる箇所
-- **C**: miss path — 既に小さいが構造がうるさい
-- **D**: compaction — orig には無いコスト
-- **E**: orig 自身を磨く — 「勝者を更に速く」
-- **F**: アルゴリズム再設計
-- **G**: 計測軸の拡張
+---
+
+# M. j5 メモリフットプリント削減 (現在の関心)
+
+## M0. 動機
+
+memfair レポート (`2026-05-05-j5-vs-orig-2x-memfair.md`) で確定:
+
+- j5 inline bytes/cap ≈ 34、orig ≈ 25
+- 肥大要因 2 つ:
+  1. `order_cap = 2 * capacity` (`sieve_j3.rs:72-78`) — tombstone 用 slack で物理 slot が論理 cap の 2 倍
+  2. `Entry { key, value, visited: bool }` の bool padding (Rust の 8 B align で 7 B 死ぬ、K=V=u64 のとき)
+
+memfair は「j5 の速度優位が memory hand-out 由来でない」を確定したが、
+**同じ inline footprint 同士で勝つ** のが次のゴール。
+
+## M1. `order_cap` 2x slack を削る
+
+| 案 | 概要 | 期待節約 | 副作用 | リスク |
+|---|---|---:|---|---|
+| M1.1 | 倍率を 1.25x / 1.5x に | -25〜37% slack | compaction 頻度 ↑ (各回は memcpy のみ、rehash 無し) | 低 |
+| M1.2 | tombstone なし、`do_evict` 時に左シフト (1.0x) | -100% slack | `O(tail-pos)` shift / evict | 中 (small-cap では scan に埋もれる想定) |
+| M1.3 | hand 通過時の lazy 整地 | tombstone 比率を低位に維持 | hand pass のロジック追加 | 中 |
+| M1.4 | shard 跨ぎで slack をプール共有 | 8 shards で slack 1 本 | 設計重い、ROI 不明 | 高 |
+
+## M2. Entry padding を取る (visited bit の置き場)
+
+`Entry` を 24 B → 16 B にできれば -7 B/slot × 2 = **-14 B/cap (~28%)**、j5 34 → 20 B/cap で orig (25) を抜く水準。
+
+| 案 | 概要 | 期待 | 備考 |
+|---|---|---|---|
+| **M2.1 ★** | visited を `tags[i]` の MSB に同居 (tag = 1-bit live + 1-bit visited + 6-bit hash) | -28% memory **+ hit-path 改善** | v3-profile の「visited.set RMW で別 cache line +0.8ms」を相殺。SIMD 比較は AND マスク 1 命令増のみ。false-match は 1/128 → 1/64 |
+| M2.2 | visited を別 bit-vector (`Vec<u64>`) に SoA 化 | -28% memory | hit 時に別 cache line 1 本踏む。M2.1 の劣化版 |
+| M2.3 | tag を 16-bit 化、visited + 14-bit hash | net -5 B/cap、false-match 1/16384 | tags 倍増 (1→2 B/slot) でも Entry padding 消失で net 改善 |
+
+## M3. SoA 化
+
+`keys: Vec<K>`, `values: Vec<V>`, `tags: Vec<u8>`, (`visited: Vec<u64>` if M2.2)。
+
+- scan 中は tags のみ触れて L1 滞留が改善
+- memfair Regime 3 (per_shard=1250 で j5 完敗、線形 scan が L1d 48 KB を踏み外す) の救済策
+- M2.1 採用なら visited は tags 側、values は key match 後にだけ参照
+
+## M4. 「2x slack を ghost cache として活用」
+
+memfair の指摘どおり、dead slot は機能的に ghost。捨てずに使う別軸。
+**メモリを削るのではなく単位 memory 当たり hit ratio を上げる方向**。
+
+- **M4.1**: tombstone に key だけ残す (value は drop)。次の miss で ghost ヒットなら priority insert (visited=true で投入)。NSDI 論文外、ARC / 2Q 寄り
+- **M4.2**: ghost 領域を 0.25x に縮小 (M1 と組合せ)
+
+## M5. 根本再設計
+
+| 案 | 概要 | 評価 |
+|---|---|---|
+| M5.1 | open addressing + 別配列で SIEVE 順序 | 「現状の良い構造を保ったまま」から逸脱、保留 |
+| M5.2 | metadata を 32 B に圧縮 | 実効ゼロ、却下 |
+| **M5.3** | slack を tags 側だけに限定 (entries は cap+ε のみ確保、tail 同期) | M1 と直交。`order_cap` 拡張の純コストが **2 B/slot** (tags + visited bitmap) まで縮む |
+
+## M6. ROI 推奨 (主観)
+
+1. **M2.1 (visited を tag MSB に)** — メモリ -28% + 速度にも効く可能性。実装小、リスク低。**最初の手**
+2. **M1.1 or M1.2 (slack 削減)** — small-cap 帯ほぼ無痛。次の手。倍率 vs ns/op vs memory の Pareto sweep が欲しい
+3. **M5.3 (slack を tags 側のみに)** — M1 と組合せで slack 拡張コスト最小化
+4. **M3 (SoA)** — memfair Regime 3 救済
+5. **M4.1 (ghost 活用)** — 論文外拡張、研究的興味
+
+短期ロードマップ案:
+- `sieve_j6` として **M2.1 単体ベンチ** (j5 と inline footprint 以外同条件の AB)
+- M1 系の **倍率 vs ns/op vs memory** Pareto sweep
+- 必要に応じて M5.3 / M3 を重ねる
+- 各実験ごとに `docs/reports/YYYY-MM-DD-sieve-j6-*.md` を残す
+
+---
+
+# Phase 1〜3 アーカイブ (orig/v3 時代のブレスト)
+
+以下は 2026-05-04 起源の原文。**いくつかは実装済**で、現状から見ると古い見立ても多い。
+研究的な書き残しとして温存する。
+
+## 完了済み / 実装済みアイディア
+
+| 旧 ID | 内容 | 実体 | 主レポート |
+|---|---|---|---|
+| A1 | hasher 統一 | `src/hash.rs` で全 variant XXH3 統一 (FxHash ではないが思想は同じ) | `sieve-j3-bench` 他 |
+| C2 | `Option<Entry>` → `MaybeUninit` | `sieve_orig` で適用、bench はノイズ範囲だが構造的正しさで採用 | `sieve-orig-overhead-analysis` |
+| E1 | orig + MaybeUninit (旧 v4 構想) | C2 と同上 | 同上 |
+| J3 | 全 inline (Map 廃止 + tag SIMD scan) | `sieve_j3.rs` | `sieve-j3-bench` |
+| J2 | set-associative | `sieve_j4.rs` (`DEFAULT_SHARDS = 8`) | `sieve-j4-*` (3 本) |
+| (J 派生) | double-hash 排除 | `sieve_j5.rs` | `sieve-j5-doublehash-ab` |
+
+## 未着手 / 保留
+
+- **B1 (visited inline)**: v3 系列としては未実装。j3/j4/j5 では結果的に inline 済みだが、それが今度はメモリ問題になり **M2 に引き継ぎ**
+- **E2 (Node packing)**: orig の Node を 32→24 B に。orig 系列追加磨きとして残置
+- **A3 (raw_entry で hash 1 回)**: HashMap 経路を持つ orig/v3 系専用、j 系列では無関係
+- **F1 (S3-FIFO) / F2 (W-TinyLFU) / F3 (2-queue SIEVE)**: 比較対象拡張、優先度低
+- **D1 (compact トリガ緩和)**: j3 では `order_cap=2x` 固定のため **M1 に統合**
+- **G (計測軸)**: skew=0.5 / 大 V / churn-heavy 等は未実装、優先度中
+- **J4 (共通 inner segment trait)**: 未実装 (j4 は j3 を直接 wrap)。比較効率化は得られているので緊急性低
+- **J6 (順序保存版 set-associative)**: 未着手、設計コスト大
+
+## 旧本文 (アイディアブレスト原文)
+
+以下は 2026-05-04 時点の文章をそのまま残す。出発点となった
+profile 内訳 (HashMap 80% / hit path 1.5-4.7% / evict 7-9% / compact 0-3.4%) は
+v3 系列に対するもので、j3/j4/j5 では Map 自体が消えているので解釈には注意。
 
 ## A. HashMap 層 (一番太い、最も orthogonal)
 

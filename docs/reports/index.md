@@ -10,10 +10,10 @@
 | v0〜v3 系列 (linked-list + array) | v0-divergence, realistic-workload-bench, v3-bench, v3-profile |
 | orig 改善 (MaybeUninit) | sieve-orig-overhead-analysis |
 | 外部実装調査 | jedi-vs-orig |
-| 設計アイディア集 | improvement-ideas |
+| 設計アイディア集 (living doc) | `../improvement-ideas.md` (旧 `2026-05-04-improvement-ideas.md`、`docs/` 直下に移動) |
 | j3 系列 (Map なし SIMD) | sieve-j3-bench |
 | j4 系列 (set-associative j3) | sieve-j4-set-associative, sieve-j4-crossover-and-shard-sweep, sieve-j4-pershard-vs-footprint |
-| j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto |
+| j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 
 ---
 
@@ -45,11 +45,11 @@ v3 が orig に負ける原因の定量内訳:
 (3) compact が orig に存在しないコスト (+0.8 ms)。
 scan ブロック自体は全体の 7〜8% しかなく、改善余地が元々小さいことを実証。
 
-### 2026-05-04-improvement-ideas.md
-v3 profile 知見を踏まえた A〜J 章の改善アイディアブレスト。
-A (HashMap 層交換)、B (hit path 修正)、C〜D (evict/compact 簡素化)、E (orig を磨く) の
-ROI ランキングに加え、**J 章「Map を捨てる設計群」** (J1 時系列 segment、J2 set-associative、
-J3 全 inline SIMD) を詳細に議論。HashMap 80% を丸ごと消す賭けとして位置づけ。
+### improvement-ideas.md (living doc, 旧 `2026-05-04-improvement-ideas.md`)
+日付つきレポートではなく `docs/improvement-ideas.md` に移動・改名された改善案の倉庫。
+旧 A〜J 章のうち J3 / J2 / J5 派生は実装済 (sieve_j3 / j4 / j5)、A1 (hasher 統一) /
+C2-E1 (MaybeUninit) も適用済。現在の関心は新規 **M 章「j5 メモリフットプリント削減」** —
+`order_cap = 2*cap` の slack と Entry の visited padding を削るルートを並べる。
 
 ### 2026-05-04-jedi-vs-orig.md
 既存 Rust 実装 `jedisct1/rust-sieve-cache` の設計調査。
@@ -113,3 +113,12 @@ per_shard ∈ {32, 64, 128, 256} の総決算 sweep。synthetic Zipf 版の swee
 **scan-heavy な cluster019 で j5 は orig 比 throughput −10〜−16 ns / hit ratio +0.6〜+6.3pp の二重勝ち** —
 SIEVE 単一 hand の scan-resistance 限界が shard 並列化で緩和される、という新しい利得。
 synthetic Zipf だけでは見えなかった「実用ワークロードでむしろ強い」根拠。図 5 枚 (seaborn)。
+
+### 2026-05-05-j5-vs-orig-2x-memfair.md
+公平性の検証: j3/j5 の `order_cap = 2 * capacity` (tombstone 用ヘッドルーム、ghost cache 的補助 slot)
+が「j5 の速度優位は memory hand-out のおかげ」という疑念を生むため、**orig に 2x cap を渡した
+worst-case ハンデ** で再測定。3 レジームに分離 — **per_shard ≤ 12.5 (cap=100)**: orig_2x ハンデでも
+j5 が 2-3x 圧勝 (SIMD scan + shard 並列が pointer chase を支配、memory advantage 由来でないと確定)。
+**per_shard ≈ 125 (cap=1000)**: 拮抗、±数 ns。**per_shard = 1250 (cap=10000)**: j5 完敗 (低 skew で 3x 遅い、
+線形 scan が L1d を踏み外す)。large-cap で j5 を使うなら per_shard を SIMD chunk に保て、
+という Pareto 結論をメモリ公平条件で再確認。
