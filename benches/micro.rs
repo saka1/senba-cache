@@ -6,6 +6,7 @@ use senba_cache::sieve_orig::SieveCache as Orig;
 // use senba_cache::sieve_v2::SieveCache as V2;
 use senba_cache::sieve_v3::SieveCache as V3;
 use senba_cache::sieve_j3::SieveCache as J3;
+use senba_cache::sieve_j4::SieveCache as J4;
 use senba_cache::workload::zipf::ZipfGen;
 use std::hint::black_box;
 use std::time::Duration;
@@ -72,6 +73,7 @@ fn bench_insert_only(c: &mut Criterion) {
             // insert_only_for::<V2<u64, u64>>(&mut group, "v2", skew, cap, &trace);
             insert_only_for::<V3<u64, u64>>(&mut group, "v3", skew, cap, &trace);
             insert_only_for::<J3<u64, u64>>(&mut group, "j3", skew, cap, &trace);
+            insert_only_for::<J4<u64, u64>>(&mut group, "j4", skew, cap, &trace);
         }
     }
     group.finish();

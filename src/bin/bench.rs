@@ -12,8 +12,11 @@
 use std::time::Instant;
 
 use senba_cache::Cache;
+use senba_cache::sieve_j3::SieveCache as J3;
+use senba_cache::sieve_j4::SieveCache as J4;
 use senba_cache::sieve_orig::SieveCache as Orig;
 use senba_cache::sieve_v0::SieveCache as V0;
+use senba_cache::sieve_v3::SieveCache as V3;
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
 
@@ -153,6 +156,15 @@ fn main() {
             let s = match v.as_str() {
                 "orig" => drive::<Orig<u64, u64>>(&trace, cap),
                 "v0" => drive::<V0<u64, u64>>(&trace, cap),
+                "v3" => drive::<V3<u64, u64>>(&trace, cap),
+                "j3" => drive::<J3<u64, u64>>(&trace, cap),
+                "j4" => drive::<J4<u64, u64>>(&trace, cap),
+                "j4_n1" => drive::<J4<u64, u64, 1>>(&trace, cap),
+                "j4_n2" => drive::<J4<u64, u64, 2>>(&trace, cap),
+                "j4_n4" => drive::<J4<u64, u64, 4>>(&trace, cap),
+                "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap),
+                "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap),
+                "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(
