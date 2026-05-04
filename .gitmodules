@@ -1,3 +1,6 @@
 [submodule "external/NSDI24-SIEVE"]
 	path = external/NSDI24-SIEVE
 	url = https://github.com/cacheMon/NSDI24-SIEVE.git
+[submodule "external/rust-sieve-cache"]
+	path = external/rust-sieve-cache
+	url = https://github.com/jedisct1/rust-sieve-cache.git
