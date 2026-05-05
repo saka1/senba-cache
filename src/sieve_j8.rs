@@ -1,5 +1,5 @@
 //! J8 — j7 + tag 内 entry_id 埋込 + entries arena = capacity (slack なし) + free_list 廃止
-//! + **§8.2(a) BLSR ×2** + **§8.3(a) sizeof(Entry)-aware bit layout**。
+//! + BLSR ×2 + sizeof(Entry)-aware bit layout。
 //!
 //! ## 動機 (`docs/improvement-ideas.md` §M1, §M2.3, §M5.3 を統合;
 //!         `docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) + §8.3(a) を反映)
@@ -23,13 +23,12 @@
 //! 結果として **inline 物理 20 B/cap** (j7 比 −44%、orig 比 −20%) を
 //! 達成しつつ、SIEVE 意味論は j7 と完全一致 (= `sieve_orig` oracle 通過)。
 //!
-//! ## bit レイアウト (§8.3(a) sizeof(Entry) 連動版)
+//! ## bit レイアウト
 //!
-//! 元設計 (§M5.3) は id を bits 8..13 に固定していたが、`find_avx2` の inner
-//! ループ末尾に **「id × sizeof(Entry) のための `shl ebx, 4`」が残る** という
-//! 課題があった (`docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §4.1)。
-//!
-//! 本実装はこれを **bit レイアウト変更で消す**:
+//! 設計の肝は **id 領域を `tag` の `[ID_SHIFT, ID_SHIFT+6)` bit に置く** ことで、
+//! `tag & ID_MASK` がそのまま `id × sizeof(Entry)` (= entries arena 内の
+//! byte offset) と一致するようにしている点。これにより `find_avx2` の inner ループ
+//! で `id × sizeof(Entry)` を求めるための `shl` が不要になる:
 //!
 //! ```text
 //! ID_SHIFT = log2(sizeof(Entry<K, V>))     ; 2 の冪を要求 (1..=256 byte)
@@ -53,7 +52,7 @@
 //!   bits 0..3   : hash 低 4 bit
 //! ```
 //!
-//! ### なぜこれで `shl` が消えるか (§8.3(a) のキモ)
+//! ### なぜ `shl` が不要になるか
 //!
 //! id (6 bit) を **`log2(sizeof(Entry))` ビット目から始める** と:
 //!
@@ -65,9 +64,9 @@
 //!   = entries 配列内の **byte offset**
 //! ```
 //!
-//! が成立する。よって `(entries_ptr as *const u8).add(tag & ID_MASK)` で 1 命令直接
-//! Entry に到達でき、`movzx → and → shl → cmp+load` の 4 命令連鎖が
-//! `movzx → and → cmp+load` の 3 命令に縮む (Path A −1 cy)。
+//! が成立する。よって `(entries_ptr as *const u8).add(tag & ID_MASK)` の 1 命令で
+//! Entry に到達でき、candidate 1 個あたり `movzx → and → cmp+load` の 3 命令連鎖で済む
+//! (id を低位 6 bit に置いた場合の `movzx → and → shl → cmp+load` 4 命令より dep chain が 1 cy 短い)。
 //!
 //! ### sizeof 制約と非対応サイズ
 //!
@@ -81,7 +80,7 @@
 //! - SIMD scan の比較対象は `LIVE | HASH_MASK` (= `SCAN_MASK`)。visited と id bit は
 //!   mask out されるので scan の一致判定に影響しない。
 //! - `MAX_PER_SHARD = 64` を構造的上限として `Inner::new` で `assert!`。
-//!   per_shard sweet spot ∈ [16, 32] (§7.3) と整合する。
+//!   per_shard の bench 上の sweet spot ∈ [16, 32] と整合する。
 //!
 //! ## 不変条件
 //!
@@ -208,8 +207,8 @@ where
     /// 64-bit hash の上位 8 bit を tag の hash 部に流し込む。
     /// shard 選択は下位 log2(SHARDS) bit なので独立 entropy。
     ///
-    /// `HASH_MASK` は §8.3(a) のレイアウト変更により id 領域を挟んで分断される
-    /// (例: ID_SHIFT=4 では bits 0..3 + bits 10..13)。
+    /// `HASH_MASK` は id 領域 (`[ID_SHIFT, ID_SHIFT+6)`) を挟んで低位/高位の
+    /// 2 サブブロックに分断されている (例: ID_SHIFT=4 では bits 0..3 + bits 10..13)。
     /// 8 bit の hash を「低 ID_SHIFT bit」と「残り (8 − ID_SHIFT) bit」に
     /// 分割して、それぞれを HASH_MASK の低位/高位サブブロックに置く。
     ///
@@ -264,22 +263,26 @@ where
         None
     }
 
-    /// AVX2 + BMI1: `vpand` (SCAN_MASK) → `vpcmpeqw` → `vpmovmskb` → inner candidate
-    /// ループ。`docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) +
-    /// §8.3(a) の最適化を反映:
+    /// AVX2 + BMI1 で `tags[..]` を SCAN_MASK 一致探索する SIMD path。
+    /// 16 lane (= 32 byte = 1 chunk) ずつ
+    /// `vpand → vpcmpeqw → vpmovmskb` で候補ビットマスクを作り、
+    /// inner で 1 候補ずつ key 等価判定にかける。設計上のキモは 3 つ:
     ///
-    /// **§8.3(a) bit レイアウトトリック (Path A 短縮)**
-    /// id を `[ID_SHIFT, ID_SHIFT+6)` に置いたので `tag & ID_MASK` がそのまま
-    /// `id × sizeof(Entry)` (= entries arena 内の **byte offset**) になる。
-    /// よって `(entries_ptr as *const u8).add(id_bytes)` 1 命令で Entry に到達でき、
-    /// 旧実装の `movzx → and 0x3f → shl 4 → cmp+load` (4 命令連鎖) が
-    /// `movzx → and 0x03f0 → cmp+load` (3 命令) に縮む。Path A の dep chain −1 cy。
+    /// **(a) tag → entry の byte offset を直接展開 (`shl` 省略)**
     ///
-    /// **§8.2(a) BLSR ×2 (Path B 短縮)**
-    /// `vpcmpeqw + vpmovmskb` の出力は **必ず偶数位置のビットペア** (epi16 一致が
-    /// 2 byte/lane なので bit が 2 連で立つ)。BMI1 の `BLSR (= x & (x − 1))` は
-    /// 「最下位 1 ビットをクリア」する命令なので、2 回適用するとちょうど
-    /// 1 ペア (= 1 candidate 分) が落ちる:
+    /// id (6 bit) を `tag` の `[ID_SHIFT, ID_SHIFT+6)` に置いてあるので
+    /// `id × sizeof(Entry) = tag & ID_MASK`。candidate 1 個ごとに
+    /// `(entries_ptr as *const u8).add(tag & ID_MASK)` の 1 命令で Entry に到達でき、
+    /// `movzx → and → cmp+load` の 3 命令連鎖で済む。
+    /// id を低位 6 bit に置くナイーブ pack だと `movzx → and → shl → cmp+load`
+    /// の 4 命令になり candidate 1 個あたり dep chain が 1 cy 伸びる。
+    ///
+    /// **(b) BLSR ×2 で候補マスクを 1 ペア進める**
+    ///
+    /// `vpcmpeqw + vpmovmskb` の出力は **必ず偶数位置のビットペア**
+    /// (epi16 一致 ⟹ 2 byte 連で MSB が立つ) になる。BMI1 の
+    /// `BLSR = x & (x − 1)` は最下位 1 bit を消す命令なので、2 回適用すると
+    /// ちょうど 1 ペア (= 1 candidate) が落ちる:
     ///
     /// ```text
     ///   mask = ...0011_0000   ; lane=2 が match
@@ -287,46 +290,44 @@ where
     ///   blsr → ...0000_0000  ; 残った上位 (bit 5) を消す
     /// ```
     ///
-    /// 旧 `mask &= !(0b11 << (lane << 1))` は `mov + shl + not + and` の
-    /// 4 ops + tzcnt との依存連鎖で **Path B = 7 cy**。BLSR ×2 は **2 ops、
-    /// tzcnt 結果に依存しない** (mask だけ参照) ので **Path B = 2 cy**。
-    /// false-match 連発時の inner ループ throughput が直接効く。
+    /// 純 bit-twiddle の `mask &= !(0b11 << (lane << 1))` は
+    /// `mov + shl + not + and` (4 ops) + tzcnt 結果への依存で inner dep chain
+    /// に乗ってしまう。BLSR ×2 は **2 ops、しかも tzcnt 結果に独立**
+    /// (mask しか参照しない) ので OOO が次 iter の tzcnt と並列に進められる。
+    /// false-match を回し続ける inner throughput が直接効く。
     ///
-    /// `_blsr_u32` intrinsic を直書きして LLVM が BLSR を確実に出すよう強制している
-    /// (`x & (x - 1)` パターンは出ないことがある)。`bmi1` は AVX2-capable CPU
-    /// (Haswell 2013+) では同梱なので `is_x86_feature_detected!("avx2")` の下では
-    /// 実行時に必ず利用可能 — `target_feature` で `bmi1` を有効化して inline 化を許す。
+    /// `_blsr_u32` intrinsic を直書きしている理由: LLVM は `x & (x - 1)` から
+    /// BLSR を **必ずしも emit しない** (`lea + and` 等に化けることがある)。
+    /// 観測ではなく形で固定する。BMI1 は AVX2-capable CPU (Haswell 2013+) には
+    /// 同梱されているので `is_x86_feature_detected!("avx2")` の枝に入った時点で
+    /// 実行時に常に利用可能 — `target_feature` で `bmi1` を明示有効化して inline を許す。
     ///
-    /// **§8.4(c) chunk base ptr hoist (Path A 更に短縮 + inner ops 削減)**
-    /// `tzcnt(mask)` の戻り値 `bit` は `vpmovmskb` の性質から
-    /// `bit = lane * 2` (lane = u16 lane index) で、しかも u16 1 個 = 2 byte なので
-    /// **`bit` がそのまま「chunk 内の byte offset」**。outer ループで
-    /// `chunk_byte_ptr = tags_byte_ptr + i * 2` を 1 回計算しておけば、inner では
-    /// `chunk_byte_ptr + bit` で目的の tag を直接 load できる:
+    /// **(c) chunk 先頭 byte pointer を outer に hoist**
     ///
-    /// - 旧: `tzcnt → mov,shr (lane=bit>>1) → or (pos=i+lane) → movzwl [tags+pos*2]`
-    ///   (4 ops 連鎖、依存深さ 3 cy)
-    /// - 新: `tzcnt → movzwl [chunk+bit]` (2 ops 連鎖、依存深さ 1 cy)
+    /// `tzcnt(mask)` の戻り値 `bit` は `vpmovmskb` の性質から `bit = lane * 2`
+    /// (lane = u16 lane index) で、しかも u16 1 個 = 2 byte なので
+    /// **`bit` がそのまま「chunk 内の byte offset」**。
+    /// outer で `chunk_byte_ptr = tags_byte_ptr + i * 2` を 1 回 lea しておくと、
+    /// inner は `chunk_byte_ptr + bit` で目的の tag を直接 load でき
+    /// (`tzcnt → movzwl [chunk+bit]` の 2 ops)、
+    /// `lane = bit >> 1; pos = i + lane` の 3 ops は **hit パス
+    /// (return 値構築) でしか不要**になる。outer +1 op (lea) と引き換えに
+    /// false-match の多い inner 本体を軽くする取引。
     ///
-    /// `lane = bit >> 1; pos = i + lane` の計算は **hit (success path) でしか
-    /// 必要ない** (= return 値の構築) ので、外に出してから条件分岐後に行う。
-    /// false-match を 1 周回す inner ループの本体はそのぶん軽くなる。
-    ///
-    /// outer ループ側の追加コストは `lea chunk, [tags + i*2]` 1 命令のみ。
-    /// per_shard=16 (運用 sweet spot) では candidate 数 ≈ 0.69/scan なので
-    /// inner −3 ops × 0.69 = −2.1 ops/scan、outer +1 op で純減 −1.1 ops/scan。
+    /// per_shard=16 (sweet spot) で候補数 ≈ 0.69/scan のオーダーなので
+    /// inner −3 ops × 0.69 が outer +1 op を十分に上回る。
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
         use std::arch::x86_64::*;
         let limit = self.tags.len();
         let tags_ptr = self.tags.as_ptr();
-        // §8.4(c): tags を **byte pointer** でも保持しておく。
-        // inner ループでは `chunk_byte_ptr + bit` の形で tag を直接 load する
-        // (bit は tzcnt(mask) の戻り値で「chunk 内 byte offset」と同値)。
+        // tags を byte pointer でも保持しておき、inner では
+        // `chunk_byte_ptr + bit` の形で tag を直接 load する
+        // (bit は tzcnt(mask) の戻り値で「chunk 内の byte offset」と同値、上の (c) 参照)。
         let tags_byte_ptr = tags_ptr as *const u8;
-        // entries を **byte ポインタ**で持つ。`tag & ID_MASK` (= id × sizeof(Entry))
-        // を直接 byte offset として加算するため (§8.3(a))。
+        // entries も byte ポインタで持つ。`tag & ID_MASK` (= id × sizeof(Entry))
+        // を加算するだけで Entry に到達する設計 (上の (a) 参照)。
         let entries_byte_ptr = self.entries.as_ptr() as *const u8;
         let needle_v = _mm256_set1_epi16(needle as i16);
         let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
@@ -339,10 +340,10 @@ where
             let cmp = _mm256_cmpeq_epi16(masked, needle_v);
             let mut mask = _mm256_movemask_epi8(cmp) as u32;
 
-            // §8.4(c): chunk 先頭の **byte pointer** を outer で 1 回作る。
-            // i は u16 単位の index なので byte 単位では `i * 2`。
-            // この計算 (lea 1 命令) を outer に追い出すことで inner からは
-            // `lane = bit >> 1; pos = i + lane` の 3 ops が消える。
+            // chunk 先頭の byte pointer を outer で 1 回 lea する
+            // (i は u16 index なので byte では `i * 2`)。
+            // inner からは `lane = bit >> 1; pos = i + lane` の 3 ops が消え、
+            // hit 確定後にだけ計算すればよくなる。
             let chunk_byte_ptr = unsafe { tags_byte_ptr.add(i * 2) };
 
             while mask != 0 {
@@ -357,8 +358,8 @@ where
                 // → `chunk_byte_ptr + bit` で当該 u16 tag を直接 load できる。
                 let bit = mask.trailing_zeros() as usize;
 
-                // tag を読み戻して id 部の bit を抽出。bit pattern が
-                // 「id × sizeof(Entry)」と一致するので shift 不要 — そのまま byte offset (§8.3(a))。
+                // tag を読み戻して id 部 (= ID_MASK 区間) を抽出。bit pattern が
+                // `id × sizeof(Entry)` と一致するので shift せずそのまま byte offset。
                 //
                 // SAFETY: chunk_byte_ptr は tags 配列内、bit ≦ 31 (mask は u32 で
                 // 取り得る最大 bit = 31)、chunk 1 個分 = 32 byte のため境界内。
@@ -377,15 +378,15 @@ where
                 };
                 let e = unsafe { (*entry_ptr).assume_init_ref() };
                 if &e.key == key {
-                    // §8.4(c): success path 限定で lane / pos を計算。
-                    // failure を回し続ける inner 側からはこの 2 ops を追い出した。
+                    // hit パスでだけ lane / pos を組み立てる (false-match を
+                    // 回す inner 本体からは外出ししてある)。
                     let lane = bit >> 1;
                     return Some(i + lane);
                 }
-                // §8.2(a): BLSR ×2 で「最下位ペア」を 1 候補ぶん落とす。
-                // tzcnt 結果 (= bit) と独立な依存関係なので OOO の観点でも
-                // 次 iter の tzcnt をブロックしない。
-                // (`unsafe fn find_avx2` のスコープ内なので追加 unsafe ブロックは不要。)
+                // BLSR ×2 で「最下位ペア」を 1 候補ぶん落とす。
+                // mask しか参照しないので tzcnt の結果に依存せず、
+                // OOO は次 iter の tzcnt と並列に走らせられる。
+                // (`unsafe fn` スコープ内なので追加の unsafe ブロックは不要。)
                 mask = _blsr_u32(mask); // 最下位 1 bit を消去
                 mask = _blsr_u32(mask); // 残った上位 (= ペアの上位) も消去
             }
@@ -887,7 +888,7 @@ mod tests {
         // id (= MAX_PER_SHARD - 1 = 63) を ID_SHIFT 桁シフトすると ID_MASK 全ビット。
         assert_eq!((MAX_PER_SHARD - 1) as u16, I::ID_MASK >> I::ID_SHIFT);
 
-        // §8.3(a) のキー不変条件:
+        // find_avx2 が依拠するキー不変条件:
         //   tag に id を埋めると `tag & ID_MASK = id × sizeof(Entry)` (= byte offset)。
         let entry_size = std::mem::size_of::<Entry<u64, u64>>();
         for id in 0..MAX_PER_SHARD {
