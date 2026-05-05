@@ -1,4 +1,4 @@
-//! `senba_cache::Cache` — j8 系列を SlotSize 抽象で padding 自動化したライブラリ向け
+//! `senba::Cache` — j8 系列を SlotSize 抽象で padding 自動化したライブラリ向け
 //! SIEVE 実装。
 //!
 //! 設計詳細は `docs/reports/2026-05-06-senba-sievecache-design.md`。
@@ -124,7 +124,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// const-eval: `sizeof(Entry<K, V>) <= S::SIZE`。
     const _SIZE_OK: () = assert!(
         std::mem::size_of::<Entry<K, V>>() <= S::SIZE,
-        "senba_cache::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
+        "senba::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
          Try a larger SlotSize (e.g. Slot64)."
     );
 
@@ -134,7 +134,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// (`tag & ID_MASK = id × S::SIZE`) が破綻する。これを compile-fail で防ぐ。
     const _STORAGE_SIZE_OK: () = assert!(
         std::mem::size_of::<<S as SlotSize>::Storage<Entry<K, V>>>() == S::SIZE,
-        "senba_cache::Cache: SlotStorage size differs from SlotSize::SIZE. \
+        "senba::Cache: SlotStorage size differs from SlotSize::SIZE. \
          (likely caused by Entry alignment > 8 byte)"
     );
 
@@ -490,7 +490,7 @@ pub const DEFAULT_SHARDS: usize = 8;
 /// publishable な SIEVE cache。`SlotSize` で entry stride を型レベル指定する。
 ///
 /// ```
-/// use senba_cache::Cache;
+/// use senba::Cache;
 ///
 /// // default Slot32: Entry<u64, String> (sizeof=32) で exact fit
 /// let mut c: Cache<u64, String> = Cache::new(8);
@@ -885,7 +885,7 @@ mod tests {
             assert_eq!(
                 a.get(&k).copied(),
                 b.get(&k).copied(),
-                "1-shard で sieve_orig と senba_cache::Cache が key {k} で食い違う"
+                "1-shard で sieve_orig と senba::Cache が key {k} で食い違う"
             );
         }
     }

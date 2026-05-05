@@ -1,9 +1,9 @@
 //! sieve_orig (NSDI'24 著者参照ポート) を oracle として、
 //! 他の variant が同じトレースで同じ evict 列を出すことを検証する差分テスト。
 
-use senba_cache::workload::file;
-use senba_cache::workload::zipf::ZipfGen;
-use senba_cache::{CacheImpl, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
+use senba::workload::file;
+use senba::workload::zipf::ZipfGen;
+use senba::{CacheImpl, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
 
 fn run<C: CacheImpl<u64, u64>>(
     trace: impl Iterator<Item = u64>,

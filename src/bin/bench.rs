@@ -15,16 +15,16 @@
 
 use std::time::Instant;
 
-use senba_cache::CacheImpl;
+use senba::CacheImpl;
 // 2026-05-05: ベースラインを orig vs j7 に絞り込み。過去 variant は
 // 必要になれば use と matcher を復活させる (テスト・実装は残置)。
-// use senba_cache::sieve_j3::SieveCache as J3;
-// use senba_cache::sieve_j4::SieveCache as J4;
-// use senba_cache::sieve_j5::SieveCache as J5;
-// use senba_cache::sieve_j6::SieveCache as J6;
-use senba_cache::sieve_j7::SieveCache as J7;
-use senba_cache::sieve_j8::SieveCache as J8;
-use senba_cache::sieve_orig::SieveCache as Orig;
+// use senba::sieve_j3::SieveCache as J3;
+// use senba::sieve_j4::SieveCache as J4;
+// use senba::sieve_j5::SieveCache as J5;
+// use senba::sieve_j6::SieveCache as J6;
+use senba::sieve_j7::SieveCache as J7;
+use senba::sieve_j8::SieveCache as J8;
+use senba::sieve_orig::SieveCache as Orig;
 
 /// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
 /// thin wrapper。bench でのみ使うので bench.rs 内に閉じる。
@@ -52,7 +52,7 @@ struct MiniMoka {
 
 const MINI_MOKA_DUMMY: u64 = 0;
 
-impl senba_cache::CacheImpl<u64, u64> for MiniMoka {
+impl senba::CacheImpl<u64, u64> for MiniMoka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: mini_moka::sync::Cache::new(capacity as u64),
@@ -98,7 +98,7 @@ struct Moka {
 
 const MOKA_DUMMY: u64 = 0;
 
-impl senba_cache::CacheImpl<u64, u64> for Moka {
+impl senba::CacheImpl<u64, u64> for Moka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: moka::sync::Cache::new(capacity as u64),
@@ -126,10 +126,10 @@ impl senba_cache::CacheImpl<u64, u64> for Moka {
         self.inner.contains_key(key)
     }
 }
-// use senba_cache::sieve_v0::SieveCache as V0;
-// use senba_cache::sieve_v3::SieveCache as V3;
-use senba_cache::workload::file;
-use senba_cache::workload::zipf::ZipfGen;
+// use senba::sieve_v0::SieveCache as V0;
+// use senba::sieve_v3::SieveCache as V3;
+use senba::workload::file;
+use senba::workload::zipf::ZipfGen;
 
 struct Args {
     source: String,
