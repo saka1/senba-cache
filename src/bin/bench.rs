@@ -25,6 +25,107 @@ use senba_cache::Cache;
 use senba_cache::sieve_j7::SieveCache as J7;
 use senba_cache::sieve_j8::SieveCache as J8;
 use senba_cache::sieve_orig::SieveCache as Orig;
+
+/// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
+/// thin wrapper。bench でのみ使うので bench.rs 内に閉じる。
+///
+/// **重要**: mini-moka は read/write log を内部 buffer にためて amortize するため、
+/// 明示的に `ConcurrentCacheExt::sync()` を呼ばないと CMSketch 更新と admission 決定が
+/// 反映されない。upstream の test code (sync/cache.rs `basic_single_thread`) が毎回
+/// sync() を呼んでいることから、決定的な HR を測るには get/insert 後に sync() が必須。
+/// 呼ばないと admission 判定が遅延し、新規 key が write buffer overflow で落ちて
+/// HR が崩壊する。本 adapter では HR の正しさを優先し、毎 op 後に sync() を呼ぶ。
+/// その分 ns/op は実態より悪化するが、HR が screening の gate なので許容する。
+///
+/// 制約:
+/// - mini_moka の `insert` は `()` を返すため、追い出された (K,V) は取れない。
+///   `Cache::insert` は常に `None` を返す → CSV の evictions 列は 0 固定で**意味が無い**。
+///   HR と ns/op だけ参照すること。
+/// - `get` は `Option<V>` (clone) を返す。trait は `Option<&V>` 要求。bench の `drive`
+///   は `.is_some()` しか見ないので、ヒット時はダミー静的参照を返して整合させる。
+/// - `max_capacity` は重み合計の budget。default weighter は entry あたり 1 なので
+///   おおむね entry 数 == capacity と見做せる。
+struct MiniMoka {
+    inner: mini_moka::sync::Cache<u64, u64>,
+    cap: u64,
+}
+
+const MINI_MOKA_DUMMY: u64 = 0;
+
+impl senba_cache::Cache<u64, u64> for MiniMoka {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: mini_moka::sync::Cache::new(capacity as u64),
+            cap: capacity as u64,
+        }
+    }
+    fn capacity(&self) -> usize {
+        self.cap as usize
+    }
+    fn len(&self) -> usize {
+        use mini_moka::sync::ConcurrentCacheExt;
+        self.inner.sync();
+        self.inner.entry_count() as usize
+    }
+    fn get(&mut self, key: &u64) -> Option<&u64> {
+        use mini_moka::sync::ConcurrentCacheExt;
+        let hit = self.inner.get(key).is_some();
+        self.inner.sync();
+        if hit { Some(&MINI_MOKA_DUMMY) } else { None }
+    }
+    fn insert(&mut self, key: u64, value: u64) -> Option<(u64, u64)> {
+        use mini_moka::sync::ConcurrentCacheExt;
+        self.inner.insert(key, value);
+        self.inner.sync();
+        None
+    }
+    fn contains_key(&self, key: &u64) -> bool {
+        self.inner.contains_key(key)
+    }
+}
+
+/// `moka 0.12::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる thin wrapper。
+/// mini_moka との違いは:
+/// - moka 0.12+ は adaptive window sizing (Caffeine の hill-climbing 由来) が入っており、
+///   scan-heavy では window を広げて mini-moka 0.10 の HR 崩壊を回避できるはず。
+/// - flush API は `run_pending_tasks(&self)` (mini_moka の `sync()` 相当)。
+/// - `get` は `Option<V>` (clone) を返すのは同じ。
+/// - `insert` は `()` を返すので CSV evictions は 0 固定。
+struct Moka {
+    inner: moka::sync::Cache<u64, u64>,
+    cap: u64,
+}
+
+const MOKA_DUMMY: u64 = 0;
+
+impl senba_cache::Cache<u64, u64> for Moka {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: moka::sync::Cache::new(capacity as u64),
+            cap: capacity as u64,
+        }
+    }
+    fn capacity(&self) -> usize {
+        self.cap as usize
+    }
+    fn len(&self) -> usize {
+        self.inner.run_pending_tasks();
+        self.inner.entry_count() as usize
+    }
+    fn get(&mut self, key: &u64) -> Option<&u64> {
+        let hit = self.inner.get(key).is_some();
+        self.inner.run_pending_tasks();
+        if hit { Some(&MOKA_DUMMY) } else { None }
+    }
+    fn insert(&mut self, key: u64, value: u64) -> Option<(u64, u64)> {
+        self.inner.insert(key, value);
+        self.inner.run_pending_tasks();
+        None
+    }
+    fn contains_key(&self, key: &u64) -> bool {
+        self.inner.contains_key(key)
+    }
+}
 // use senba_cache::sieve_v0::SieveCache as V0;
 // use senba_cache::sieve_v3::SieveCache as V3;
 use senba_cache::workload::file;
@@ -244,6 +345,10 @@ fn main() {
                 "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap),
                 "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap),
                 "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
+                // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
+                "mini_moka" => drive::<MiniMoka>(&trace, cap),
+                // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
+                "moka" => drive::<Moka>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(

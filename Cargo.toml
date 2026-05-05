@@ -7,6 +7,12 @@ edition = "2024"
 rand = "0.10"
 rand_distr = "0.6"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# W-TinyLFU 比較用 (bench からのみ参照)。moka 本体ではなく mini-moka を選ぶのは
+# synchronous + background thread 無しで CPU を奪われない公平条件を作るため。
+mini-moka = "0.10"
+# moka 0.12+ は adaptive window sizing が入っており、scan-heavy で window を広げる。
+# mini-moka との比較で「default tuning がボトルネックか / W-TinyLFU 系全般の性質か」を切り分ける。
+moka = { version = "0.12", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }
