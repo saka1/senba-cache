@@ -1,6 +1,8 @@
-//! J8 — j7 + tag 内 entry_id 埋込 + entries arena = capacity (slack なし) + free_list 廃止。
+//! J8 — j7 + tag 内 entry_id 埋込 + entries arena = capacity (slack なし) + free_list 廃止
+//! + **§8.2(a) BLSR ×2** + **§8.3(a) sizeof(Entry)-aware bit layout**。
 //!
-//! ## 動機 (`docs/improvement-ideas.md` §M1, §M2.3, §M5.3 を統合; `j8_plan.md` 参照)
+//! ## 動機 (`docs/improvement-ideas.md` §M1, §M2.3, §M5.3 を統合;
+//!         `docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) + §8.3(a) を反映)
 //!
 //! j7 (M2.3) は u16 tag に live + visited + 14-bit hash を packing して
 //! Twitter cluster018 全帯域で j5/j6 を支配したが、`order_cap = 2 × capacity`
@@ -12,7 +14,7 @@
 //! 1. **slack を片側に寄せる** (§M5.3): tags は `2 × capacity` (slack 持ち、
 //!    tombstone 用)、entries は `capacity` (slack なし)
 //! 2. **tag bit に entry_id を埋める** (本設計の中核): u16 tag に
-//!    `[live(1) | visited(1) | id(6) | hash(8)]` を packing。`order` 別配列が
+//!    `[live(1) | visited(1) | hash + id (14 bit)]` を packing。`order` 別配列が
 //!    不要になり、entries 1× cap と整合
 //! 3. **free_list 廃止**: insert API のみで `remove` を露出しないため、
 //!    evict が返した freed_id は同一 insert 呼び出し内で必ず消費される
@@ -21,19 +23,65 @@
 //! 結果として **inline 物理 20 B/cap** (j7 比 −44%、orig 比 −20%) を
 //! 達成しつつ、SIEVE 意味論は j7 と完全一致 (= `sieve_orig` oracle 通過)。
 //!
-//! ## bit レイアウト
+//! ## bit レイアウト (§8.3(a) sizeof(Entry) 連動版)
+//!
+//! 元設計 (§M5.3) は id を bits 8..13 に固定していたが、`find_avx2` の inner
+//! ループ末尾に **「id × sizeof(Entry) のための `shl ebx, 4`」が残る** という
+//! 課題があった (`docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §4.1)。
+//!
+//! 本実装はこれを **bit レイアウト変更で消す**:
 //!
 //! ```text
-//! bit 15    : live      (1 = occupied、0 = EMPTY/tombstone)
-//! bit 14    : visited
-//! bit 8..13 : entry_id  (6 bit、0..63)
-//! bit 0..7  : hash      (8 bit、`hash >> 56` の上位バイト)
+//! ID_SHIFT = log2(sizeof(Entry<K, V>))     ; 2 の冪を要求 (1..=256 byte)
+//! ID_MASK  = ((MAX_PER_SHARD - 1) as u16) << ID_SHIFT
+//!          = 6-bit id を tag 内 [ID_SHIFT, ID_SHIFT+6) 区間に置く
+//! HASH_MASK = bits 0..14 のうち id 領域以外  (常にちょうど 8 bit)
 //! ```
 //!
-//! - SIMD scan の比較対象は `live | hash` のみ (= `SCAN_MASK = 0x80FF`)。
-//!   visited / id bit は mask out されるので scan の一致判定に影響しない。
+//! 具体例 — bench / 実測の主流ケース `Entry<u64, u64>` (sizeof=16):
+//!
+//! ```text
+//! ID_SHIFT = 4                ; log2(16) = 4
+//! ID_MASK  = 0x03f0           ; bits 4..9
+//! HASH_MASK = 0x3c0f          ; bits 0..3 (低 4 bit) + bits 10..13 (高 4 bit)
+//! SCAN_MASK = LIVE | HASH_MASK = 0xbc0f
+//!
+//!   bit 15  : live
+//!   bit 14  : visited
+//!   bits 10..13 : hash 高 4 bit
+//!   bits 4..9   : id (6 bit)
+//!   bits 0..3   : hash 低 4 bit
+//! ```
+//!
+//! ### なぜこれで `shl` が消えるか (§8.3(a) のキモ)
+//!
+//! id (6 bit) を **`log2(sizeof(Entry))` ビット目から始める** と:
+//!
+//! ```text
+//! tag & ID_MASK
+//!   = id の bit パターンがそのまま「ID_SHIFT 桁 左に詰まった値」
+//!   = id × (1 << ID_SHIFT)
+//!   = id × sizeof(Entry)
+//!   = entries 配列内の **byte offset**
+//! ```
+//!
+//! が成立する。よって `(entries_ptr as *const u8).add(tag & ID_MASK)` で 1 命令直接
+//! Entry に到達でき、`movzx → and → shl → cmp+load` の 4 命令連鎖が
+//! `movzx → and → cmp+load` の 3 命令に縮む (Path A −1 cy)。
+//!
+//! ### sizeof 制約と非対応サイズ
+//!
+//! `assert!(sizeof(Entry).is_power_of_two() && sizeof <= 256)` を const eval
+//! で要求する。bench/oracle テストで使う型 (`Entry<u64,u64>=16`,
+//! `Entry<i32,i32>=8`, `Entry<u64,String>=32` 等) は全て power-of-2 で適合。
+//! &str (= 16 byte) を組み合わせた `Entry<i32, &str>` (= 24 byte) のような
+//! 非 2 冪サイズはコンパイル時 panic する — その場合は 2 冪型に
+//! padding するか別 variant で実装する。
+//!
+//! - SIMD scan の比較対象は `LIVE | HASH_MASK` (= `SCAN_MASK`)。visited と id bit は
+//!   mask out されるので scan の一致判定に影響しない。
 //! - `MAX_PER_SHARD = 64` を構造的上限として `Inner::new` で `assert!`。
-//!   per_shard sweet spot ∈ [32, 64] と整合する。
+//!   per_shard sweet spot ∈ [16, 32] (§7.3) と整合する。
 //!
 //! ## 不変条件
 //!
@@ -52,22 +100,36 @@ use std::mem::MaybeUninit;
 const EMPTY: u16 = 0;
 const LIVE: u16 = 0x8000;
 const VISITED: u16 = 0x4000;
-/// entry_id を tag bit 8..13 に置くためのシフト幅。
-const ID_SHIFT: u32 = 8;
-/// bit 8..13 (6 bit、entry_id 領域)。
-const ID_MASK: u16 = 0x3F00;
-/// bit 0..7 (8 bit、hash 領域)。
-const HASH_MASK: u16 = 0x00FF;
-/// SIMD scan 用「live + hash」マスク。visited と id を同時に mask out する。
-const SCAN_MASK: u16 = LIVE | HASH_MASK;
 /// AVX2 1 chunk = 32 byte = 16 u16 lane。
 const LANE: usize = 16;
 /// 6-bit entry_id の構造的上限。per_shard はこの値以下でなければならない。
 pub const MAX_PER_SHARD: usize = 64;
 
-#[inline]
-fn id_of(tag: u16) -> usize {
-    ((tag & ID_MASK) >> ID_SHIFT) as usize
+/// `sizeof(Entry)` から ID_SHIFT (= log2(sizeof)) を const-eval で算出。
+///
+/// 制約: 2 の冪 かつ `<= 256`。
+/// - 2 の冪でないと `id × sizeof = id << ID_SHIFT = tag & ID_MASK` の同値が壊れる。
+/// - 256 を超えると ID_SHIFT >= 9 で id 領域 (6 bit) が visited bit (14) に侵食する。
+const fn id_shift_from_entry_size(s: usize) -> u32 {
+    assert!(
+        s.is_power_of_two(),
+        "sieve_j8: sizeof(Entry<K,V>) must be a power of two (extend with padding if needed)"
+    );
+    assert!(s <= 256, "sieve_j8: sizeof(Entry<K,V>) must be <= 256");
+    // s >= 1 は is_power_of_two が保証 (0 is not power of two)。
+    s.trailing_zeros()
+}
+
+/// 6-bit id を「左に ID_SHIFT 詰めた」値の集合をカバーする mask。
+const fn id_mask_from_shift(id_shift: u32) -> u16 {
+    ((MAX_PER_SHARD - 1) as u16) << id_shift
+}
+
+/// hash は bits 0..14 のうち id 領域以外。常にちょうど 8 bit 確保される
+/// (1 + 1 + 6 + 8 = 16 を割り当てるレイアウトなので算術的に保証)。
+const fn hash_mask_from_id_mask(id_mask: u16) -> u16 {
+    // bits 0..13 全体 (= LIVE/VISITED 以外) から id 領域を抜いたもの。
+    0x3FFF & !id_mask
 }
 
 struct Entry<K, V> {
@@ -89,6 +151,32 @@ struct Inner<K, V> {
     hand: usize,
     /// 現在 live な entry 数 (= live tag 数)。
     len: usize,
+}
+
+// レイアウト関連 (bounds なし) — Drop からも呼び出せるよう Hash + Eq の外側に置く。
+impl<K, V> Inner<K, V> {
+    /// `Entry<K, V>` のサイズ。`entries_ptr.add(id)` 相当を byte 単位
+    /// arithmetic で行う際の倍率。`ID_SHIFT` で `log2()` を取る前提なので
+    /// 2 の冪である必要がある (see `id_shift_from_entry_size`)。
+    const ENTRY_SIZE: usize = std::mem::size_of::<Entry<K, V>>();
+    /// id (6 bit) を tag のどの bit 位置に置くか。bit pattern が
+    /// **`id × sizeof(Entry)` の値と一致する** ように `log2(ENTRY_SIZE)` を取る。
+    const ID_SHIFT: u32 = id_shift_from_entry_size(Self::ENTRY_SIZE);
+    /// id 領域を覆う mask。`tag & ID_MASK = id × sizeof(Entry)`
+    /// (= entries 内の byte offset) の関係が成立する。
+    const ID_MASK: u16 = id_mask_from_shift(Self::ID_SHIFT);
+    /// hash 領域を覆う mask (常にちょうど 8 bit 分散)。
+    const HASH_MASK: u16 = hash_mask_from_id_mask(Self::ID_MASK);
+    /// SIMD scan の比較対象。visited と id を mask out して live + hash のみで突合。
+    const SCAN_MASK: u16 = LIVE | Self::HASH_MASK;
+
+    /// tag から id (0..MAX_PER_SHARD) を抽出する。
+    /// SIMD inner ループでは「byte offset そのもの」(= `tag & ID_MASK`) を使うので
+    /// この関数を使わない方がコード生成上有利。スカラー path / drop / evict 用。
+    #[inline]
+    fn id_of(tag: u16) -> usize {
+        ((tag & Self::ID_MASK) >> Self::ID_SHIFT) as usize
+    }
 }
 
 impl<K, V> Inner<K, V>
@@ -119,9 +207,36 @@ where
 
     /// 64-bit hash の上位 8 bit を tag の hash 部に流し込む。
     /// shard 選択は下位 log2(SHARDS) bit なので独立 entropy。
+    ///
+    /// `HASH_MASK` は §8.3(a) のレイアウト変更により id 領域を挟んで分断される
+    /// (例: ID_SHIFT=4 では bits 0..3 + bits 10..13)。
+    /// 8 bit の hash を「低 ID_SHIFT bit」と「残り (8 − ID_SHIFT) bit」に
+    /// 分割して、それぞれを HASH_MASK の低位/高位サブブロックに置く。
+    ///
+    /// - 低位: hash の bit 0..(ID_SHIFT-1) を tag の bit 0..(ID_SHIFT-1) にそのまま
+    /// - 高位: hash の bit ID_SHIFT..7 を tag の bit (ID_SHIFT+6)..13 へ
+    ///   (id 領域 6 bit を「飛び越える」ので追加で `<< 6` シフト)
+    ///
+    /// ID_SHIFT=4 のとき:
+    /// `tag = ((h & 0x0F) as u16) | (((h & 0xF0) as u16) << 6)` で HASH_MASK=0x3c0f に
+    /// 一致するペイロードを得る。
     #[inline]
     fn needle_from_hash(hash: u64) -> u16 {
-        LIVE | (((hash >> 56) as u16) & HASH_MASK)
+        let h = (hash >> 56) as u8;
+        let s = Self::ID_SHIFT;
+        // ID_SHIFT >= 8 のときは元レイアウト同等で hash 全 8 bit が低位に連続。
+        let spread = if s >= 8 {
+            h as u16
+        } else {
+            // 低位: 下位 ID_SHIFT bit
+            let low_mask: u8 = ((1u32 << s) - 1) as u8;
+            let low = (h & low_mask) as u16;
+            // 高位: 残り bit を 6 bit (= id 幅) 分追加でシフトして
+            // id 領域を飛び越える。例: ID_SHIFT=4, h=0xF0 → 0x3C00。
+            let high = ((h & !low_mask) as u16) << 6;
+            low | high
+        };
+        LIVE | spread
     }
 
     fn find(&self, key: &K, needle: u16) -> Option<usize> {
@@ -137,8 +252,8 @@ where
     #[inline]
     fn find_scalar(&self, key: &K, needle: u16) -> Option<usize> {
         for (i, &t) in self.tags[..self.tail].iter().enumerate() {
-            if (t & SCAN_MASK) == needle {
-                let id = id_of(t);
+            if (t & Self::SCAN_MASK) == needle {
+                let id = Self::id_of(t);
                 // SAFETY: live tag が指す id は I5/I6 より init 済み。
                 let e = unsafe { self.entries[id].assume_init_ref() };
                 if &e.key == key {
@@ -149,17 +264,50 @@ where
         None
     }
 
-    /// AVX2: `vpand` (SCAN_MASK) → `vpcmpeqw` → `vpmovmskb`。
-    /// j7 と同じパターン、mask 値だけ差替え。
+    /// AVX2 + BMI1: `vpand` (SCAN_MASK) → `vpcmpeqw` → `vpmovmskb` → inner candidate
+    /// ループ。`docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) +
+    /// §8.3(a) の最適化を反映:
+    ///
+    /// **§8.3(a) bit レイアウトトリック (Path A 短縮)**
+    /// id を `[ID_SHIFT, ID_SHIFT+6)` に置いたので `tag & ID_MASK` がそのまま
+    /// `id × sizeof(Entry)` (= entries arena 内の **byte offset**) になる。
+    /// よって `(entries_ptr as *const u8).add(id_bytes)` 1 命令で Entry に到達でき、
+    /// 旧実装の `movzx → and 0x3f → shl 4 → cmp+load` (4 命令連鎖) が
+    /// `movzx → and 0x03f0 → cmp+load` (3 命令) に縮む。Path A の dep chain −1 cy。
+    ///
+    /// **§8.2(a) BLSR ×2 (Path B 短縮)**
+    /// `vpcmpeqw + vpmovmskb` の出力は **必ず偶数位置のビットペア** (epi16 一致が
+    /// 2 byte/lane なので bit が 2 連で立つ)。BMI1 の `BLSR (= x & (x − 1))` は
+    /// 「最下位 1 ビットをクリア」する命令なので、2 回適用するとちょうど
+    /// 1 ペア (= 1 candidate 分) が落ちる:
+    ///
+    /// ```text
+    ///   mask = ...0011_0000   ; lane=2 が match
+    ///   blsr → ...0010_0000  ; 最下位 1 (bit 4) を消す
+    ///   blsr → ...0000_0000  ; 残った上位 (bit 5) を消す
+    /// ```
+    ///
+    /// 旧 `mask &= !(0b11 << (lane << 1))` は `mov + shl + not + and` の
+    /// 4 ops + tzcnt との依存連鎖で **Path B = 7 cy**。BLSR ×2 は **2 ops、
+    /// tzcnt 結果に依存しない** (mask だけ参照) ので **Path B = 2 cy**。
+    /// false-match 連発時の inner ループ throughput が直接効く。
+    ///
+    /// `_blsr_u32` intrinsic を直書きして LLVM が BLSR を確実に出すよう強制している
+    /// (`x & (x - 1)` パターンは出ないことがある)。`bmi1` は AVX2-capable CPU
+    /// (Haswell 2013+) では同梱なので `is_x86_feature_detected!("avx2")` の下では
+    /// 実行時に必ず利用可能 — `target_feature` で `bmi1` を有効化して inline 化を許す。
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
         use std::arch::x86_64::*;
         let limit = self.tags.len();
         let tags_ptr = self.tags.as_ptr();
-        let entries_ptr = self.entries.as_ptr();
+        // entries を **byte ポインタ**で持つ。`tag & ID_MASK` (= id × sizeof(Entry))
+        // を直接 byte offset として加算するため (§8.3(a))。
+        let entries_byte_ptr = self.entries.as_ptr() as *const u8;
         let needle_v = _mm256_set1_epi16(needle as i16);
-        let mask_v = _mm256_set1_epi16(SCAN_MASK as i16);
+        let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
+        let id_mask_u32 = Self::ID_MASK as u32;
 
         let mut i = 0usize;
         while i < limit {
@@ -169,17 +317,32 @@ where
             let mut mask = _mm256_movemask_epi8(cmp) as u32;
             while mask != 0 {
                 let bit = mask.trailing_zeros() as usize;
-                // 16-bit lane index = bit / 2 (epi16 の match は 2 bit/lane)。
+                // 16-bit lane index = bit / 2 (epi16 の一致は 2 bit/lane で立つ)。
                 let lane = bit >> 1;
                 let pos = i + lane;
-                let tag = unsafe { *tags_ptr.add(pos) };
-                let id = id_of(tag);
-                // SAFETY: needle は bit15=1、マッチした slot は必ず live → entries[id] init 済み。
-                let e = unsafe { (*entries_ptr.add(id)).assume_init_ref() };
+                // tag を読み戻して id 部の bit を抽出。bit pattern が
+                // 「id × sizeof(Entry)」と一致するので shift 不要 — そのまま byte offset。
+                let tag = unsafe { *tags_ptr.add(pos) } as u32;
+                let id_bytes = (tag & id_mask_u32) as usize;
+                // SAFETY:
+                // - needle は LIVE bit を含む → cmp 一致 ⟹ tag も live ⟹ entries[id] init 済み (I6)
+                // - id_bytes = id × sizeof(Entry) で id < MAX_PER_SHARD ≦ capacity
+                //   ⟹ entries arena (capacity 要素 = capacity × sizeof byte) の境界内
+                // - sizeof(Entry) is power of two (id_shift_from_entry_size の assert)
+                //   ⟹ id_bytes は Entry の alignment 倍数 (実体 alignment は power of two のため)
+                let entry_ptr = unsafe {
+                    entries_byte_ptr.add(id_bytes) as *const MaybeUninit<Entry<K, V>>
+                };
+                let e = unsafe { (*entry_ptr).assume_init_ref() };
                 if &e.key == key {
                     return Some(pos);
                 }
-                mask &= !(0b11u32 << (lane << 1));
+                // §8.2(a): BLSR ×2 で「最下位ペア」を 1 候補ぶん落とす。
+                // tzcnt 結果 (lane / pos / id_bytes) と独立な依存関係なので
+                // OOO の観点でも次 iter の tzcnt をブロックしない。
+                // (`unsafe fn find_avx2` のスコープ内なので追加 unsafe ブロックは不要。)
+                mask = _blsr_u32(mask); // 最下位 1 bit を消去
+                mask = _blsr_u32(mask); // 残った上位 (= ペアの上位) も消去
             }
             i += LANE;
         }
@@ -195,7 +358,7 @@ where
         let pos = self.find(key, needle)?;
         // visited をセット: tags 配列内 in-place、find が触ったキャッシュライン内。
         self.tags[pos] |= VISITED;
-        let id = id_of(self.tags[pos]);
+        let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos は find が tag マッチを確認した位置 (= live)。
         let e = unsafe { self.entries[id].assume_init_ref() };
         Some(&e.value)
@@ -204,7 +367,7 @@ where
     fn insert(&mut self, key: K, value: V, hash: u64) -> Option<(K, V)> {
         let needle = Self::needle_from_hash(hash);
         if let Some(pos) = self.find(&key, needle) {
-            let id = id_of(self.tags[pos]);
+            let id = Self::id_of(self.tags[pos]);
             // SAFETY: find が live を確認した。
             let e = unsafe { self.entries[id].assume_init_mut() };
             e.value = value;
@@ -228,8 +391,9 @@ where
 
         let pos = self.tail;
         self.tail += 1;
-        // 新規挿入は visited=0。
-        self.tags[pos] = LIVE | (entry_id << ID_SHIFT) | (needle & HASH_MASK);
+        // 新規挿入は visited=0。entry_id を ID_SHIFT 左シフトして id 領域に配置、
+        // hash bit は needle の HASH_MASK 部 (= LIVE 以外) をそのまま流し込む。
+        self.tags[pos] = LIVE | (entry_id << Self::ID_SHIFT) | (needle & Self::HASH_MASK);
         // SAFETY: entry_id は warm-up なら未使用、steady なら直前 evict の
         // assume_init_read で uninit に戻った slot。
         self.entries[entry_id as usize].write(Entry { key, value });
@@ -278,7 +442,7 @@ where
 
     fn do_evict_returning_id(&mut self, pos: usize) -> ((K, V), u16) {
         debug_assert!(self.tags[pos] != EMPTY);
-        let id = id_of(self.tags[pos]) as u16;
+        let id = Self::id_of(self.tags[pos]) as u16;
         // SAFETY: live を呼び出し側で保証済み。assume_init_read 後 entries[id] は uninit。
         let entry = unsafe { self.entries[id as usize].assume_init_read() };
         self.tags[pos] = EMPTY;
@@ -333,7 +497,7 @@ impl<K, V> Drop for Inner<K, V> {
         for i in 0..self.tail {
             let t = self.tags[i];
             if t != EMPTY {
-                let id = id_of(t);
+                let id = Self::id_of(t);
                 // SAFETY: live ⟹ entries[id] init 済み (I6)。
                 unsafe { self.entries[id].assume_init_drop() };
             }
@@ -454,18 +618,22 @@ mod tests {
         assert!(cache.is_empty());
     }
 
+    // sizeof(Entry<i32, i32>) = 8 (= 2^3) で id_shift_from_entry_size の制約を満たす。
+    // 元 j7 テストは `&str` 値型を使っていたが Entry が 24 byte (非 2 冪) になり
+    // §8.3(a) レイアウトと両立しないので i32 値で書き換えている。
+
     #[test]
     fn insert_then_get() {
-        let mut cache: SieveCache<i32, &str> = SieveCache::new(TEST_SHARDS * 4);
-        assert!(cache.insert(1, "a").is_none());
-        assert_eq!(cache.get(&1), Some(&"a"));
+        let mut cache: SieveCache<i32, i32> = SieveCache::new(TEST_SHARDS * 4);
+        assert!(cache.insert(1, 10).is_none());
+        assert_eq!(cache.get(&1), Some(&10));
         assert_eq!(cache.len(), 1);
     }
 
     #[test]
     fn get_missing_returns_none() {
-        let mut cache: SieveCache<i32, &str> = SieveCache::new(TEST_SHARDS * 4);
-        cache.insert(1, "a");
+        let mut cache: SieveCache<i32, i32> = SieveCache::new(TEST_SHARDS * 4);
+        cache.insert(1, 10);
         assert_eq!(cache.get(&2), None);
     }
 
@@ -480,20 +648,20 @@ mod tests {
 
     #[test]
     fn insert_existing_key_updates_value() {
-        let mut cache: SieveCache<i32, &str> = SieveCache::new(TEST_SHARDS * 4);
-        cache.insert(1, "a");
-        assert!(cache.insert(1, "b").is_none());
-        assert_eq!(cache.get(&1), Some(&"b"));
+        let mut cache: SieveCache<i32, i32> = SieveCache::new(TEST_SHARDS * 4);
+        cache.insert(1, 10);
+        assert!(cache.insert(1, 20).is_none());
+        assert_eq!(cache.get(&1), Some(&20));
         assert_eq!(cache.len(), 1);
     }
 
     #[test]
     fn evicts_oldest_when_full_and_unvisited() {
-        let mut cache: SieveCache<i32, &str, 1> = SieveCache::new(2);
-        cache.insert(1, "a");
-        cache.insert(2, "b");
-        let evicted = cache.insert(3, "c");
-        assert_eq!(evicted, Some((1, "a")));
+        let mut cache: SieveCache<i32, i32, 1> = SieveCache::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        let evicted = cache.insert(3, 30);
+        assert_eq!(evicted, Some((1, 10)));
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key(&1));
         assert!(cache.contains_key(&2));
@@ -502,23 +670,23 @@ mod tests {
 
     #[test]
     fn visited_entry_survives_first_pass() {
-        let mut cache: SieveCache<i32, &str, 1> = SieveCache::new(2);
-        cache.insert(1, "a");
-        cache.insert(2, "b");
+        let mut cache: SieveCache<i32, i32, 1> = SieveCache::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
         cache.get(&1);
-        let evicted = cache.insert(3, "c");
-        assert_eq!(evicted, Some((2, "b")));
+        let evicted = cache.insert(3, 30);
+        assert_eq!(evicted, Some((2, 20)));
     }
 
     #[test]
     fn all_visited_clears_bits_then_evicts() {
-        let mut cache: SieveCache<i32, &str, 1> = SieveCache::new(2);
-        cache.insert(1, "a");
-        cache.insert(2, "b");
+        let mut cache: SieveCache<i32, i32, 1> = SieveCache::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
         cache.get(&1);
         cache.get(&2);
-        let evicted = cache.insert(3, "c");
-        assert_eq!(evicted, Some((1, "a")));
+        let evicted = cache.insert(3, 30);
+        assert_eq!(evicted, Some((1, 10)));
     }
 
     #[test]
@@ -649,22 +817,75 @@ mod tests {
     }
 
     /// bit layout の排他性: LIVE / VISITED / ID_MASK / HASH_MASK で u16 を埋め尽くす。
+    /// Inner の associated const は `K, V` 依存 — bench / oracle で主流の
+    /// `Entry<u64, u64>` (sizeof=16, ID_SHIFT=4) を代表ケースで検証。
     #[test]
-    fn bit_layout_exclusivity() {
-        assert_eq!(LIVE | VISITED | ID_MASK | HASH_MASK, 0xFFFF);
+    fn bit_layout_exclusivity_u64_u64() {
+        type I = Inner<u64, u64>;
+        // sizeof(Entry<u64, u64>) = 16 → ID_SHIFT = 4。
+        assert_eq!(I::ID_SHIFT, 4);
+        // ID_MASK = 0x03f0 (bits 4..9)、HASH_MASK = 0x3c0f (bits 0..3 + 10..13)。
+        assert_eq!(I::ID_MASK, 0x03f0);
+        assert_eq!(I::HASH_MASK, 0x3c0f);
+        assert_eq!(I::SCAN_MASK, LIVE | I::HASH_MASK);
+        assert_eq!(I::SCAN_MASK, 0xbc0f);
+
+        // 排他性: 16 bit を漏れなく重複なく分割。
+        assert_eq!(LIVE | VISITED | I::ID_MASK | I::HASH_MASK, 0xFFFF);
         assert_eq!(LIVE & VISITED, 0);
-        assert_eq!(LIVE & ID_MASK, 0);
-        assert_eq!(LIVE & HASH_MASK, 0);
-        assert_eq!(VISITED & ID_MASK, 0);
-        assert_eq!(VISITED & HASH_MASK, 0);
-        assert_eq!(ID_MASK & HASH_MASK, 0);
-        // SCAN_MASK が live + hash のみカバー。
-        assert_eq!(SCAN_MASK, 0x80FF);
-        // needle (visited=0, id=0, live=1, hash=任意) は SCAN_MASK 適用後も自身と等しい。
-        let needle = LIVE | 0x42;
-        assert_eq!(needle & SCAN_MASK, needle);
-        // id 領域は 6 bit (= MAX_PER_SHARD - 1 まで表現)。
-        assert_eq!((MAX_PER_SHARD - 1) as u16, ID_MASK >> ID_SHIFT);
+        assert_eq!(LIVE & I::ID_MASK, 0);
+        assert_eq!(LIVE & I::HASH_MASK, 0);
+        assert_eq!(VISITED & I::ID_MASK, 0);
+        assert_eq!(VISITED & I::HASH_MASK, 0);
+        assert_eq!(I::ID_MASK & I::HASH_MASK, 0);
+
+        // id (= MAX_PER_SHARD - 1 = 63) を ID_SHIFT 桁シフトすると ID_MASK 全ビット。
+        assert_eq!((MAX_PER_SHARD - 1) as u16, I::ID_MASK >> I::ID_SHIFT);
+
+        // §8.3(a) のキー不変条件:
+        //   tag に id を埋めると `tag & ID_MASK = id × sizeof(Entry)` (= byte offset)。
+        let entry_size = std::mem::size_of::<Entry<u64, u64>>();
+        for id in 0..MAX_PER_SHARD {
+            let tag_id_field = (id as u16) << I::ID_SHIFT;
+            assert_eq!(
+                (tag_id_field & I::ID_MASK) as usize,
+                id * entry_size,
+                "id={id}: tag & ID_MASK が byte offset と一致しない"
+            );
+        }
+
+        // needle_from_hash で生成される値は LIVE bit が立っており
+        // SCAN_MASK 適用後も保存される (visited / id は元から 0)。
+        let needle = Inner::<u64, u64>::needle_from_hash(0xABCD_EF01_2345_6789u64);
+        assert_eq!(needle & LIVE, LIVE);
+        assert_eq!(needle & I::SCAN_MASK, needle);
+        assert_eq!(needle & VISITED, 0);
+        assert_eq!(needle & I::ID_MASK, 0);
+    }
+
+    /// 8-bit hash → tag bit への spread が「単射」であること
+    /// (= 異なる hash 値が異なる needle になる)。
+    #[test]
+    fn needle_spread_is_injective_u64_u64() {
+        let mut seen = std::collections::HashSet::new();
+        for h in 0..=255u64 {
+            let needle = Inner::<u64, u64>::needle_from_hash(h << 56);
+            assert!(seen.insert(needle), "hash={h} で衝突: needle={needle:#x}");
+        }
+        assert_eq!(seen.len(), 256);
+    }
+
+    /// ID_SHIFT が異なるサイズ (Entry<i32, i32> = 8 byte) でも spread が単射。
+    #[test]
+    fn needle_spread_is_injective_i32_i32() {
+        // sizeof(Entry<i32, i32>) = 8 → ID_SHIFT = 3。
+        assert_eq!(Inner::<i32, i32>::ID_SHIFT, 3);
+        let mut seen = std::collections::HashSet::new();
+        for h in 0..=255u64 {
+            let needle = Inner::<i32, i32>::needle_from_hash(h << 56);
+            assert!(seen.insert(needle));
+        }
+        assert_eq!(seen.len(), 256);
     }
 
     /// warm-up→steady の遷移: 5 個目の insert で初 evict、freed_id が再利用される。
