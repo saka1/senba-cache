@@ -296,12 +296,35 @@ where
     /// (`x & (x - 1)` パターンは出ないことがある)。`bmi1` は AVX2-capable CPU
     /// (Haswell 2013+) では同梱なので `is_x86_feature_detected!("avx2")` の下では
     /// 実行時に必ず利用可能 — `target_feature` で `bmi1` を有効化して inline 化を許す。
+    ///
+    /// **§8.4(c) chunk base ptr hoist (Path A 更に短縮 + inner ops 削減)**
+    /// `tzcnt(mask)` の戻り値 `bit` は `vpmovmskb` の性質から
+    /// `bit = lane * 2` (lane = u16 lane index) で、しかも u16 1 個 = 2 byte なので
+    /// **`bit` がそのまま「chunk 内の byte offset」**。outer ループで
+    /// `chunk_byte_ptr = tags_byte_ptr + i * 2` を 1 回計算しておけば、inner では
+    /// `chunk_byte_ptr + bit` で目的の tag を直接 load できる:
+    ///
+    /// - 旧: `tzcnt → mov,shr (lane=bit>>1) → or (pos=i+lane) → movzwl [tags+pos*2]`
+    ///   (4 ops 連鎖、依存深さ 3 cy)
+    /// - 新: `tzcnt → movzwl [chunk+bit]` (2 ops 連鎖、依存深さ 1 cy)
+    ///
+    /// `lane = bit >> 1; pos = i + lane` の計算は **hit (success path) でしか
+    /// 必要ない** (= return 値の構築) ので、外に出してから条件分岐後に行う。
+    /// false-match を 1 周回す inner ループの本体はそのぶん軽くなる。
+    ///
+    /// outer ループ側の追加コストは `lea chunk, [tags + i*2]` 1 命令のみ。
+    /// per_shard=16 (運用 sweet spot) では candidate 数 ≈ 0.69/scan なので
+    /// inner −3 ops × 0.69 = −2.1 ops/scan、outer +1 op で純減 −1.1 ops/scan。
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
         use std::arch::x86_64::*;
         let limit = self.tags.len();
         let tags_ptr = self.tags.as_ptr();
+        // §8.4(c): tags を **byte pointer** でも保持しておく。
+        // inner ループでは `chunk_byte_ptr + bit` の形で tag を直接 load する
+        // (bit は tzcnt(mask) の戻り値で「chunk 内 byte offset」と同値)。
+        let tags_byte_ptr = tags_ptr as *const u8;
         // entries を **byte ポインタ**で持つ。`tag & ID_MASK` (= id × sizeof(Entry))
         // を直接 byte offset として加算するため (§8.3(a))。
         let entries_byte_ptr = self.entries.as_ptr() as *const u8;
@@ -315,14 +338,33 @@ where
             let masked = _mm256_and_si256(v, mask_v);
             let cmp = _mm256_cmpeq_epi16(masked, needle_v);
             let mut mask = _mm256_movemask_epi8(cmp) as u32;
+
+            // §8.4(c): chunk 先頭の **byte pointer** を outer で 1 回作る。
+            // i は u16 単位の index なので byte 単位では `i * 2`。
+            // この計算 (lea 1 命令) を outer に追い出すことで inner からは
+            // `lane = bit >> 1; pos = i + lane` の 3 ops が消える。
+            let chunk_byte_ptr = unsafe { tags_byte_ptr.add(i * 2) };
+
             while mask != 0 {
+                // bit = `vpmovmskb` 結果 mask の最下位 set bit 位置。
+                // - vpcmpeqw は一致 lane を 2 byte 全部 0xFF にする
+                // - vpmovmskb は各 byte の MSB を 1 bit に圧縮
+                //   ⟹ 一致 lane k は mask の bits 2k, 2k+1 が両方立つ「ペア」
+                // - tzcnt は最下位 set bit (= 2k) を返す
+                //
+                // ここで u16 1 個 = 2 byte なので **`bit` (= 2k) はそのまま
+                // chunk 内 byte offset** = `lane * sizeof(u16)`。
+                // → `chunk_byte_ptr + bit` で当該 u16 tag を直接 load できる。
                 let bit = mask.trailing_zeros() as usize;
-                // 16-bit lane index = bit / 2 (epi16 の一致は 2 bit/lane で立つ)。
-                let lane = bit >> 1;
-                let pos = i + lane;
+
                 // tag を読み戻して id 部の bit を抽出。bit pattern が
-                // 「id × sizeof(Entry)」と一致するので shift 不要 — そのまま byte offset。
-                let tag = unsafe { *tags_ptr.add(pos) } as u32;
+                // 「id × sizeof(Entry)」と一致するので shift 不要 — そのまま byte offset (§8.3(a))。
+                //
+                // SAFETY: chunk_byte_ptr は tags 配列内、bit ≦ 31 (mask は u32 で
+                // 取り得る最大 bit = 31)、chunk 1 個分 = 32 byte のため境界内。
+                // u16 alignment: bit は必ず偶数 (vpmovmskb の偶数側 bit が tzcnt で取れる)
+                // かつ tags は u16 整列 → アライン済 read。
+                let tag = unsafe { *(chunk_byte_ptr.add(bit) as *const u16) } as u32;
                 let id_bytes = (tag & id_mask_u32) as usize;
                 // SAFETY:
                 // - needle は LIVE bit を含む → cmp 一致 ⟹ tag も live ⟹ entries[id] init 済み (I6)
@@ -335,11 +377,14 @@ where
                 };
                 let e = unsafe { (*entry_ptr).assume_init_ref() };
                 if &e.key == key {
-                    return Some(pos);
+                    // §8.4(c): success path 限定で lane / pos を計算。
+                    // failure を回し続ける inner 側からはこの 2 ops を追い出した。
+                    let lane = bit >> 1;
+                    return Some(i + lane);
                 }
                 // §8.2(a): BLSR ×2 で「最下位ペア」を 1 候補ぶん落とす。
-                // tzcnt 結果 (lane / pos / id_bytes) と独立な依存関係なので
-                // OOO の観点でも次 iter の tzcnt をブロックしない。
+                // tzcnt 結果 (= bit) と独立な依存関係なので OOO の観点でも
+                // 次 iter の tzcnt をブロックしない。
                 // (`unsafe fn find_avx2` のスコープ内なので追加 unsafe ブロックは不要。)
                 mask = _blsr_u32(mask); // 最下位 1 bit を消去
                 mask = _blsr_u32(mask); // 残った上位 (= ペアの上位) も消去

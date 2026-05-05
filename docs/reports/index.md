@@ -16,7 +16,7 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
-| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis |
+| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist |
 
 ---
 
@@ -189,3 +189,15 @@ cap=16384 では j8 が j7 を 1.55 ns 上回る**。(b) 成分が per_shard で
 の最退行 cell で −11.9% (−4.69 ns/op)、cap=16384/per_shard=16 では新 j8 が orig を 2.5%
 上回り memory 20 B/cap の利得を保ったまま throughput 並走を達成。inner asm は
 `movzwl + and 0x3f0 + cmp+load + blsr ×2` (Path A 17→16 cy、Path B 7→2 cy) に短縮。
+
+### 2026-05-06-j8-c-hoist.md
+`j8-candidate-loop-analysis` §8.4(c) (chunk 先頭 byte pointer を outer に hoist し
+`bit = tzcnt(mask)` をそのまま byte offset として使う最適化) を `src/sieve_j8.rs`
+に適用し cluster018 sweep (5 trials × 3 cap × 3 per_shard) で実測。
+inner ループから `mov+shr (lane=bit>>1) + or (pos=i+lane)` の 3 ops を追い出して
+success path 限定にし、Path A は 16→14 cy、inner ops は 7→5。
+**9 cell 中 8 cell で改善**、最大 −5.74% (cap=1024/ps=64)。
+運用 sweet spot (per_shard=16) では cap=1024/4096/16384 の **3 cap 全てで orig を
+absolute に上回る** (−20.31% / −3.76% / −1.55%)。memory 20 B/cap の利得を保ったまま
+throughput でも勝つ、という当初目標に到達。inner ループ単独最適化は本稿で打ち止め、
+次は load latency hide (prefetch / chunk overlap) が打ち手候補。
