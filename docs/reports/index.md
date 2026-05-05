@@ -19,6 +19,7 @@
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
+| 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 
 ---
 
@@ -253,6 +254,17 @@ tzcnt / lock or` 系) のみで構成されていることを確認。第一手 
 内訳推定は parking_lot ~12 ns + fetch_or ~10 ns + seqlock dance ~15 ns。次手は SHARDS=32/64
 sweep と memfair 比較。
 
+
+### 2026-05-06-st-twitter-5cluster.md
+既存 cluster006/018/019 に **cluster016 (cat 3, Zipf 1.79, miss 7.3%)** と
+**cluster034 (cat 2, Zipf 1.14, miss 8.2%)** を追加した 5 cluster で orig / j8 (per_shard=32) /
+moka 0.12 / mini-moka 0.10 をシングルスレッド再測定。**cluster034**: 全 4 cap で j8 が
+−10〜−15 ns 圧勝、HR ±0.05pp → 「j8 利得帯」を **Zipf ≤ 1.5** に拡張できることを示唆。
+**cluster016**: cap=1024/4096 で利得、cap=65536 で +4.89 ns 退行 — 退行は cluster018 固有
+ではなく **Zipf ≥ 1.79 + 高 hit ratio** の構造的特性と確定。W-TinyLFU の HR 崩壊は cat 3 でも
+再現 (cluster016 で −16 pp)、SIEVE は 20 全 cell で moka/mini-moka 以上の HR。
+今後の比較ベースは 5 cluster (`scripts/sweep_st_twitter_5cluster.sh`)。図 4 枚 (HR / ns/op /
+Pareto 4-family / Pareto SIEVE-only)。
 
 ### 2026-05-06-c8-vs-moka-thread-sweep.md
 `bench_concurrent.rs` を generic 化して c8 / moka 0.12 / mini-moka 0.10 を同一 harness で並列比較。
