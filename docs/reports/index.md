@@ -15,6 +15,7 @@
 | j4 系列 (set-associative j3) | sieve-j4-set-associative, sieve-j4-crossover-and-shard-sweep, sieve-j4-pershard-vs-footprint |
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
+| j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter |
 
 ---
 
@@ -131,3 +132,13 @@ Twitter cluster018 × cap ∈ {1024, 4096, 16384} × per_shard ∈ {32, 64, 128}
 劣化幅は per_shard (= scan 長) に比例し、AVX2 経路の `vpand` 1 命令増 + visited クリア RMW の
 port 競合疑惑が候補。correctness は確定 (j5 と外部完全一致 — hits/misses/evictions が同一)。
 inline footprint -28% は構造的に達成。次は memory-fair sweep で「同じメモリ予算で j6 が j5 を抜くか」を測る。
+
+### 2026-05-05-sieve-j7-m23-twitter.md
+M2.3 (tag を u16 化、live + visited + 14-bit hash) の単独実装 `sieve_j7` を Twitter cluster018 ×
+cap ∈ {1024, 4096, 16384} × per_shard ∈ {32, 64, 128} で orig / j5 / j6 と AB。
+**j7 は 9 cell 中 8 で j5 を支配** (Δ −1.4〜−9.2 ns/op)、j6 比は全 cell で −1.1〜−19.4 ns/op。
+唯一の例外 (cap=16384, per_shard=32) でも +0.94 ns の誤差レベル。
+per_shard=128 帯で利得が最大化 (j6 と真逆の傾き) → j6 の劣化主因は false-match 率倍増 (1/128→1/64)
+であり、tag bit を増やす方向が正解という解釈。inline B/cap は j5 比 −14、j6 比 +2 で、
+j7 は **memory も throughput も j5/j6 の良いとこ取り**。M2.1 (j6) の方針自体は正しく、tag bit を
+削りすぎた点だけが失敗だったと確定。

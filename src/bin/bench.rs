@@ -16,13 +16,16 @@
 use std::time::Instant;
 
 use senba_cache::Cache;
-use senba_cache::sieve_j3::SieveCache as J3;
-use senba_cache::sieve_j4::SieveCache as J4;
-use senba_cache::sieve_j5::SieveCache as J5;
-use senba_cache::sieve_j6::SieveCache as J6;
+// 2026-05-05: ベースラインを orig vs j7 に絞り込み。過去 variant は
+// 必要になれば use と matcher を復活させる (テスト・実装は残置)。
+// use senba_cache::sieve_j3::SieveCache as J3;
+// use senba_cache::sieve_j4::SieveCache as J4;
+// use senba_cache::sieve_j5::SieveCache as J5;
+// use senba_cache::sieve_j6::SieveCache as J6;
+use senba_cache::sieve_j7::SieveCache as J7;
 use senba_cache::sieve_orig::SieveCache as Orig;
-use senba_cache::sieve_v0::SieveCache as V0;
-use senba_cache::sieve_v3::SieveCache as V3;
+// use senba_cache::sieve_v0::SieveCache as V0;
+// use senba_cache::sieve_v3::SieveCache as V3;
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
 
@@ -175,44 +178,60 @@ fn main() {
         for &cap in &args.capacities {
             let s = match v.as_str() {
                 "orig" => drive::<Orig<u64, u64>>(&trace, cap),
-                "v0" => drive::<V0<u64, u64>>(&trace, cap),
-                "v3" => drive::<V3<u64, u64>>(&trace, cap),
-                "j3" => drive::<J3<u64, u64>>(&trace, cap),
-                "j4" => drive::<J4<u64, u64>>(&trace, cap),
-                "j4_n1" => drive::<J4<u64, u64, 1>>(&trace, cap),
-                "j4_n2" => drive::<J4<u64, u64, 2>>(&trace, cap),
-                "j4_n4" => drive::<J4<u64, u64, 4>>(&trace, cap),
-                "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap),
-                "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap),
-                "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap),
-                "j4_n64" => drive::<J4<u64, u64, 64>>(&trace, cap),
-                "j4_n128" => drive::<J4<u64, u64, 128>>(&trace, cap),
-                "j5" => drive::<J5<u64, u64>>(&trace, cap),
-                "j5_n1" => drive::<J5<u64, u64, 1>>(&trace, cap),
-                "j5_n2" => drive::<J5<u64, u64, 2>>(&trace, cap),
-                "j5_n4" => drive::<J5<u64, u64, 4>>(&trace, cap),
-                "j5_n8" => drive::<J5<u64, u64, 8>>(&trace, cap),
-                "j5_n16" => drive::<J5<u64, u64, 16>>(&trace, cap),
-                "j5_n32" => drive::<J5<u64, u64, 32>>(&trace, cap),
-                "j5_n64" => drive::<J5<u64, u64, 64>>(&trace, cap),
-                "j5_n128" => drive::<J5<u64, u64, 128>>(&trace, cap),
-                "j5_n256" => drive::<J5<u64, u64, 256>>(&trace, cap),
-                "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap),
-                "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap),
-                "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap),
-                "j6" => drive::<J6<u64, u64>>(&trace, cap),
-                "j6_n1" => drive::<J6<u64, u64, 1>>(&trace, cap),
-                "j6_n2" => drive::<J6<u64, u64, 2>>(&trace, cap),
-                "j6_n4" => drive::<J6<u64, u64, 4>>(&trace, cap),
-                "j6_n8" => drive::<J6<u64, u64, 8>>(&trace, cap),
-                "j6_n16" => drive::<J6<u64, u64, 16>>(&trace, cap),
-                "j6_n32" => drive::<J6<u64, u64, 32>>(&trace, cap),
-                "j6_n64" => drive::<J6<u64, u64, 64>>(&trace, cap),
-                "j6_n128" => drive::<J6<u64, u64, 128>>(&trace, cap),
-                "j6_n256" => drive::<J6<u64, u64, 256>>(&trace, cap),
-                "j6_n512" => drive::<J6<u64, u64, 512>>(&trace, cap),
-                "j6_n1024" => drive::<J6<u64, u64, 1024>>(&trace, cap),
-                "j6_n2048" => drive::<J6<u64, u64, 2048>>(&trace, cap),
+                // 2026-05-05: ベースラインは orig vs j7 のみ。過去 variant は
+                // モジュール自体は残置 (`src/sieve_*.rs` + `src/lib.rs`)、必要な
+                // 比較が再発したらここを復活させる。
+                // "v0" => drive::<V0<u64, u64>>(&trace, cap),
+                // "v3" => drive::<V3<u64, u64>>(&trace, cap),
+                // "j3" => drive::<J3<u64, u64>>(&trace, cap),
+                // "j4" => drive::<J4<u64, u64>>(&trace, cap),
+                // "j4_n1" => drive::<J4<u64, u64, 1>>(&trace, cap),
+                // "j4_n2" => drive::<J4<u64, u64, 2>>(&trace, cap),
+                // "j4_n4" => drive::<J4<u64, u64, 4>>(&trace, cap),
+                // "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap),
+                // "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap),
+                // "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap),
+                // "j4_n64" => drive::<J4<u64, u64, 64>>(&trace, cap),
+                // "j4_n128" => drive::<J4<u64, u64, 128>>(&trace, cap),
+                // "j5" => drive::<J5<u64, u64>>(&trace, cap),
+                // "j5_n1" => drive::<J5<u64, u64, 1>>(&trace, cap),
+                // "j5_n2" => drive::<J5<u64, u64, 2>>(&trace, cap),
+                // "j5_n4" => drive::<J5<u64, u64, 4>>(&trace, cap),
+                // "j5_n8" => drive::<J5<u64, u64, 8>>(&trace, cap),
+                // "j5_n16" => drive::<J5<u64, u64, 16>>(&trace, cap),
+                // "j5_n32" => drive::<J5<u64, u64, 32>>(&trace, cap),
+                // "j5_n64" => drive::<J5<u64, u64, 64>>(&trace, cap),
+                // "j5_n128" => drive::<J5<u64, u64, 128>>(&trace, cap),
+                // "j5_n256" => drive::<J5<u64, u64, 256>>(&trace, cap),
+                // "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap),
+                // "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap),
+                // "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap),
+                // "j6" => drive::<J6<u64, u64>>(&trace, cap),
+                // "j6_n1" => drive::<J6<u64, u64, 1>>(&trace, cap),
+                // "j6_n2" => drive::<J6<u64, u64, 2>>(&trace, cap),
+                // "j6_n4" => drive::<J6<u64, u64, 4>>(&trace, cap),
+                // "j6_n8" => drive::<J6<u64, u64, 8>>(&trace, cap),
+                // "j6_n16" => drive::<J6<u64, u64, 16>>(&trace, cap),
+                // "j6_n32" => drive::<J6<u64, u64, 32>>(&trace, cap),
+                // "j6_n64" => drive::<J6<u64, u64, 64>>(&trace, cap),
+                // "j6_n128" => drive::<J6<u64, u64, 128>>(&trace, cap),
+                // "j6_n256" => drive::<J6<u64, u64, 256>>(&trace, cap),
+                // "j6_n512" => drive::<J6<u64, u64, 512>>(&trace, cap),
+                // "j6_n1024" => drive::<J6<u64, u64, 1024>>(&trace, cap),
+                // "j6_n2048" => drive::<J6<u64, u64, 2048>>(&trace, cap),
+                "j7" => drive::<J7<u64, u64>>(&trace, cap),
+                "j7_n1" => drive::<J7<u64, u64, 1>>(&trace, cap),
+                "j7_n2" => drive::<J7<u64, u64, 2>>(&trace, cap),
+                "j7_n4" => drive::<J7<u64, u64, 4>>(&trace, cap),
+                "j7_n8" => drive::<J7<u64, u64, 8>>(&trace, cap),
+                "j7_n16" => drive::<J7<u64, u64, 16>>(&trace, cap),
+                "j7_n32" => drive::<J7<u64, u64, 32>>(&trace, cap),
+                "j7_n64" => drive::<J7<u64, u64, 64>>(&trace, cap),
+                "j7_n128" => drive::<J7<u64, u64, 128>>(&trace, cap),
+                "j7_n256" => drive::<J7<u64, u64, 256>>(&trace, cap),
+                "j7_n512" => drive::<J7<u64, u64, 512>>(&trace, cap),
+                "j7_n1024" => drive::<J7<u64, u64, 1024>>(&trace, cap),
+                "j7_n2048" => drive::<J7<u64, u64, 2048>>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(
