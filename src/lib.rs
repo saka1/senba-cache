@@ -11,6 +11,7 @@ pub mod sieve_j5;
 pub mod sieve_j6;
 pub mod sieve_j7;
 pub mod sieve_j8;
+pub mod sieve_c8;
 pub mod workload;
 
 pub use cache::Cache;

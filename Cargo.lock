@@ -744,6 +744,7 @@ dependencies = [
  "criterion",
  "mini-moka",
  "moka",
+ "parking_lot",
  "rand",
  "rand_distr",
  "xxhash-rust",

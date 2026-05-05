@@ -18,6 +18,7 @@
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
+| c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design |
 
 ---
 
@@ -232,3 +233,22 @@ mini-moka 0.10 の HR は 28/28 cell で Δ ≤ 0.1pp に収束 (adaptive window
 HR competitive (skew=1.2 で完全並び、skew=0.6/0.8 の cap=16384 では W-TinyLFU が +0.75pp 微勝ち)、
 (c) Twitter cluster018/019 でだけ W-TinyLFU が −10〜−28pp 崩壊、を確認。結論「W-TinyLFU は
 Zipf-like で強く、non-Zipf 実 trace で脆い、SIEVE は両軸で robust」に更新。図 3 枚追加。
+
+
+### 2026-05-06-c8-design.md
+`sieve_c8` = `sieve_j8` の並行版 (read lock-free + write per-shard Mutex) 第一手。設計のキモは
+**seqlock-via-tag** — j8 が tag (u16) 内に `LIVE | VISITED | id (6bit) | hash (8bit)` を
+詰めている性質をそのまま seqlock の sequence number 兼 locator として再利用する。
+reader は tag 1 回読み → entries[id] raw read → tag 再 load (re-validate)、t1 == t2 && LIVE
+のみ採用。`K, V: Copy` 制約で torn read の Drop / Clone 伝播を断つ。`parking_lot::Mutex` を
+shard ごとに置き writer 直列化。AVX2 path も搭載 (SIMD scan は best-effort filter として
+位置付け、候補は scalar 用 seqlock dance で再検証)。実装中に **phantom non-empty tag**
+バグ発見・修正 — reader の `fetch_or(VISITED)` が evict 直後の EMPTY tag に発火すると
+`0x4000` (LIVE 無し・VISITED のみ) が残り writer の `t != EMPTY` 判定が崩れるレース。
+判定を `t & LIVE != 0` に統一して解消、20/20 連続 invariants test pass。生成 ASM 目視で
+`find_get_avx2` が合法 x86_64 (`vpand ymmword ptr / vpcmpeqw / vpmovmskb / blsr×2 /
+tzcnt / lock or` 系) のみで構成されていることを確認。第一手 smoke (cap=512, ops=4M):
+**1T 10.3 → 4T 19.2 Mops/s (skew=1.0)**, **1T 15.6 → 4T 30.8 Mops/s (skew=1.2)**, thread CV
+≤ 0.04 で Mutex 競合ほぼ観測なし。1T overhead vs j8 = +42 ns/op (見積もり +10〜20 を上回る)、
+内訳推定は parking_lot ~12 ns + fetch_or ~10 ns + seqlock dance ~15 ns。次手は SHARDS=32/64
+sweep と memfair 比較。

@@ -660,3 +660,51 @@ J 群はその枠自体を疑う:
 profile が 80% を HashMap が占めると告げているとき、Map 層を「使う前提
 で磨く」のではなく **「使うかどうかから問い直す」** のが、研究的にも
 工学的にも筋が良い。
+
+---
+
+# C. 並行版 SIEVE (現在の関心、2026-05-06〜)
+
+## C0. 動機
+
+j8 系列で single-thread の Pareto は飽和してきた。次の研究軸は **マルチスレッド対応** —
+NSDI'24 paper §6 が「SIEVE は hit が visited bit set のみで list 順序を動かさないため
+LRU より lock-friendly」と主張する構造的優位を、**実装で具体化して測る**。
+
+## C1. `sieve_c8` (= read lock-free + write per-shard Mutex)
+
+詳細: `docs/reports/2026-05-06-c8-design.md` 参照。
+
+設計のコア:
+
+- **seqlock-via-tag**: j8 の `tag (u16) = LIVE | VISITED | id (6bit) | hash (8bit)` を
+  そのまま seqlock の sequence number 兼 locator として使う。reader は tag 1 回読み →
+  `entries[id]` raw read → tag 再 load (re-validate)、t1 == t2 && LIVE のみ採用。
+- writer は `parking_lot::Mutex<WriterState>` で shard ごと直列化。tag 操作の順序を
+  「無効化 (Release) → entries 操作 → 新 tag 公開 (Release)」に厳守する。
+- `K, V: Copy` 制約で reader の torn read が後続 Drop / Clone に伝播しない。
+
+第一手 smoke (cap=512, ops=4M, threads=4):
+
+- skew=1.0: 4T = 19.2 Mops/s、HR=0.546、thread CV ≤ 0.006
+- skew=1.2: 4T = 30.8 Mops/s、HR=0.806、thread CV ≤ 0.04 (= Mutex 競合ほぼ観測なし)
+- 1T overhead vs j8 = +42 ns/op (見積もり +10〜20 を上回る、要 memfair 検討)
+
+## C2. ロードマップ
+
+- `sieve_c8` (本実装): `K, V: Copy`、概念実証。
+- `sieve_c8a` (案): `V: Clone` 化のため内部 `Arc<V>` wrap。reader は Arc clone (= refcount
+  inc) のみで生 V に触れず、`String` 等の owned 型をサポート。memory コスト +8 B/cap。
+- `sieve_c8e` (案): `crossbeam_epoch` で writer の drop を遅延、reader は raw 参照保持。
+  `V: Clone` 任意、複雑度高。
+- `sieve_c8s` (案): SIMD scan を Rust メモリモデル上完全合法な形 (= 16 回 `load(Relaxed)`
+  相当の SIMD intrinsic を作るか、`portable-simd` 経由) に書き換え、現状 c8 が抱える
+  「`AtomicU16` 配列を `*const u16` cast で SIMD load する」灰色領域を解消。
+
+## C3. 次の本ベンチで取りたい sweep
+
+1. SHARDS ∈ {8, 32, 64} × threads ∈ {1, 2, 4, 8, 16} × skew ∈ {0.8, 1.0, 1.2}: per-shard
+   contention の解像度を上げ、Mutex 飽和点を地図化。
+2. moka / mini-moka との並列環境直接比較 (`bench_concurrent` に adapter 追加)。
+3. `concurrent_invariants_under_zipf` を threads ↑ ops ↑ で長時間回し、phantom tag 修正後の
+   不変条件が壊れないことを soak test で確認。
