@@ -20,7 +20,7 @@
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
-| ライブラリ化 (`senba::SieveCache` 公開 API) | senba-sievecache-design |
+| ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design |
 
 ---
 
@@ -284,14 +284,17 @@ writer 経路が contended になり pending tasks queue が膨らむため thre
 
 ### 2026-05-06-senba-sievecache-design.md
 j8 系列 / c8 系列の研究結果をベースに **publishable な Rust crate API** としての ST 版
-`senba::SieveCache` を確定する設計ドキュメント (実装着手前)。設計の核は
-**`SlotSize` sealed trait** (`Slot16` / `Slot32` (default) / `Slot64`) で
-entries arena の stride を SLOT::SIZE 固定にする padding 自動化と、それによる
-`Entry<K, V>` の sizeof 制約 (j8 では 2 冪 + ≤256) の解消。`(u64, String)`=32,
-`(String, String)`=48 の典型 string-cache ケースをサポート。j8 の c-hoist trick
-(`tag & ID_MASK = id × S::SIZE`) は SLOT 単位で同型に維持して throughput を保つ。
-`remove` API は per-shard swap-to-fill-gap (O(per_shard) ≤ O(64)) で warm-up
-不変条件 I8 を回復させ free_list を持たない構造を維持。memory は default Slot32 で
-`(u64, u64)` の場合 36 B/cap (j8 fast-path 20 → +80%) の意識的な tax を払う代わりに、
-任意の K, V (sizeof ≤ 64) で動く API と `remove` を獲得する。並行版・`generic_const_exprs`
-化・crate rename (`senba_cache` → `senba`) は scope 外、別スペック予定。
+`senba::Cache` を確定する設計ドキュメント (実装着手前)。crate identity が SIEVE で
+固定されている前提で top-level type 名を簡潔に `Cache` に取り、既存 placeholder trait
+`Cache` は `CacheImpl` に rename して bench/oracle 共通基盤として残す (12 sieve_*
+modules の impl 行を一括書き換え)。設計の核は **`SlotSize` sealed trait** (`Slot16` /
+`Slot32` (default) / `Slot64`) で entries arena の stride を SLOT::SIZE 固定にする
+padding 自動化と、それによる `Entry<K, V>` の sizeof 制約 (j8 では 2 冪 + ≤256) の解消。
+`(u64, String)`=32, `(String, String)`=48 の典型 string-cache ケースをサポート。
+j8 の c-hoist trick (`tag & ID_MASK = id × S::SIZE`) は SLOT 単位で同型に維持して
+throughput を保つ。`remove` API は per-shard swap-to-fill-gap (O(per_shard) ≤ O(64))
+で warm-up 不変条件 I8 を回復させ free_list を持たない構造を維持。memory は default
+Slot32 で `(u64, u64)` の場合 36 B/cap (j8 fast-path 20 → +80%) の意識的な tax を
+払う代わりに、任意の K, V (sizeof ≤ 64) で動く API と `remove` を獲得する。並行版・
+`generic_const_exprs` 化・crate rename (`senba_cache` → `senba`) は scope 外、
+別スペック予定。
