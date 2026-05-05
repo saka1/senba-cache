@@ -12,6 +12,8 @@ pub mod sieve_j6;
 pub mod sieve_j7;
 pub mod sieve_j8;
 pub mod sieve_c8;
+pub mod sieve_cache;
 pub mod workload;
 
 pub use cache::CacheImpl;
+pub use sieve_cache::{Cache, Slot16, Slot32, Slot64, SlotSize};
