@@ -389,7 +389,7 @@ where
     }
 }
 
-impl<K, V, const SHARDS: usize> crate::Cache<K, V> for SieveCache<K, V, SHARDS>
+impl<K, V, const SHARDS: usize> crate::CacheImpl<K, V> for SieveCache<K, V, SHARDS>
 where
     K: Hash + Eq,
 {

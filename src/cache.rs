@@ -1,4 +1,4 @@
-pub trait Cache<K, V> {
+pub trait CacheImpl<K, V> {
     fn new(capacity: usize) -> Self
     where
         Self: Sized;

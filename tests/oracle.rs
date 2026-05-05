@@ -3,9 +3,9 @@
 
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
-use senba_cache::{Cache, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
+use senba_cache::{CacheImpl, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
 
-fn run<C: Cache<u64, u64>>(
+fn run<C: CacheImpl<u64, u64>>(
     trace: impl Iterator<Item = u64>,
     cap: usize,
 ) -> Vec<Option<(u64, u64)>> {

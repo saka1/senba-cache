@@ -254,7 +254,7 @@ impl<K, V> Drop for SieveCache<K, V> {
     }
 }
 
-impl<K, V> crate::Cache<K, V> for SieveCache<K, V>
+impl<K, V> crate::CacheImpl<K, V> for SieveCache<K, V>
 where
     K: Hash + Eq + Clone,
 {

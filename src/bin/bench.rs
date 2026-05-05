@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use senba_cache::Cache;
+use senba_cache::CacheImpl;
 // 2026-05-05: ベースラインを orig vs j7 に絞り込み。過去 variant は
 // 必要になれば use と matcher を復活させる (テスト・実装は残置)。
 // use senba_cache::sieve_j3::SieveCache as J3;
@@ -52,7 +52,7 @@ struct MiniMoka {
 
 const MINI_MOKA_DUMMY: u64 = 0;
 
-impl senba_cache::Cache<u64, u64> for MiniMoka {
+impl senba_cache::CacheImpl<u64, u64> for MiniMoka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: mini_moka::sync::Cache::new(capacity as u64),
@@ -98,7 +98,7 @@ struct Moka {
 
 const MOKA_DUMMY: u64 = 0;
 
-impl senba_cache::Cache<u64, u64> for Moka {
+impl senba_cache::CacheImpl<u64, u64> for Moka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: moka::sync::Cache::new(capacity as u64),
@@ -149,7 +149,7 @@ struct Stats {
     evictions: u64,
 }
 
-fn drive<C: Cache<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
+fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
     let mut c = C::new(cap);
     let mut hits = 0u64;
     let mut misses = 0u64;

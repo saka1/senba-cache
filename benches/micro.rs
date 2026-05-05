@@ -1,5 +1,5 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use senba_cache::Cache;
+use senba_cache::CacheImpl;
 use senba_cache::sieve_orig::SieveCache as Orig;
 // use senba_cache::sieve_v0::SieveCache as V0;
 // use senba_cache::sieve_v1::SieveCache as V1;
@@ -34,7 +34,7 @@ fn quick_group<'a>(
     g
 }
 
-fn insert_only_for<C: Cache<u64, u64>>(
+fn insert_only_for<C: CacheImpl<u64, u64>>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     label: &str,
     skew: f64,
