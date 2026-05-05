@@ -18,6 +18,10 @@ cargo test <name>    # run a single test by name
 cargo clippy         # lint
 ```
 
+## Conventions
+
+- When including assembly in code, comments, or reports, use **Intel syntax** (e.g. `mov rax, [rdi]`), not AT&T.
+
 ## Architecture
 
 Layout:
