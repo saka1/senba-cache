@@ -18,7 +18,7 @@
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
-| c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design |
+| c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 
 ---
 
@@ -252,3 +252,19 @@ tzcnt / lock or` 系) のみで構成されていることを確認。第一手 
 ≤ 0.04 で Mutex 競合ほぼ観測なし。1T overhead vs j8 = +42 ns/op (見積もり +10〜20 を上回る)、
 内訳推定は parking_lot ~12 ns + fetch_or ~10 ns + seqlock dance ~15 ns。次手は SHARDS=32/64
 sweep と memfair 比較。
+
+
+### 2026-05-06-c8-vs-moka-thread-sweep.md
+`bench_concurrent.rs` を generic 化して c8 / moka 0.12 / mini-moka 0.10 を同一 harness で並列比較。
+**§1** (初版, cap=512 / SHARDS=8 / keys=10k): c8 は harness 側の `SHARDS=8` 固定で hot shard contention
+が強く露出、scaling 1.87x at T=8 で頭打ち。**§拡張 (メイン結論)**: harness を `--shards` 受けに改修、
+**cap=16384 / SHARDS=256 / keys=1M / T={1,2,4,8,16}** で再測定、HR を 3 者 0.688〜0.690 に揃えた純粋な
+並列性比較を実施。Mops/s (T=1→T=16): **c8 8.5 → 50.9 (5.99x、near-linear)**, **moka 1.96 → 3.30
+(1.68x、T=4 で天井、T=8/16 で逆に regress)**, **mini-moka 2.19 → 6.05 (2.76x、T=8 ピーク後微減)**。
+T=16 で **c8/moka = 15.4x**。p99 chunk latency: c8 195→680 ns、moka 995→**10162 ns**、mini-moka
+829→4888 ns。並列モデル考察: c8 の lock-free read + per-shard Mutex writer は SHARDS=256 で hot key
+が 1/256 shard に集中するだけ、残り 255 shard 無競合で near-linear。moka 0.12 は 4 thread 以上で
+writer 経路が contended になり pending tasks queue が膨らむため thread 増で throughput が悪化する
+(単に flat ではなく負の効果)。adaptive window は HR ベネフィットが出る代わりに内部 state contention
+で並列性は mini-moka 0.10 より悪化。後続候補: skew sweep, read-heavy 比 (95% read), 96-core 機での
+スケール上限。
