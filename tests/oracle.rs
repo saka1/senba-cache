@@ -3,7 +3,7 @@
 
 use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
-use senba_cache::{Cache, sieve_j3, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
+use senba_cache::{Cache, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
 
 fn run<C: Cache<u64, u64>>(
     trace: impl Iterator<Item = u64>,
@@ -282,5 +282,35 @@ fn j3_matches_orig_on_bundled_zipf() {
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let j3 = run::<sieve_j3::SieveCache<u64, u64>>(trace_b, cap);
         assert_eviction_streams_eq(&orig, &j3, &format!("j3 bundled cap={cap}"));
+    }
+}
+
+/// j8 (1-shard) は SIEVE 意味論を保つので sieve_orig と eviction stream が完全一致するはず。
+/// 構造的制約 per_shard <= 64 (= MAX_PER_SHARD) より cap は 64 が上限。
+#[test]
+fn j8_1shard_matches_orig_on_synthetic_zipf() {
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let j8 = run::<sieve_j8::SieveCache<u64, u64, 1>>(trace_b, cap);
+        assert_eviction_streams_eq(
+            &orig,
+            &j8,
+            &format!("j8(1-shard) vs orig zipf skew={skew} cap={cap}"),
+        );
+    }
+}
+
+/// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
+#[test]
+fn j8_1shard_matches_orig_on_bundled_zipf() {
+    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    for &cap in &[16usize, 32, 64] {
+        let trace_a = file::from_path(path).unwrap().take(100_000);
+        let trace_b = file::from_path(path).unwrap().take(100_000);
+        let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
+        let j8 = run::<sieve_j8::SieveCache<u64, u64, 1>>(trace_b, cap);
+        assert_eviction_streams_eq(&orig, &j8, &format!("j8(1-shard) bundled cap={cap}"));
     }
 }

@@ -1,0 +1,602 @@
+# 2026-05-05 — `sieve_j8` 設計書: tag 内 entry_id 埋込 + free_list 廃止
+
+- 種別: **設計ドキュメント** (ベンチはまだ無し、実装着手前のスペック)
+- 親: `2026-05-05-sieve-j7-m23-twitter.md`、`2026-05-05-j5-vs-orig-2x-memfair.md`
+- 関連: `improvement-ideas.md` §M1, §M2.3, §M5.3 (= 本設計の前駆)
+
+## 1. 位置付け
+
+j7 は M2.3 で「tag を u16 化して visited を inline + 14-bit hash」とすることで
+j5/j6 を全帯域で支配したが、`order_cap = 2 * capacity` の slack が
+**inline 物理 footprint で 36 B/cap** を生み、orig (25 B/cap) との「memory-fair 比較」では
+ハンデが残る。この問題を構造的に潰すのが §M1 (slack 削減) と §M5.3 (slack を片側に寄せる) で、
+本設計 j8 はその後者を **「entries は cap、slack は tags のみ」** + **「entry_id を tag bit に埋込」**
+で同時実装し、**free_list も不要にする**ところまで詰めた変種。
+
+設計空間内での位置:
+
+| variant | tag 幅 | hash bits | id 取得 | slack 配置 | 物理 B/cap (K=V=u64) |
+|---|---|---|---|---|---:|
+| j5 | u8 | 7 | tag pos = entry pos | tags + entries 両方 2× | 50 |
+| j7 | u16 | 14 | tag pos = entry pos | tags + entries 両方 2× | 36 |
+| M5.3 (order 別) | u16 | 14 | `order[i]` (別配列、4 B) | tags + order 2×、entries 1× | 28 |
+| **j8 (本設計)** | u16 | 6-9 | tag bit 内 embed | tags のみ 2×、entries 1× | **20** |
+| orig | n/a | n/a | linked list | n/a (1×) | 25 |
+
+つまり **「j7 の throughput 性質を概ね保ったまま orig より軽い」** を狙う設計。
+
+## 2. TL;DR
+
+- u16 tag に `[live(1) | visited(1) | entry_id(N) | hash(14-N)]` を packing。`N = ceil(log2(per_shard))`
+- entries arena は `capacity` 個 (slack 無し)。tags は `2 × capacity` (slack 有り、tombstone 用)
+- **free_list は持たない**。warm-up 中は `entry_id = len`、steady-state では evict の戻り値で
+  freed entry_id が pass-through、保管不要
+- inline 物理 = `2 B × 2cap` (tags) + `16 B × cap` (entries) = **20 B/cap** (orig 比 −5、j7 比 −16)
+- per_shard 構造的上限は 128 (= ID 7 bit + hash 7 bit、j5 と同じ false-match 率)。
+  実用 sweet spot per_shard ∈ [32, 64] では false-match 1/256〜1/512 で j7 (1/16384) よりやや劣化、
+  ただし throughput 退行は per_shard=64 で +1-3 ns 程度の見込み
+
+## 3. 動機
+
+### 3.1 memfair の未消化部
+
+`2026-05-05-j5-vs-orig-2x-memfair.md` は j5 について「速度優位は memory hand-out 由来でない」を
+確定したが、これは **「orig に 2x cap を渡しても j5 が勝つ」** という worst-case ハンデでの確認で、
+inline B/cap で揃えた head-to-head ではない。j7 でも同じ問題 (36 vs 25 B/cap) が残る。
+
+「memory-fair に揃えたとき orig を抜く」ためには j7 の物理 inline を orig 以下まで詰める必要があり、
+それが §M1 + §M5.3 の合流先。j7 レポート §8 の next steps #1 (memory-fair sweep) と #4
+(M1 と j7 の合わせ技) を一つの設計に畳んだのが j8。
+
+### 3.2 §M5.3 の素直な実装と、その先
+
+§M5.3 の素直な形は「tags + 別配列 `order: Vec<u32>` + entries arena」だが、これは:
+
+- `order` 配列に 4 B × 2cap = **8 B/cap** 余分にかかる (entries を半減した利得 16 B のうち半分を返す)
+- get hit 時に `order[i]` (1 load) → `entries[id]` (1 load) の 2 段 indirection
+
+ところで、**per_shard が 32〜128 という小さい値**であることに注目すると、entry_id は 5-7 bit に
+収まる。j7 の u16 tag の 14-bit hash 部のうち上位を id に明け渡せば、`order` 配列を物理的に
+持たずに id を運べる。これが j8 の中核アイディア。
+
+### 3.3 free_list 不要の観察
+
+j 系列の API は `insert` と `get` のみで、`remove` を露出しない。この制約下では:
+
+- `evict()` は **必ず `insert()` の同一呼び出し内**で発火する (cap 飽和時のみ)
+- evict が返した freed entry_id は、**直後に同じ insert 内で必ず消費される**
+- 「evict と insert の間に entry_id を保管する場所」が論理的に存在しない
+
+warm-up 中 (= `len < capacity`) は evict が起きない (定義より) ため、entries arena には
+死んだスロットが存在せず、`entry_id = len` が常に未使用の次スロットを指す。
+これらより、free_list は構造的に不要 (詳細 §4.4)。
+
+## 4. 設計
+
+### 4.1 u16 tag bit レイアウト
+
+`per_shard ≤ 64` を主たるターゲットとし、ID 6 bit + hash 8 bit を採用 (choice 1):
+
+```text
+bit 15 : live      (1 = occupied、0 = EMPTY/tombstone)
+bit 14 : visited
+bit 8..13 : entry_id (6 bit、0..63)
+bit 0..7  : hash    (8 bit、`hash >> 56`)
+```
+
+定数:
+
+```rust
+const EMPTY:     u16 = 0x0000;
+const LIVE:      u16 = 0x8000;
+const VISITED:   u16 = 0x4000;
+const ID_SHIFT:  u32 = 8;
+const ID_MASK:   u16 = 0x3F00;   // bit 8..13
+const HASH_MASK: u16 = 0x00FF;   // bit 0..7
+const SCAN_MASK: u16 = LIVE | HASH_MASK;  // = 0x80FF、scan で id と visited を mask out
+```
+
+### 4.2 SIMD scan セマンティクス
+
+j7 の AVX2 scan ループから `mask_v` の値だけを差し替えて流用:
+
+```text
+needle = LIVE | hash_bits           // visited=0, id_bits=0
+match  ⇔ (tag & SCAN_MASK) == needle
+       ⇔ tag.live = 1 AND tag.hash_bits = needle.hash_bits
+```
+
+- entry_id bits は SCAN_MASK で 0 にされるので **scan の一致判定には影響しない**
+- visited bit も同様 (= j7 と同じく visited セット時に再 scan が壊れない)
+- vpand / vpcmpeqw / vpmovmskb の流れ・throughput は完全に j7 同等
+
+### 4.3 データ構造
+
+```rust
+struct Inner<K, V> {
+    capacity: usize,
+    tags:    Vec<u16>,                  // size = order_cap = 2 × capacity (LANE 揃え)
+    entries: Vec<MaybeUninit<Entry<K, V>>>,  // size = capacity (slack 無し)
+    tail: usize,   // tags への次挿入位置 (0 ..= order_cap)
+    hand: usize,   // tags 上の SIEVE hand cursor (0 ..= tail)
+    len:  usize,   // 現在 live な entry 数 (= live tag 数)
+}
+
+struct Entry<K, V> {
+    key:   K,
+    value: V,
+}
+```
+
+**前提**: `per_shard <= MAX_PER_SHARD` (= 64 in choice 1) を `Inner::new` で `assert!`。
+
+`order_cap` の決定は j7 と同じ:
+
+```rust
+let raw = capacity.checked_mul(2).expect("overflow");
+let order_cap = ((raw + LANE - 1) & !(LANE - 1)).max(LANE);  // LANE = 16 (u16)
+```
+
+### 4.4 不変条件
+
+実装が満たすべき性質を明示する。コメント・debug_assert で保護する想定。
+
+| # | 不変条件 |
+|---|---|
+| I1 | `len <= capacity` |
+| I2 | `tail <= order_cap` |
+| I3 | `hand <= tail` (compact 後を含む) |
+| I4 | live tag の集合 = `{ tag[i] : i < tail, (tag[i] & LIVE) != 0 }`、その個数 = `len` |
+| I5 | live tag が指す entry_id の集合 = `{ (tag[i] & ID_MASK) >> ID_SHIFT : tag[i].live }`、サイズ = `len` (重複なし) |
+| I6 | I5 の集合に含まれる entry_id `e` についてのみ `entries[e]` は init 済み |
+| I7 | I5 の集合 ⊆ `0..capacity` |
+| I8 | warm-up 中 (= `len < capacity`、かつ歴史上 evict 未発火) は I5 の集合 = `0..len` (= 連続) |
+| I9 | tail 範囲外 `tags[tail..order_cap]` はすべて `EMPTY` (= 0)、SIMD scan の false hit を防止 |
+
+I8 がポイント。この性質があるから warm-up 中は `entry_id = len` で必ず未使用 slot を取れる。
+I8 が保たれるためには warm-up 中に evict が起きないことが必要で、これは「evict は `len == capacity` のときのみ発火」という insert の流れから自動的に成立する。
+
+### 4.5 free_list 廃止の根拠の精緻化
+
+free entry_id を「取得したい」瞬間は **insert miss path で arena に空きが必要なときのみ**。
+このときの状態は厳密に 2 通り:
+
+| 状態 | 条件 | 取り方 | 正当性 (不変条件) |
+|---|---|---|---|
+| (a) warm-up | `len < capacity` | `entry_id = len` | I8 より `0..len` だけ使用済み、`len` は未使用 |
+| (b) steady | `len == capacity` | `evict_one()` の戻り値の freed_id | evict が `entries[id].assume_init_read` し終えた直後の id |
+
+(b) では evict の直前 I5 の集合が cap 個 (= 全部使用)、evict 後は cap−1 個。新挿入で 1 個 fill して
+cap 個に戻る。中間状態が同一スレッド内で完結するため freed_id を保管する必要が無い。
+
+これが成立しなくなる API 拡張:
+
+- `remove(k)` 露出 (= insert を伴わない単独 evict): freed_id が宙に浮く
+- batch eviction (= N 個まとめて evict してから insert): 同上
+- async / 並行操作: 同一論理操作内の pass-through が壊れる
+
+いずれも今の j 系列に存在せず、CLAUDE.md の `Cache` trait 整合化は「将来 work」とされているため、
+**設計時点で remove を持たないことを明示的な前提として採る**。将来 remove を生やすなら
+`free_list: Vec<u16>` を後付けする (実装 1 時間)。
+
+## 5. 操作の擬似コード
+
+実装は j7 をベースに変更箇所だけ示す。
+
+### 5.1 `insert(key, value, hash) -> Option<(K, V)>`
+
+```rust
+fn insert(&mut self, key: K, value: V, hash: u64) -> Option<(K, V)> {
+    let needle = needle_from_hash(hash);
+
+    // (1) 既存 key の更新 path
+    if let Some(pos) = self.find(&key, needle) {
+        let e = unsafe { self.entries[entry_id_of(self.tags[pos])].assume_init_mut() };
+        e.value = value;
+        self.tags[pos] |= VISITED;
+        return None;
+    }
+
+    // (2) 新規 insert: entry_id を取得
+    let (evicted, entry_id): (Option<(K, V)>, u16) = if self.len < self.capacity {
+        (None, self.len as u16)              // warm-up: I8 より安全
+    } else {
+        let (kv, freed_id) = self.evict_one_returning_id();
+        (Some(kv), freed_id)                  // steady: pass-through
+    };
+
+    // (3) tail に書く前に必要なら compact
+    if self.tail == self.tags.len() {
+        self.compact_tags();
+    }
+
+    // (4) entries arena に書込
+    self.entries[entry_id as usize].write(Entry { key, value });
+
+    // (5) tag を組み立てて tail に置く
+    let pos = self.tail;
+    self.tail += 1;
+    self.tags[pos] = LIVE | ((entry_id as u16) << ID_SHIFT) | (needle & HASH_MASK);
+    self.len += 1;
+
+    evicted
+}
+```
+
+注意:
+- (1) の find が tag pos を返した後、entries への deref は **`tag[pos]` から id を抽出**して行う
+  (j7 では `entries[pos]` だったが j8 では `entries[ id_of(tag[pos]) ]`)
+- (2) の `entry_id` は **u16** で持つが上位 10 bit は常に 0 (per_shard ≤ 64 前提)。
+  `<< ID_SHIFT` で bit 8..13 に揃う
+
+### 5.2 `get(key, hash) -> Option<&V>`
+
+```rust
+fn get(&mut self, key: &K, hash: u64) -> Option<&V> {
+    let needle = needle_from_hash(hash);
+    let pos = self.find(key, needle)?;       // SIMD scan は j7 と同じ、mask 値だけ差替
+    self.tags[pos] |= VISITED;                // visited 立て (tags 配列 in-place)
+    let id = ((self.tags[pos] & ID_MASK) >> ID_SHIFT) as usize;
+    let e = unsafe { self.entries[id].assume_init_ref() };
+    Some(&e.value)
+}
+```
+
+### 5.3 `evict_one_returning_id() -> ((K, V), u16)`
+
+j7 の 2-pass + first_live フォールバック構造をそのまま継承し、戻り値に freed_id を追加する。
+
+```rust
+fn evict_one_returning_id(&mut self) -> ((K, V), u16) {
+    debug_assert!(self.len > 0);
+    if self.hand >= self.tail { self.hand = 0; }
+
+    let pos = self.scan_evict(self.hand, self.tail)
+        .or_else(|| self.scan_evict(0, self.hand))
+        .or_else(|| self.first_live(self.hand, self.tail))
+        .or_else(|| self.first_live(0, self.hand))
+        .expect("len > 0 implies live slot exists");
+
+    self.do_evict_returning_id(pos)
+}
+
+fn do_evict_returning_id(&mut self, pos: usize) -> ((K, V), u16) {
+    debug_assert!(self.tags[pos] & LIVE != 0);
+    let id = ((self.tags[pos] & ID_MASK) >> ID_SHIFT) as u16;
+    let entry = unsafe { self.entries[id as usize].assume_init_read() };
+    self.tags[pos] = EMPTY;
+    self.len -= 1;
+    self.hand = pos + 1;
+    if self.hand >= self.tail { self.hand = 0; }
+    ((entry.key, entry.value), id)
+}
+```
+
+`scan_evict` / `first_live` は j7 のロジックそのまま。`tags[pos] & VISITED` と `LIVE` を見るだけで
+判定するので id bits は無関係。
+
+### 5.4 `compact_tags()`
+
+j7 との差分: **entries arena は不変、tags のみ前詰め**。
+
+```rust
+fn compact_tags(&mut self) {
+    let old_tail = self.tail;
+    let old_hand = self.hand.min(old_tail);
+    let mut new_hand: Option<usize> = None;
+    let mut write = 0usize;
+
+    for old_pos in 0..old_tail {
+        if self.tags[old_pos] == EMPTY { continue; }
+        if new_hand.is_none() && old_pos >= old_hand {
+            new_hand = Some(write);
+        }
+        if write != old_pos {
+            self.tags[write] = self.tags[old_pos];   // tag は memcpy、entries は触らない
+        }
+        write += 1;
+    }
+    for t in &mut self.tags[write..old_tail] { *t = EMPTY; }
+
+    self.tail = write;
+    self.hand = if self.len == 0 { 0 } else { new_hand.unwrap_or(0) };
+    debug_assert_eq!(self.len, write);
+}
+```
+
+j7 の compact が `(2 + 16) B = 18 B/slot` 動かしていたのに対し j8 は **`2 B/slot` のみ**。
+動かす情報は tag の bit pattern (= live + visited + id + hash) で、id が tag に埋まっているので
+entries arena の物理位置と論理位置 (= tag position) の対応が compact で再構築される。
+entries 自体の add ress も id も不変。
+
+### 5.5 `Drop`
+
+j7 と同じ「tags scan で live 列挙、entries[id] を一個ずつ drop」だが、id 抽出が必要:
+
+```rust
+impl<K, V> Drop for Inner<K, V> {
+    fn drop(&mut self) {
+        for i in 0..self.tail {
+            let t = self.tags[i];
+            if t & LIVE != 0 {
+                let id = ((t & ID_MASK) >> ID_SHIFT) as usize;
+                unsafe { self.entries[id].assume_init_drop() };
+            }
+        }
+    }
+}
+```
+
+I5 (id の重複なし) より同じ entries[id] が二重 drop されないことが保証される。
+
+## 6. アルゴリズム整合性
+
+### 6.1 SIEVE 意味論の保存
+
+j8 と j7 で「論理的な tag 列」(= tail 順に並んだ live + visited 状態の列) は同一。
+違うのは entry storage の物理位置だけで、これは外部観測 (= get の hit 結果、evict された (K,V)) に
+影響しない。よって **同じ trace に対し evict 列は j7 と完全一致**するはず。
+
+evict 列が j7 と一致 ⇒ j7 が `sieve_orig` と一致 (j7 報告 §2 で確認済) ⇒ **j8 も `sieve_orig` と一致**。
+
+### 6.2 unit test 戦略
+
+j7 の test を mirror した上で以下を追加:
+
+1. `matches_sieve_orig_externally` (cap=128, 8 shards, Zipf 風 trace 100k step):
+   各 step での get/insert 結果を `sieve_orig` と完全比較
+2. `matches_j7_externally` (同条件): j7 との外部一致 (sanity)
+3. `bit_layout_unit_tests`: `LIVE | VISITED | ID_MASK | HASH_MASK = 0xFFFF` (排他性)、
+   `(needle & SCAN_MASK) == needle` (needle 自身が match する)、
+   `assert!(per_shard <= MAX_PER_SHARD)` (構造的上限)
+4. `compact_id_preservation`: compact 前後で `{ id_of(tag) : tag.live }` が変わらないこと
+5. `warm_up_steady_transition`: cap=4 で 5 個 insert、4 個目で warm-up→steady 遷移、
+   5 個目で初 evict、freed_id が次 insert で消費されることを step 単位で verify
+
+### 6.3 大規模 trace 検証
+
+Twitter cluster018 1M req で `sieve_orig` / `sieve_j7` / `sieve_j8` の (hits, misses, evictions, evict 列)
+が完全一致することを確認。j7 の場合の前例 (報告 §2: 510136 / 489864 / 488840 で一致) を踏襲。
+
+## 7. メモリ予算
+
+K=V=u64、cap, shards 任意。`order_cap = 2 × cap_per_shard` 想定。
+
+| variant | tags | entries | order/free_list | Vec ヘッダ × shards | 合計 (cap=10000, 16 shards) |
+|---|---:|---:|---:|---:|---:|
+| j5 | 1 B × 2cap = 2 | 24 B × 2cap = 48 | — | small | ~50 B/cap |
+| j6 | 1 B × 2cap = 2 | 16 B × 2cap = 32 | — | small | ~34 B/cap |
+| j7 | 2 B × 2cap = 4 | 16 B × 2cap = 32 | — | small | **36 B/cap** |
+| M5.3 (order 別) | 4 | 16 | order 8 + free 1 = 9 | ~24 × 16 = 384 B | **~28 B/cap** |
+| **j8** | 4 | 16 | **0** (free_list 廃止) | ~24 × 16 = 384 B | **20 B/cap** |
+| orig | n/a | Node 32 B × cap | small | small | 25 B/cap (実測ベース) |
+
+j8 は **j7 比 −16 B/cap (−44%)、orig 比 −5 B/cap (−20%)**。memfair sweep の規定 (= 同 inline B/cap で
+横並び) で初めて **「j 系列が orig より軽くて速い」** と主張できる位置。
+
+### 7.1 「実効 B/live-entry」の観点
+
+物理 inline ÷ live 数 (= cap) で見れば j8 = 20、orig = 25 で同じ。物理 inline ÷ slot 数 (cap + tombstone)
+で見れば j8 は live + tombstone 共存、orig は live のみ。tombstone を ghost 的補助とみなす立場では
+「j8 は per-live-cost 20 B、ghost 補助 4 B/cap (= tombstone tag 領域)」と分解できる。
+これは ARC ghost 慣習 (key-only metadata は cap に含めない) と同じ立場で正当化できるが、
+レポートでは両見方を併記するのが誠実。
+
+## 8. 性能の机上検討
+
+### 8.1 hit path cycle 内訳
+
+8 cy 単位で見積もった op breakdown (per_shard=64 sweet spot 想定):
+
+| 段階 | j7 | j8 | 差分 |
+|---|---:|---:|---:|
+| XXH3 hash (u64) | 12 cy | 12 cy | 0 |
+| shard 選択 + needle 構築 | 4 cy | 4 cy | 0 |
+| AVX2 scan (vpand/vpcmpeqw/movemask) | 10 cy | 10 cy | 0 |
+| candidate 抽出 (trailing_zeros, lane → pos) | 4 cy | 4 cy | 0 |
+| **id 抽出** (`(tag >> 8) & 0x3F`) | 0 | **+2 cy** | +2 |
+| entries[id] load (L1 hit 仮定) | 4 cy | 4 cy | 0 |
+| key 等価チェック (u64 cmp) | 2 cy | 2 cy | 0 |
+| visited 立て (`tags[pos] |= VISITED`) | 2 cy | 2 cy | 0 |
+| value return | 2 cy | 2 cy | 0 |
+| loop overhead | 4 cy | 4 cy | 0 |
+| **合計** | **~44 cy** | **~46 cy** | **+2 cy** |
+
+`@4 GHz` で +2 cy ≈ **+0.5 ns/op**。j7 の 30 ns/op (cap=1024 / per_shard=32) に対して 1.7% 増、
+noise 圏内に十分収まる。
+
+### 8.2 false-match による期待コスト
+
+| per_shard | hash bits | false-match率 | E[FM/scan] | 追加 key-eq | Δ vs j7 |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 8 | 1/256 | 0.125 | ~1.2 cy | ~+0.3 ns |
+| 64 | 8 | 1/256 | 0.25 | ~2.5 cy | ~+0.6 ns |
+| 128 | 7 | 1/128 | 1.0 | ~10 cy | ~+2.5 ns |
+
+(per_shard=128 は choice 2 採用時のみ。choice 1 では構造的に不可)
+
+### 8.3 evict path
+
+evict は tags-only walk なので id 抽出は victim 確定時のみ実行 (= 1 op あたり高々 1 回)。
++2 cy 程度、無視できる。
+
+### 8.4 compact
+
+j7 比で memcpy 量 1/9 (`2 B vs 18 B per slot`)。compaction が顕在化する Twitter cluster019
+(scan-heavy / 低 hit ratio) で副次的な利得 (1-2% 程度) を期待。
+
+### 8.5 想定 throughput (Twitter cluster018)
+
+j7 報告 §4 の cell 値を参考に予測:
+
+| cap | per_shard | j7 (実測) | **j8 (予測)** | Δ |
+|---:|---:|---:|---:|---:|
+| 1024 | 32 | 29.94 | 30.5 ± 1 | +0.5 |
+| 1024 | 64 | 31.24 | 32.0 ± 1 | +0.8 |
+| 4096 | 32 | 29.84 | 30.5 ± 1 | +0.7 |
+| 4096 | 64 | 30.84 | 31.5 ± 1 | +0.7 |
+| 16384 | 32 | 29.41 | 30.0 ± 1 | +0.6 |
+| 16384 | 64 | 30.87 | 31.5 ± 1 | +0.6 |
+
+per_shard=128 帯は choice 1 では shards 数を増やす (= per_shard ≤ 64 を保つ) ことで回避。
+
+### 8.6 memfair 予測
+
+inline B/cap で揃えた head-to-head:
+
+| 比較 | j8 cap | orig cap (= j8 cap × 20/25) | 期待結果 |
+|---|---:|---:|---|
+| j8 vs orig (memory-fair) | 1024 | 1280 (端数 cap=1280) | j8 が −5〜−10 ns で勝つ予測 |
+| j8 vs orig (memory-fair) | 4096 | 5120 | j8 が −3〜−7 ns で勝つ予測 |
+| j8 vs orig (memory-fair) | 16384 | 20480 | per_shard 帯による (32 で勝、128 で僅差) |
+
+これが実証されれば **「memory-fair でも j 系列が orig を抜く」** という本プロジェクトの
+当面の研究目標 (M0) に到達。
+
+## 9. リスクと制約
+
+### 9.1 構造的制約
+
+| 制約 | 内容 | 緩和策 |
+|---|---|---|
+| per_shard ≤ 64 (choice 1) | 6-bit ID 制限 | `assert!` で強制、benchmark 時は per_shard ∈ {32, 64} に絞る |
+| 同じ理由で per_shard ≤ 128 (choice 2) | 7-bit ID | choice 2 採用時 hash bits 7 (= j5 並み) |
+| `remove` API 不可 | freed_id の保管場所が無い | 将来 free_list を生やす ROI 1 時間 |
+
+### 9.2 throughput 退行リスク
+
+机上検討 §8 で +0.5〜+1 ns/op の予測。実測で +3 ns 以上ズレた場合の原因候補:
+
+1. id 抽出 shift+and が register pressure を増やしてレジスタ割付が乱れる
+2. entries[id] アクセスの cache line が「sequential ではなく scattered」になり L1 prefetch が効かない
+3. Zipf 想定通り hot working set が L1 滞留しない
+
+(1) は asm 確認で診断可能、(2)(3) は perf counter (L1-dcache-load-misses) 比較で切り分け。
+全部当たると j5 並み (~5-10 ns 退行) まで悪化する worst case。
+
+### 9.3 false-match 退行の per_shard 依存
+
+per_shard=128 で +2.5 ns、per_shard=64 では +0.6 ns に収まる。**bench は per_shard ≤ 64 に絞れば
+退行は noise 圏**。これは memfair Regime 3 の知見 (per_shard > 128 はそもそも family 外) と
+整合する。
+
+### 9.4 アルゴリズム破綻リスク
+
+設計レビュー §6 で SIEVE 意味論保存を確認、`sieve_orig` oracle test を必須化することで
+実装バグは検出可能。「設計上の破綻」は識別されていない。
+
+## 10. 実装計画
+
+### 10.1 ファイル構成
+
+- `src/sieve_j8.rs` (新規、stand-alone): j7 と同じ完結スタイル。j3/j5/j6/j7 のコードに依存しない
+- `src/lib.rs`: `pub mod sieve_j8;` 追加
+- `src/bin/bench.rs`: variant matcher に `j8`, `j8_n1..j8_n2048` を追加 (j7 と同じパターン)
+- `tests/`: `sieve_j8_orig_oracle.rs` 等は j7 既存 test を mirror
+
+### 10.2 段階的着手 (incremental, 退行ゼロ確認しながら)
+
+これは「100 cy 予算」の文脈で重要。各段階で bench を撮り、退行が見えたら戻る:
+
+| 段階 | 内容 | 期待 cycle 差 (vs j7) | ゲート条件 |
+|---|---|---|---|
+| **0** | j7 のコピー (`sieve_j8.rs` を bit-for-bit 複製) | 0 | bench 完全一致 (sanity) |
+| **1** | tag bit に id 領域を作る (使わない、scan の SCAN_MASK だけ差替) | 0 | 退行 ≤ 0.5 ns |
+| **2** | insert 時に id を tag に書き込む (まだ entries はパラレル参照) | 0 | 退行 ≤ 0.5 ns |
+| **3** | get/evict/Drop で id 抽出して entries[id] に切替 (entries はまだ 2× cap) | +0.5〜+1 ns | 退行 ≤ 2 ns |
+| **4** | entries を 1× cap に縮める + warm-up/steady の `entry_id = len` 分岐 | +0.5 ns | 退行 ≤ 2 ns、memory −16 B/cap |
+| **5** | compact から entries 操作削除 | −0.1 ns (compaction ↓) | 機能等価 |
+
+各段階で `cargo test` 全 green + Twitter cluster018 cap=4096/per_shard=32 cell の 5 trial 中央値。
+
+### 10.3 unsafe / 安全性
+
+- `entries[id].assume_init_*` は I5/I6 (= live tag が指す id だけ init 済み) で安全
+- `entries[id].write` は I8 で warm-up 中、evict 直後で steady。どちらも uninit slot に書く前提
+- compact は entries を触らないので unsafe が消える (j7 比でコード単純化)
+
+## 11. ベンチ計画
+
+### 11.1 Twitter sweep (j7 と同条件)
+
+- cluster018 × cap ∈ {1024, 4096, 16384} × per_shard ∈ {32, 64}  (= 6 cell)
+- 4 variant: orig / j5 / j7 / **j8**
+- TRIALS=5、scripts は `scripts/sweep_j8_twitter.sh` (新規、`sweep_j7_twitter.sh` mirror)
+- 出力: `profiles/j8_twitter_pareto_2026-05-XX.csv`
+
+### 11.2 memfair sweep
+
+j5 で確立した枠組みを j8 にも適用:
+
+- `benches/micro.rs::bench_mem_fair` を流用 (or j8 用 cell 追加)
+- 軸: skew ∈ {0.6, 0.8, 1.0, 1.2} × cap ∈ {100, 1000, 10000} × variant ∈ {orig, j7, j8, orig_125x (j8 の 1.25x), orig_2x}
+- ハンデの根拠: j8 inline 20 B/cap、orig 25 B/cap → orig に 1.25x cap を渡す = byte-fair
+
+### 11.3 cluster019 (scan-heavy) 検証
+
+j5 で観測された hit ratio +6.32 pp の cell が j7 / j8 でどう振る舞うか。
+これは tag bit 数変更が evict 列に影響しないため、**j5 / j7 / j8 で hit ratio は完全一致するはず**
+(= correctness 確認の追加軸)。
+
+### 11.4 perf counter 取得 (退行原因切り分け用)
+
+退行が予測 (+0.5〜+1 ns) より大きく出た cell では:
+
+- L1-dcache-load-misses (entries 散在の影響)
+- branch-misses (warm-up/steady 分岐の影響)
+- cycles, instructions (IPC の変化)
+
+を `perf stat -r 5` で取って原因切り分け。
+
+### 11.5 期待する成果物
+
+`docs/reports/2026-05-XX-sieve-j8-bench.md` (実装 + bench 完了後):
+
+1. cell ごとの ns/op 比較表 (orig / j5 / j7 / j8)
+2. memfair 表 (j8 cap=N vs orig cap=1.25N)
+3. hit ratio 一致確認 (j7 == j8 must hold)
+4. 結論: j8 が orig を memory-fair で支配するか、する帯域がどこか
+
+## 12. オープン課題 / 将来 work
+
+| # | 課題 | 優先度 |
+|---|---|---|
+| OQ1 | choice 2 (per_shard ≤ 128, hash 7 bit) を const generics で並走実装するか | 中 |
+| OQ2 | M1 (slack 倍率削減) と j8 の合成 — j8 + slack=1.25x で更に物理 17 B/cap | 中 |
+| OQ3 | V を `[u8; 64]` 等に拡げた memfair (= heap-backed value 想定) | 中 (improvement-ideas G にも記載) |
+| OQ4 | `remove` API を生やすときの free_list 戻し設計 (`Cache` trait 整合化と同時) | 低 |
+| OQ5 | const generics で ID_BITS を per_shard から計算 (= choice 3) | 低 |
+| OQ6 | 内側 Inner を共通基盤化 (= improvement-ideas J4 の遅れた実装) | 低 |
+
+## 13. 結論
+
+j8 は **「§M5.3 (slack を片側に寄せる) + tag 内 ID embed + free_list 廃止」** の 3 つの直交アイディアを
+1 設計に統合し、
+
+- 物理 inline 20 B/cap (orig 25 比 −20%、j7 36 比 −44%)
+- throughput は per_shard ≤ 64 で j7 比 +0.5〜+1 ns 程度の退行見込み (noise 圏)
+- 構造的上限 per_shard ≤ 64 (choice 1) は実用 sweet spot とほぼ一致
+- データ構造 2 配列 + 5 フィールドの極小サーフェス
+- 実装工数 1〜1.5 日、bench 半日
+
+という Pareto 位置を獲得する。**memfair 比較で「j 系列が orig を absolute に抜く」初めての設計**となる
+ことが期待される。
+
+実装の段階的着手 (§10.2) で退行ゼロを各 step で確認できるため、最終結果が机上検討と乖離しても
+原因の段階を特定できる構造になっている。これは「100 cy 予算では 1 ステップで負けると原因切り分け
+が難しい」という本プロジェクト共通の制約への配慮。
+
+## 付録 A: bit 配分の代替案 (ID/hash バランス)
+
+| choice | per_shard 上限 | ID bits | hash bits | false-match | 想定用途 |
+|---:|---:|---:|---:|---:|---|
+| **1 (推奨)** | **64** | **6** | **8** | **1/256** | 主実装、bench 主軸 |
+| 2 | 128 | 7 | 7 | 1/128 (= j5 並) | choice 1 の per_shard 範囲外で評価したくなった場合 |
+| 3 (const generics) | 任意 (≤ 128) | log2(per_shard) | 14 − ID_BITS | 可変 | 将来の最適化、実装複雑度↑ |
+
+## 付録 B: 命名
+
+- `sieve_j8` (連番継続) — j7 の改修系として位置付ける
+- 別名候補: `M5.4` (idea ID として) — improvement-ideas.md の §M5.4 に登録
+- レポート命名: `2026-05-05-j8-design.md` (本ドキュメント)、`2026-05-XX-sieve-j8-bench.md` (実装後)
+
