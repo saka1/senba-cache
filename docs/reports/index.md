@@ -16,6 +16,7 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter |
+| j8 系列 (M5.4: tag に entry_id 埋込、entries arena 分離、free_list 廃止) | j8-design |
 
 ---
 
@@ -132,6 +133,17 @@ Twitter cluster018 × cap ∈ {1024, 4096, 16384} × per_shard ∈ {32, 64, 128}
 劣化幅は per_shard (= scan 長) に比例し、AVX2 経路の `vpand` 1 命令増 + visited クリア RMW の
 port 競合疑惑が候補。correctness は確定 (j5 と外部完全一致 — hits/misses/evictions が同一)。
 inline footprint -28% は構造的に達成。次は memory-fair sweep で「同じメモリ予算で j6 が j5 を抜くか」を測る。
+
+### 2026-05-05-j8-design.md
+**設計ドキュメント** (実装着手前)。j7 の §M5.3 (slack を片側に寄せる) + tag bit 内 entry_id embed +
+free_list 廃止の 3 つを統合する `sieve_j8` のスペック。u16 tag を `[live(1) | visited(1) | id(6) | hash(8)]` に
+再分配し、entries arena を `cap` 個 (slack 無し) に縮小、tags のみ 2× slack を持つ。`per_shard ≤ 64` 専用設計
+(choice 1) で false-match 率は 1/256。**inline 物理 20 B/cap (j7 36 比 −44%、orig 25 比 −20%)** で
+memory-fair 比較で初めて orig を absolute に抜くことを狙う。free_list は `evict ↔ insert` が 1:1 paired な
+API (= remove なし) のもとで warm-up は `entry_id = len`、steady は evict 戻り値で pass-through、
+保管不要との観察で削除。throughput 退行は cycle 机上検討で per_shard=64 において +0.5〜+1 ns 見込み (noise 圏)。
+段階的着手手順 (j7 コピー → tag 配置変更 → entries 縮小) で退行ゼロを各 step 確認できる構造を含む。
+実装計画と bench 計画 (Twitter sweep + memfair sweep) も同梱。
 
 ### 2026-05-05-sieve-j7-m23-twitter.md
 M2.3 (tag を u16 化、live + visited + 14-bit hash) の単独実装 `sieve_j7` を Twitter cluster018 ×
