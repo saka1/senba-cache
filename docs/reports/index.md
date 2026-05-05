@@ -16,7 +16,7 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
-| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist |
+| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
 
 ---
 
@@ -201,3 +201,16 @@ success path 限定にし、Path A は 16→14 cy、inner ops は 7→5。
 absolute に上回る** (−20.31% / −3.76% / −1.55%)。memory 20 B/cap の利得を保ったまま
 throughput でも勝つ、という当初目標に到達。inner ループ単独最適化は本稿で打ち止め、
 次は load latency hide (prefetch / chunk overlap) が打ち手候補。
+
+### 2026-05-06-j8-twitter-pareto.md
+`sieve_j8` の累積最適化 (M5.3 + tag-id embed + free_list 廃止 + BLSR×2 + sizeof-aware
+layout + c-hoist) を 2026-05-06 時点で `j7-twitter-pareto` と同じ枠組み
+(cluster {006,018,019} × cap {1024,4096,16384,65536} × per_shard {16,32,64}, 5 trials)
+で全数測定し、per_shard 横断サマリで champion を選定したスナップショット。
+**per_shard 中央値**: 16 で −11.15 ns (9/9 cell で orig 超え)、32 で −8.12 ns
+(9/12 速度勝ち + 7/12 HR 勝ち)、64 で −4.44 ns。cap=65536 を含めるため
+**champion=per_shard=32** を採用し `docs/figures/j8_twitter_pershard32_vs_orig.png`
+を作成 (`j7_twitter_pershard32_vs_orig.png` の j8 版)。退行は cluster018/cap≥4096 に
+局所化 (+0.2〜+2.3 ns) — `j8-candidate-loop-analysis` で示した false-match 退行域と一致。
+cluster019 では全 cap で −9〜−20 ns、cap=1024 で +6.32 pp の HR 利得を保持。
+memory 20 B/cap の利得を保ったまま 3/4 cluster で throughput 勝ちという j8 系列の当初目標に到達。
