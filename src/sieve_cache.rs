@@ -344,6 +344,43 @@ where
         Some(&e.value)
     }
 
+    /// Non-promoting lookup. Same as `get` but does not set the VISITED bit,
+    /// so peeked entries do not survive an extra SIEVE sweep.
+    fn peek(&self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<&V> {
+        let needle = Self::needle_from_hash(hash);
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: pos was confirmed live by find.
+        let e = unsafe { &*self.entry_ptr(id) };
+        Some(&e.value)
+    }
+
+    /// On hit: set VISITED and return `&value`. On miss: evaluate `f`, insert,
+    /// and return `&value` of the freshly inserted entry. The new entry always
+    /// lives at `tags[self.len - 1]` (steady-state evict path writes there;
+    /// warm-up path post-increments `self.len`), which avoids a second `find`.
+    fn get_or_insert_with<F>(&mut self, key: K, hash: u64, has_avx2_bmi1: bool, f: F) -> &V
+    where
+        F: FnOnce() -> V,
+    {
+        let needle = Self::needle_from_hash(hash);
+        if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
+            self.tags[pos] |= VISITED;
+            let id = Self::id_of(self.tags[pos]);
+            // SAFETY: pos was confirmed live by find.
+            let e = unsafe { &*self.entry_ptr(id) };
+            return &e.value;
+        }
+        let value = f();
+        let _evicted = self.insert(key, value, hash, has_avx2_bmi1);
+        let pos = self.len - 1;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: insert just wrote a live tag at write_pos = self.len - 1
+        // (warm-up: pos = old self.len then len += 1; evict: write_pos = last = len - 1).
+        let e = unsafe { &*self.entry_ptr(id) };
+        &e.value
+    }
+
     fn insert(&mut self, key: K, value: V, hash: u64, has_avx2_bmi1: bool) -> Option<(K, V)> {
         let needle = Self::needle_from_hash(hash);
         if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
@@ -636,9 +673,73 @@ where
         self.shards[i].remove(key, h, self.has_avx2_bmi1)
     }
 
+    /// Non-promoting lookup: returns a reference to the value without setting
+    /// the SIEVE VISITED bit. Use this when you want to inspect an entry
+    /// without affecting its eviction priority.
+    pub fn peek(&self, key: &K) -> Option<&V> {
+        let h = self.hasher.hash_one(key);
+        self.shards[self.shard_of_hash(h)].peek(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Returns an iterator over `(&K, &V)` pairs across all shards.
+    /// Iteration order is unspecified and may change between releases — SIEVE
+    /// has no LRU/MRU concept, and shards are walked in `shard_of_hash` order.
+    /// Iteration does not set VISITED bits, so it does not affect eviction.
+    pub fn iter(&self) -> Iter<'_, K, V, S> {
+        Iter {
+            shards: &self.shards,
+            shard_idx: 0,
+            slot_idx: 0,
+        }
+    }
+
+    /// Returns a reference to the value for `key`, or inserts the result of
+    /// `f()` and returns a reference to it. The closure is only evaluated on
+    /// a miss. On a hit, the entry's VISITED bit is set (same as `get`).
+    /// Inserting may evict another entry; the evicted `(K, V)` is dropped
+    /// (no listener API).
+    pub fn get_or_insert_with<F>(&mut self, key: K, f: F) -> &V
+    where
+        F: FnOnce() -> V,
+    {
+        let h = self.hasher.hash_one(&key);
+        let i = self.shard_of_hash(h);
+        self.shards[i].get_or_insert_with(key, h, self.has_avx2_bmi1, f)
+    }
+
     #[inline]
     fn shard_of_hash(&self, hash: u64) -> usize {
         (hash as usize) & self.shard_mask
+    }
+}
+
+/// Iterator over a [`Cache`] yielding `(&K, &V)` pairs. Created by [`Cache::iter`].
+pub struct Iter<'a, K, V, S: SlotSize> {
+    shards: &'a [Inner<K, V, S>],
+    shard_idx: usize,
+    slot_idx: usize,
+}
+
+impl<'a, K, V, S: SlotSize> Iterator for Iter<'a, K, V, S> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let sh = self.shards.get(self.shard_idx)?;
+            if self.slot_idx >= sh.len {
+                self.shard_idx += 1;
+                self.slot_idx = 0;
+                continue;
+            }
+            let i = self.slot_idx;
+            self.slot_idx += 1;
+            let id = Inner::<K, V, S>::id_of(sh.tags[i]);
+            // SAFETY: tags[0..len] are live (I4'), so entries[id] is initialized (I6).
+            // The lifetime 'a comes from `shards: &'a [Inner<...>]`, so the returned
+            // references stay valid for the iterator's lifetime.
+            let e = unsafe { &*sh.entry_ptr(id) };
+            return Some((&e.key, &e.value));
+        }
     }
 }
 

@@ -489,6 +489,154 @@ fn drop_count_matches_inserts_minus_evictions() {
     );
 }
 
+// ---------------- peek ----------------
+
+#[test]
+fn peek_returns_value_without_promoting() {
+    // Capacity 2, single shard so SIEVE behavior is fully deterministic.
+    // Insert 1, 2 (both unvisited, oldest = 1). peek(&1) must NOT mark 1 visited;
+    // inserting 3 then evicts 1 (the unvisited tail). If peek had promoted, 2
+    // would have evicted instead.
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    assert_eq!(cache.peek(&1), Some(&10));
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((1, 10)));
+    assert!(cache.contains_key(&2));
+    assert!(cache.contains_key(&3));
+}
+
+#[test]
+fn peek_missing_returns_none() {
+    let cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    assert_eq!(cache.peek(&42), None);
+}
+
+#[test]
+fn peek_versus_get_eviction_difference() {
+    // Same setup, but use `get` instead of `peek` — get promotes 1, so the
+    // SIEVE victim becomes 2. Confirms the symmetric eviction outcome and
+    // pins down that peek's "no promotion" is observable.
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    assert_eq!(cache.get(&1), Some(&10));
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((2, 20)));
+    assert!(cache.contains_key(&1));
+    assert!(cache.contains_key(&3));
+}
+
+// ---------------- iter ----------------
+
+#[test]
+fn iter_empty_yields_nothing() {
+    let cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    assert_eq!(cache.iter().count(), 0);
+}
+
+#[test]
+fn iter_yields_all_live_entries() {
+    use std::collections::HashSet;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    for k in 0..16u64 {
+        cache.insert(k, k * 10);
+    }
+    let collected: HashSet<(u64, u64)> = cache.iter().map(|(&k, &v)| (k, v)).collect();
+    let expected: HashSet<(u64, u64)> = (0..16u64).map(|k| (k, k * 10)).collect();
+    assert_eq!(collected, expected);
+    assert_eq!(cache.iter().count(), 16);
+}
+
+#[test]
+fn iter_after_removal_skips_removed_keys() {
+    use std::collections::HashSet;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    for k in 0..10u64 {
+        cache.insert(k, k);
+    }
+    cache.remove(&3);
+    cache.remove(&7);
+    let keys: HashSet<u64> = cache.iter().map(|(&k, _)| k).collect();
+    assert!(!keys.contains(&3));
+    assert!(!keys.contains(&7));
+    assert_eq!(keys.len(), 8);
+}
+
+#[test]
+fn iter_does_not_promote() {
+    // Iterate fully over a full cache; the next eviction must still target
+    // the SIEVE-oldest unvisited entry, not be perturbed by iteration.
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    let _: Vec<_> = cache.iter().collect();
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((1, 10)));
+}
+
+// ---------------- get_or_insert_with ----------------
+
+#[test]
+fn get_or_insert_with_inserts_on_miss() {
+    use std::cell::Cell;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    let calls = Cell::new(0u32);
+    let v = cache.get_or_insert_with(7, || {
+        calls.set(calls.get() + 1);
+        42
+    });
+    assert_eq!(v, &42);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.peek(&7), Some(&42));
+}
+
+#[test]
+fn get_or_insert_with_skips_closure_on_hit() {
+    use std::cell::Cell;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    cache.insert(7, 42);
+    let calls = Cell::new(0u32);
+    let v = cache.get_or_insert_with(7, || {
+        calls.set(calls.get() + 1);
+        999
+    });
+    assert_eq!(v, &42);
+    assert_eq!(calls.get(), 0);
+    assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn get_or_insert_with_promotes_on_hit() {
+    // Hit path must set VISITED (same semantics as `get`), so the entry
+    // survives the next SIEVE sweep.
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    let _ = cache.get_or_insert_with(1, || unreachable!("should not run on hit"));
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((2, 20)));
+    assert!(cache.contains_key(&1));
+}
+
+#[test]
+fn get_or_insert_with_evicts_when_full() {
+    // Capacity 2, single shard. Inserting a 3rd key via get_or_insert_with
+    // must trigger eviction of the SIEVE victim.
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    let v = cache.get_or_insert_with(3, || 30);
+    assert_eq!(v, &30);
+    assert_eq!(cache.len(), 2);
+    assert!(cache.contains_key(&3));
+    // Oldest unvisited (1) was evicted.
+    assert!(!cache.contains_key(&1));
+    assert!(cache.contains_key(&2));
+}
+
 #[test]
 fn drop_runs_for_live_entries_only() {
     // String values exercise drop correctness (no double-drop, no leak).
