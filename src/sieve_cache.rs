@@ -144,7 +144,10 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// Mask covering the id field. Invariant: `tag & ID_MASK == id × S::SIZE`
     /// (= byte offset into the entries arena).
     const ID_MASK: u16 = ((MAX_PER_SHARD - 1) as u16) << Self::ID_SHIFT;
-    /// Mask covering the hash field (always exactly 8 bits scattered).
+    /// Mask covering the hash field. Always exactly 8 bits scattered:
+    /// the non-status field is 14 bits (`0x3FFF`) and `ID_MASK` consumes 6 of them
+    /// (because `MAX_PER_SHARD == 64`), leaving `14 - 6 = 8` bits for the hash regardless
+    /// of which `SlotSize` is in use.
     const HASH_MASK: u16 = 0x3FFF & !Self::ID_MASK;
     /// Comparison target for SIMD scans: LIVE | HASH_MASK (visited and id are masked out).
     const SCAN_MASK: u16 = LIVE | Self::HASH_MASK;
@@ -161,11 +164,18 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// `MaybeUninit<T>` preserves this layout.
     #[inline]
     fn entry_ptr(&self, id: usize) -> *const Entry<K, V> {
+        // Re-anchor the layout invariants at the use site, so that any future code
+        // path that touches Entry through Storage (not just `Inner::new`) keeps the
+        // const-eval guard active.
+        let _: () = Self::_SIZE_OK;
+        let _: () = Self::_STORAGE_SIZE_OK;
         self.entries[id].as_ptr() as *const Entry<K, V>
     }
 
     #[inline]
     fn entry_ptr_mut(&mut self, id: usize) -> *mut Entry<K, V> {
+        let _: () = Self::_SIZE_OK;
+        let _: () = Self::_STORAGE_SIZE_OK;
         self.entries[id].as_mut_ptr() as *mut Entry<K, V>
     }
 }
@@ -214,13 +224,18 @@ where
         LIVE | spread
     }
 
-    fn find(&self, key: &K, needle: u16) -> Option<usize> {
+    fn find(&self, key: &K, needle: u16, has_avx2: bool) -> Option<usize> {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if has_avx2 {
+                // SAFETY: `has_avx2` was set from `is_x86_feature_detected!("avx2")` at
+                // Cache construction (see `Cache::new`), which also implies BMI1 on every
+                // CPU that ships AVX2. The detection result is valid for the process
+                // lifetime, so caching it is sound.
                 return unsafe { self.find_avx2(key, needle) };
             }
         }
+        let _ = has_avx2; // avoid unused-arg warning on non-x86_64
         self.find_scalar(key, needle)
     }
 
@@ -241,11 +256,28 @@ where
 
     /// AVX2 + BMI1 scan of `tags[..]` against SCAN_MASK. Same shape as j8;
     /// the c-hoist trick (`tag & ID_MASK = id × S::SIZE`) holds at slot granularity.
+    ///
+    /// # Safety
+    ///
+    /// The host CPU must support both AVX2 and BMI1 (BMI1 is implied by AVX2 on every
+    /// x86_64 part shipped to date). The caller is responsible for the runtime feature
+    /// check; `Inner::find` performs it via the cached `has_avx2` flag set in
+    /// `Cache::new`.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
+        // Re-anchor layout invariants at this use site (the c-hoist arithmetic below
+        // assumes `sizeof(Storage<Entry>) == S::SIZE`, which `_STORAGE_SIZE_OK` enforces).
+        let _: () = Self::_SIZE_OK;
+        let _: () = Self::_STORAGE_SIZE_OK;
         use std::arch::x86_64::*;
-        let limit = self.tags.len();
+        // Round `tail` up to LANE. Tags beyond `tail` are EMPTY (= 0) and would be
+        // skipped by the LIVE-bit check anyway, but on a partially-filled cache they
+        // can dominate cost; bounding the scan at the rounded-up tail keeps the SIMD
+        // path competitive at low fill ratios.
+        // `tags.len() == order_cap` is itself LANE-aligned, so this never exceeds it.
+        let limit = (self.tail + LANE - 1) & !(LANE - 1);
+        debug_assert!(limit <= self.tags.len());
         let tags_ptr = self.tags.as_ptr();
         let tags_byte_ptr = tags_ptr as *const u8;
         // Hold entries as a byte pointer. sizeof(Storage<Entry>) == S::SIZE (fixed),
@@ -272,9 +304,7 @@ where
                 // SAFETY: live needle ⟹ tag live ⟹ entries[id] initialized (I6).
                 // id_bytes = id × S::SIZE and id < capacity ⟹ in bounds.
                 // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
-                let entry_ptr = unsafe {
-                    entries_byte_ptr.add(id_bytes) as *const Entry<K, V>
-                };
+                let entry_ptr = unsafe { entries_byte_ptr.add(id_bytes) as *const Entry<K, V> };
                 let e = unsafe { &*entry_ptr };
                 if &e.key == key {
                     let lane = bit >> 1;
@@ -288,13 +318,14 @@ where
         None
     }
 
-    fn contains(&self, key: &K, hash: u64) -> bool {
-        self.find(key, Self::needle_from_hash(hash)).is_some()
+    fn contains(&self, key: &K, hash: u64, has_avx2: bool) -> bool {
+        self.find(key, Self::needle_from_hash(hash), has_avx2)
+            .is_some()
     }
 
-    fn get(&mut self, key: &K, hash: u64) -> Option<&V> {
+    fn get(&mut self, key: &K, hash: u64, has_avx2: bool) -> Option<&V> {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle)?;
+        let pos = self.find(key, needle, has_avx2)?;
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos was confirmed live by find.
@@ -302,9 +333,9 @@ where
         Some(&e.value)
     }
 
-    fn insert(&mut self, key: K, value: V, hash: u64) -> Option<(K, V)> {
+    fn insert(&mut self, key: K, value: V, hash: u64, has_avx2: bool) -> Option<(K, V)> {
         let needle = Self::needle_from_hash(hash);
-        if let Some(pos) = self.find(&key, needle) {
+        if let Some(pos) = self.find(&key, needle, has_avx2) {
             let id = Self::id_of(self.tags[pos]);
             // SAFETY: find confirmed the tag is live.
             let e = unsafe { &mut *self.entry_ptr_mut(id) };
@@ -425,9 +456,9 @@ where
     /// **swap-to-fill-gap**: after removing `removed_id`, swaps it with `self.len - 1`
     /// (the maximum live id) to restore I8 (live ids = `0..len`). This keeps the
     /// free-list-free structure intact so the warm-up branch works correctly on next insert.
-    fn remove(&mut self, key: &K, hash: u64) -> Option<V> {
+    fn remove(&mut self, key: &K, hash: u64, has_avx2: bool) -> Option<V> {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle)?;
+        let pos = self.find(key, needle, has_avx2)?;
         let removed_id = Self::id_of(self.tags[pos]);
 
         // (1) Read Entry out of entries[removed_id], mark its tag EMPTY.
@@ -458,7 +489,10 @@ where
                     break;
                 }
             }
-            debug_assert!(found, "live id {max_id} should be referenced by some live tag");
+            debug_assert!(
+                found,
+                "live id {max_id} should be referenced by some live tag"
+            );
         }
         // The hand cursor needs no adjustment; existing EMPTY-skip logic handles it.
 
@@ -500,6 +534,10 @@ pub const DEFAULT_SHARDS: usize = 8;
 pub struct Cache<K, V, S: SlotSize = Slot32, const SHARDS: usize = DEFAULT_SHARDS> {
     shards: [Inner<K, V, S>; SHARDS],
     hasher: Xxh3Build,
+    /// AVX2 (and BMI1, implied) availability, resolved once in `new` so the SIMD
+    /// dispatch in `Inner::find` is a single boolean load instead of a re-entry
+    /// into `is_x86_feature_detected!` on every cache op.
+    has_avx2: bool,
 }
 
 impl<K, V, S, const SHARDS: usize> Cache<K, V, S, SHARDS>
@@ -523,9 +561,20 @@ where
             let cap_i = base + if i < extra { 1 } else { 0 };
             Inner::new(cap_i)
         });
+        let has_avx2 = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        };
         Self {
             shards,
             hasher: Xxh3Build,
+            has_avx2,
         }
     }
 
@@ -543,25 +592,25 @@ where
 
     pub fn contains_key(&self, key: &K) -> bool {
         let h = self.hasher.hash_one(key);
-        self.shards[Self::shard_of_hash(h)].contains(key, h)
+        self.shards[Self::shard_of_hash(h)].contains(key, h, self.has_avx2)
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let h = self.hasher.hash_one(key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].get(key, h)
+        self.shards[i].get(key, h, self.has_avx2)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let h = self.hasher.hash_one(&key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].insert(key, value, h)
+        self.shards[i].insert(key, value, h, self.has_avx2)
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let h = self.hasher.hash_one(key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].remove(key, h)
+        self.shards[i].remove(key, h, self.has_avx2)
     }
 
     #[inline]
@@ -570,6 +619,10 @@ where
     }
 }
 
+// `CacheImpl` intentionally does **not** expose `remove` (`is_empty` has a default
+// impl on the trait). All sibling variants (sieve_orig, sieve_v*, sieve_j*) follow
+// the same convention, so cross-variant bench / oracle drivers stay symmetric.
+// `Cache::remove` is available on the inherent impl above when needed directly.
 impl<K, V, S, const SHARDS: usize> crate::CacheImpl<K, V> for Cache<K, V, S, SHARDS>
 where
     K: Hash + Eq,
@@ -974,6 +1027,83 @@ mod tests {
     #[should_panic]
     fn per_shard_above_max_panics() {
         let _: Cache<u64, u64, Slot32, 1> = Cache::new(65);
+    }
+
+    /// Regression test for the `find_avx2` `limit = round_up(tail, LANE)` change.
+    /// At low fill ratios `tail << tags.len()`, so the SIMD path's bound diverges
+    /// from the scalar path. Both must still agree with `sieve_orig` on every key,
+    /// covering misses (no key in tags) and hits (key present at small `tail`).
+    #[test]
+    fn find_avx2_low_fill_matches_oracle() {
+        use crate::sieve_orig::SieveCache as Orig;
+        // capacity 64 → order_cap = round_up(128, 16) = 128. With only a handful of
+        // keys inserted, `tail` stays well below `tags.len()` and the SIMD upper
+        // bound differs sharply from the old `tags.len()` bound.
+        let cap = 64usize;
+        let mut a: Orig<u64, u64> = Orig::new(cap);
+        let mut b: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
+        // Keep fill ratio well below capacity throughout so `tail` stays small.
+        for k in 0..8u64 {
+            a.insert(k, k * 7);
+            b.insert(k, k * 7);
+        }
+        // Probe absent keys (forces the scan to traverse the full `tail` window
+        // without an early hit) and present keys (verifies hits via the SIMD path).
+        for k in 0..256u64 {
+            assert_eq!(
+                a.get(&k).copied(),
+                b.get(&k).copied(),
+                "low-fill SIMD bound regression at key {k}"
+            );
+        }
+    }
+
+    /// Verifies cross-shard counts of dropped entries — catches regressions where
+    /// `swap-to-fill-gap` or `Drop` would double-drop or leak. Uses an explicit
+    /// drop counter (the existing `drop_runs_for_live_entries_only` test relies on
+    /// `String` only as a smoke test and does not assert anything observable).
+    #[test]
+    fn drop_count_matches_inserts_minus_evictions() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Bomb {
+            ctr: Arc<AtomicUsize>,
+        }
+        impl Drop for Bomb {
+            fn drop(&mut self) {
+                self.ctr.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cap = TEST_SHARDS * 4;
+        let mut evicted = 0usize;
+        let mut explicit_removed = 0usize;
+        {
+            let mut cache: Cache<u64, Bomb> = Cache::new(cap);
+            // 1) Insert N > cap distinct keys → triggers evictions, each dropped here.
+            for k in 0..(cap as u64 * 3) {
+                if let Some((_k, _v)) = cache.insert(k, Bomb { ctr: drops.clone() }) {
+                    // Evicted Bomb drops at end of this statement.
+                    evicted += 1;
+                }
+            }
+            // 2) Explicit removes also drop their Bomb on the returned-Option drop.
+            for k in 0..(cap as u64 / 2) {
+                if cache.remove(&k).is_some() {
+                    explicit_removed += 1;
+                }
+            }
+            // Cache drop happens at end of scope; remaining live Bombs drop there.
+        }
+        let total_inserted = cap as u64 * 3;
+        assert_eq!(
+            drops.load(Ordering::Relaxed) as u64,
+            total_inserted,
+            "expected each inserted Bomb to drop exactly once \
+             (evicted {evicted}, explicit_removed {explicit_removed}, total {total_inserted})"
+        );
     }
 
     #[test]
