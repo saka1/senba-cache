@@ -132,6 +132,14 @@ struct Inner<K, V, S: SlotSize> {
     /// Number of currently live entries (= number of live tags = first index past
     /// the live region in `tags`).
     len: usize,
+    /// Per-shard observability counters. Plain `u64` rather than `AtomicU64`
+    /// because every mutating op already requires `&mut self`; on x86 a plain
+    /// `add [mem], 1` is one uop on a dependency chain disjoint from the
+    /// returned value, so OoO retires it for free in steady state.
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
 }
 
 impl<K, V, S: SlotSize> Inner<K, V, S> {
@@ -220,6 +228,10 @@ where
             entries,
             hand: 0,
             len: 0,
+            hits: 0,
+            misses: 0,
+            insertions: 0,
+            evictions: 0,
         }
     }
 
@@ -359,7 +371,16 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let pos = match self.find(key, needle, has_avx2_bmi1) {
+            Some(p) => {
+                self.hits += 1;
+                p
+            }
+            None => {
+                self.misses += 1;
+                return None;
+            }
+        };
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos was confirmed live by find.
@@ -373,7 +394,16 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let pos = match self.find(key, needle, has_avx2_bmi1) {
+            Some(p) => {
+                self.hits += 1;
+                p
+            }
+            None => {
+                self.misses += 1;
+                return None;
+            }
+        };
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos was confirmed live by find; the &mut self borrow makes the
@@ -420,7 +450,16 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let pos = match self.find(key, needle, has_avx2_bmi1) {
+            Some(p) => {
+                self.hits += 1;
+                p
+            }
+            None => {
+                self.misses += 1;
+                return None;
+            }
+        };
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos was confirmed live by find.
@@ -452,13 +491,18 @@ where
     {
         let needle = Self::needle_from_hash(hash);
         if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
+            self.hits += 1;
             self.tags[pos] |= VISITED;
             let id = Self::id_of(self.tags[pos]);
             // SAFETY: pos was confirmed live by find.
             let e = unsafe { &*self.entry_ptr(id) };
             return &e.value;
         }
+        self.misses += 1;
         let value = f();
+        // `insert` increments `insertions` (and `evictions` if it overflows
+        // capacity). The miss path never hits the replace branch, so this
+        // does not double-count.
         let _evicted = self.insert(key, value, hash, has_avx2_bmi1);
         let pos = self.len - 1;
         let id = Self::id_of(self.tags[pos]);
@@ -469,6 +513,7 @@ where
     }
 
     fn insert(&mut self, key: K, value: V, hash: u64, has_avx2_bmi1: bool) -> Option<(K, V)> {
+        self.insertions += 1;
         let needle = Self::needle_from_hash(hash);
         if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
             let id = Self::id_of(self.tags[pos]);
@@ -489,6 +534,7 @@ where
             self.len += 1;
             (None, pos, id)
         } else {
+            self.evictions += 1;
             let pos = self.find_evict_pos();
             let id = Self::id_of(self.tags[pos]) as u16;
             // SAFETY: live ⟹ entries[id] initialized (I6). After read, entries[id] is
@@ -819,6 +865,10 @@ where
         new.tags.copy_from_slice(&self.tags);
         new.hand = self.hand;
         new.len = self.len;
+        new.hits = self.hits;
+        new.misses = self.misses;
+        new.insertions = self.insertions;
+        new.evictions = self.evictions;
         for (id, entry) in cloned {
             // SAFETY: id matches a LIVE tag in the freshly-built `new`; the
             // slot was MaybeUninit::uninit and no other write has touched it.
@@ -842,6 +892,33 @@ impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
             unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
         }
     }
+}
+
+// ---------------- Stats ----------------
+
+/// Lifetime counters for a [`Cache`]. Returned by [`Cache::stats`].
+///
+/// All fields are monotonically increasing across the lifetime of the cache.
+/// Counts are aggregated across all shards at call time.
+///
+/// Semantics:
+///
+/// - `hits` / `misses` count **promoting** lookups only — `get`, `get_mut`,
+///   `get_key_value`, and the lookup half of `get_or_insert_with`. Probes
+///   that do not affect SIEVE eviction (`peek*`, `contains_key`) and the
+///   internal `find` calls inside `insert` are intentionally excluded so
+///   that `hits + misses` equals the number of user-facing lookup ops.
+/// - `insertions` counts every successful call to [`Cache::insert`] (both
+///   replace and new-entry paths) plus the miss-path insert inside
+///   [`Cache::get_or_insert_with`].
+/// - `evictions` counts only **capacity-driven** evictions inside `insert`.
+///   Explicit removals (`remove`, `clear`, `retain`) do not increment it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
 }
 
 // ---------------- Public type Cache ----------------
@@ -966,6 +1043,19 @@ where
     /// Number of shards in this cache (always a power of two).
     pub fn shards(&self) -> usize {
         self.shard_mask + 1
+    }
+
+    /// Returns aggregated [`Stats`] counters across every shard. See the
+    /// [`Stats`] doc for what each field counts.
+    pub fn stats(&self) -> Stats {
+        let mut s = Stats::default();
+        for sh in self.shards.iter() {
+            s.hits += sh.hits;
+            s.misses += sh.misses;
+            s.insertions += sh.insertions;
+            s.evictions += sh.evictions;
+        }
+        s
     }
 
     pub fn contains_key<Q>(&self, key: &Q) -> bool
