@@ -35,7 +35,13 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::MaybeUninit;
+
+mod slot;
+mod stats;
+
+pub use slot::{Slot16, Slot32, Slot64, SlotSize};
+pub use stats::Stats;
 
 const EMPTY: u16 = 0;
 const LIVE: u16 = 0x8000;
@@ -44,70 +50,6 @@ const VISITED: u16 = 0x4000;
 const LANE: usize = 16;
 /// Structural upper bound for 6-bit entry_id. per_shard must not exceed this.
 pub const MAX_PER_SHARD: usize = 64;
-
-// ---------------- SlotSize sealed trait + ZST markers ----------------
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Sealed trait that specifies the stride (in bytes) of one slot in the entries arena at the type level.
-///
-/// `S::SIZE` is always a power of two. `Storage<E>` uses a `#[repr(C)] union` internally,
-/// placing the `entry` field at **offset 0**, so that reinterpreting `*const Storage<E>` as
-/// `*const E` reaches `E` directly.
-pub trait SlotSize: sealed::Sealed + 'static {
-    /// Slot stride in bytes for this bracket. Always a power of two.
-    const SIZE: usize;
-    /// Per-bracket storage cell type. Each impl defines a union to ensure
-    /// `size_of::<Storage<E>>() == SIZE`.
-    type Storage<E>: Sized;
-}
-
-/// `Slot16` bracket: stride = 16 bytes.
-/// Typical for small primitive pairs such as `(u32, u32)` or `(u64, u64)`.
-pub struct Slot16;
-/// `Slot32` (default) bracket: stride = 32 bytes.
-/// Typical for string-cache use cases such as `(String, V_small)` or `(Arc<str>, Arc<str>)`.
-pub struct Slot32;
-/// `Slot64` bracket: stride = 64 bytes.
-/// For heavier entries such as `(String, String)` or `(K, V_struct_up_to_56B)`.
-pub struct Slot64;
-
-impl sealed::Sealed for Slot16 {}
-impl sealed::Sealed for Slot32 {}
-impl sealed::Sealed for Slot64 {}
-
-#[repr(C)]
-pub union Slot16Storage<E> {
-    entry: ManuallyDrop<E>,
-    _pad: [u64; 2],
-}
-
-#[repr(C)]
-pub union Slot32Storage<E> {
-    entry: ManuallyDrop<E>,
-    _pad: [u64; 4],
-}
-
-#[repr(C)]
-pub union Slot64Storage<E> {
-    entry: ManuallyDrop<E>,
-    _pad: [u64; 8],
-}
-
-impl SlotSize for Slot16 {
-    const SIZE: usize = 16;
-    type Storage<E> = Slot16Storage<E>;
-}
-impl SlotSize for Slot32 {
-    const SIZE: usize = 32;
-    type Storage<E> = Slot32Storage<E>;
-}
-impl SlotSize for Slot64 {
-    const SIZE: usize = 64;
-    type Storage<E> = Slot64Storage<E>;
-}
 
 // ---------------- Inner ----------------
 
@@ -892,33 +834,6 @@ impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
             unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
         }
     }
-}
-
-// ---------------- Stats ----------------
-
-/// Lifetime counters for a [`Cache`]. Returned by [`Cache::stats`].
-///
-/// All fields are monotonically increasing across the lifetime of the cache.
-/// Counts are aggregated across all shards at call time.
-///
-/// Semantics:
-///
-/// - `hits` / `misses` count **promoting** lookups only — `get`, `get_mut`,
-///   `get_key_value`, and the lookup half of `get_or_insert_with`. Probes
-///   that do not affect SIEVE eviction (`peek*`, `contains_key`) and the
-///   internal `find` calls inside `insert` are intentionally excluded so
-///   that `hits + misses` equals the number of user-facing lookup ops.
-/// - `insertions` counts every successful call to [`Cache::insert`] (both
-///   replace and new-entry paths) plus the miss-path insert inside
-///   [`Cache::get_or_insert_with`].
-/// - `evictions` counts only **capacity-driven** evictions inside `insert`.
-///   Explicit removals (`remove`, `clear`, `retain`) do not increment it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub hits: u64,
-    pub misses: u64,
-    pub insertions: u64,
-    pub evictions: u64,
 }
 
 // ---------------- Public type Cache ----------------
