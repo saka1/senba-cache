@@ -54,3 +54,22 @@ pub fn twitter_csv_from_path(
         h.finish()
     }))
 }
+
+/// Twitter cache trace の CSV から **生 String キー**を `Iterator<Item = String>` で返す。
+///
+/// `twitter_csv_from_path` の pre-hash 版に対する peer。`senba::Cache<K, V>` のように
+/// 任意 `K: Hash + Eq` を取れる実装が出てきたため、String キーをそのままキャッシュに
+/// 流して実 workload のキー比較・ハッシュコストを実測するために用意した。
+/// op 列を無視する点・ストリーミングで返す点は `twitter_csv_from_path` と同一。
+pub fn twitter_csv_from_path_string(
+    path: impl AsRef<Path>,
+) -> io::Result<impl Iterator<Item = String>> {
+    let file = File::open(path)?;
+    Ok(BufReader::new(file).lines().map(|line| {
+        let line = line.expect("io error reading trace line");
+        line.split(',')
+            .nth(1)
+            .expect("malformed Twitter CSV row: no key column")
+            .to_string()
+    }))
+}

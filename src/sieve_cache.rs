@@ -570,6 +570,31 @@ where
     }
 }
 
+impl<K, V, S, const SHARDS: usize> crate::CacheImpl<K, V> for Cache<K, V, S, SHARDS>
+where
+    K: Hash + Eq,
+    S: SlotSize,
+{
+    fn new(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn get(&mut self, key: &K) -> Option<&V> {
+        self.get(key)
+    }
+    fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
+        self.insert(key, value)
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.contains_key(key)
+    }
+}
+
 // ---------------- tests ----------------
 
 #[cfg(test)]

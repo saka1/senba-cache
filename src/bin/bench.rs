@@ -22,6 +22,7 @@ use senba::CacheImpl;
 // use senba::sieve_j4::SieveCache as J4;
 // use senba::sieve_j5::SieveCache as J5;
 // use senba::sieve_j6::SieveCache as J6;
+use senba::Cache as Senba;
 use senba::sieve_j7::SieveCache as J7;
 use senba::sieve_j8::SieveCache as J8;
 use senba::sieve_orig::SieveCache as Orig;
@@ -173,6 +174,32 @@ fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
     }
 }
 
+/// String キー版 driver。Twitter trace の生 anonymized_key を `Cache<String, u64>` 系に
+/// 流す。value は `u64` 固定 (= ヒット行を index にした値) で、insert 時に `key.clone()` する。
+fn drive_str<C: CacheImpl<String, u64>>(trace: &[String], cap: usize) -> Stats {
+    let mut c = C::new(cap);
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    let mut evictions = 0u64;
+    let t0 = Instant::now();
+    for (i, k) in trace.iter().enumerate() {
+        if c.get(k).is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+            if c.insert(k.clone(), i as u64).is_some() {
+                evictions += 1;
+            }
+        }
+    }
+    Stats {
+        elapsed_ns: t0.elapsed().as_nanos(),
+        hits,
+        misses,
+        evictions,
+    }
+}
+
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut source = String::from("zipf");
@@ -208,7 +235,7 @@ fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench --source <zipf|file|twitter> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
+                    "usage: bench --source <zipf|file|twitter|twitter-string> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
                 );
                 std::process::exit(0);
             }
@@ -232,6 +259,19 @@ fn parse_args() -> Args {
         path,
         capacities,
         variants,
+    }
+}
+
+fn build_trace_string(args: &Args) -> Vec<String> {
+    // 現状 String trace は twitter-string ソース固有なので分岐は単純。
+    let p = args
+        .path
+        .as_ref()
+        .expect("--path required for --source twitter-string");
+    let it = file::twitter_csv_from_path_string(p).expect("open trace");
+    match args.len {
+        Some(n) => it.take(n).collect(),
+        None => it.collect(),
     }
 }
 
@@ -271,8 +311,50 @@ fn build_trace(args: &Args) -> Vec<u64> {
     }
 }
 
+fn run_string_keys(args: &Args) {
+    let trace = build_trace_string(args);
+    println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
+    for v in &args.variants {
+        for &cap in &args.capacities {
+            // 現状 String 経路は orig と senba::Cache (default Slot32, 8 shards) のみ。
+            // senba::Cache<String, u64> は Entry<String, u64> = 32B で Slot32 にちょうど収まる。
+            // Slot32 default: Entry<String, u64> = 24 + 8 = 32B ちょうど。
+            // SHARDS は cap / per_shard に応じて選択 (per-shard ≤ 64 制約のため
+            // cap が大きいほど SHARDS を増やす必要がある)。
+            let s = match v.as_str() {
+                "orig" => drive_str::<Orig<String, u64>>(&trace, cap),
+                "senba" => drive_str::<Senba<String, u64>>(&trace, cap),
+                "senba_n16" => drive_str::<Senba<String, u64, senba::Slot32, 16>>(&trace, cap),
+                "senba_n32" => drive_str::<Senba<String, u64, senba::Slot32, 32>>(&trace, cap),
+                "senba_n64" => drive_str::<Senba<String, u64, senba::Slot32, 64>>(&trace, cap),
+                "senba_n128" => drive_str::<Senba<String, u64, senba::Slot32, 128>>(&trace, cap),
+                "senba_n256" => drive_str::<Senba<String, u64, senba::Slot32, 256>>(&trace, cap),
+                "senba_n512" => drive_str::<Senba<String, u64, senba::Slot32, 512>>(&trace, cap),
+                "senba_n1024" => drive_str::<Senba<String, u64, senba::Slot32, 1024>>(&trace, cap),
+                "senba_n2048" => drive_str::<Senba<String, u64, senba::Slot32, 2048>>(&trace, cap),
+                other => panic!("unknown variant for twitter-string: {other}"),
+            };
+            println!(
+                "{v},{},{},{},{},{cap},{},{},{},{}",
+                args.source,
+                args.skew,
+                args.keys,
+                trace.len(),
+                s.elapsed_ns,
+                s.hits,
+                s.misses,
+                s.evictions
+            );
+        }
+    }
+}
+
 fn main() {
     let args = parse_args();
+    if args.source == "twitter-string" {
+        run_string_keys(&args);
+        return;
+    }
     let trace = build_trace(&args);
 
     println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
