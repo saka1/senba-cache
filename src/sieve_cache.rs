@@ -1224,6 +1224,42 @@ where
         Values { iter: self.iter() }
     }
 
+    /// Removes every entry from the cache and returns an iterator over the
+    /// owned `(K, V)` pairs.
+    ///
+    /// The cache is logically emptied as soon as `drain` is called: the
+    /// returned [`Drain`] borrows the cache exclusively, [`Cache::len`]
+    /// reports `0` for the lifetime of that borrow, and any entry that has
+    /// not yet been yielded by the iterator is dropped when the [`Drain`]
+    /// is dropped. Capacity, shard layout, and the chosen hasher are
+    /// preserved; the cache is fully reusable once the [`Drain`] goes out
+    /// of scope. The SIEVE hand is reset to 0 (the previous value would be
+    /// meaningless against an empty live region).
+    ///
+    /// # Leak amplification
+    ///
+    /// As with [`std::vec::Vec::drain`] and
+    /// [`std::collections::HashMap::drain`], leaking the returned iterator
+    /// (e.g. via [`std::mem::forget`]) leaks every entry that was not yet
+    /// yielded. The cache itself remains in a consistent and usable state
+    /// — it does not hold pointers into the leaked entries — so subsequent
+    /// inserts behave as on a freshly emptied cache (any storage previously
+    /// occupied by leaked entries is overwritten in place by future
+    /// inserts, leaking the originals' `K` and `V` allocations as expected
+    /// from `mem::forget`).
+    ///
+    /// # Order and statistics
+    ///
+    /// Iteration order matches [`Cache::iter`] (shard order, then slot
+    /// order within a shard) and is unspecified — SIEVE has no LRU/MRU
+    /// concept, so the order leaks implementation details. Entries are
+    /// dropped without incrementing [`Stats::evictions`]; like `clear` and
+    /// `retain`, draining is treated as explicit removal rather than
+    /// capacity-driven eviction.
+    pub fn drain(&mut self) -> Drain<'_, K, V, S, H> {
+        Drain::new(self)
+    }
+
     /// Returns a reference to the value for `key`, or inserts the result of
     /// `f()` and returns a reference to it. The closure is only evaluated on
     /// a miss. On a hit, the entry's VISITED bit is set (same as `get`).
@@ -1478,6 +1514,146 @@ impl<'a, K, V, S: SlotSize> Iterator for Values<'a, K, V, S> {
     type Item = &'a V;
     fn next(&mut self) -> Option<&'a V> {
         self.iter.next().map(|(_, v)| v)
+    }
+}
+
+/// Draining iterator over a [`Cache`], yielding owned `(K, V)` pairs.
+/// Created by [`Cache::drain`].
+///
+/// At construction the cache is reset to logically empty (`len = 0`,
+/// `hand = 0`, all tags zeroed); the [`Drain`] retains exclusive access via
+/// `&mut Cache` and walks the original arena slots through saved per-shard
+/// lengths. Dropping the [`Drain`] drops every still-pending entry; leaking
+/// it via [`std::mem::forget`] leaks every still-pending entry but leaves
+/// the cache in a consistent, reusable state (see [`Cache::drain`]).
+pub struct Drain<'a, K, V, S: SlotSize, H: BuildHasher> {
+    cache: &'a mut Cache<K, V, S, H>,
+    /// Per-shard length captured at `Drain::new`. Together with invariant I8
+    /// (`live ids = 0..len` per shard) this fully describes the set of still
+    /// initialized arena slots — no per-slot tag inspection is needed.
+    old_lens: Box<[usize]>,
+    shard_idx: usize,
+    /// Next entry id to drain in `shards[shard_idx]`. Monotonically advances
+    /// to `old_lens[shard_idx]`, then resets when `shard_idx` is bumped. The
+    /// monotonic advance is what makes `next()` and `Drop`'s cleanup pass
+    /// disjoint (no double-drop and no double-`ptr::read`).
+    next_id: usize,
+}
+
+impl<'a, K, V, S, H> Drain<'a, K, V, S, H>
+where
+    S: SlotSize,
+    H: BuildHasher,
+{
+    fn new(cache: &'a mut Cache<K, V, S, H>) -> Self {
+        // Snapshot per-shard `len` and reset every shard to the empty state.
+        // Tags `[0..old_len]` must be zeroed here (rather than incrementally
+        // as entries are yielded): a subsequent `insert` walks a SIMD scan
+        // window of `round_up(new_len, LANE)` tags, which can extend past
+        // the slots `insert` itself has just written. Stale LIVE bits in
+        // that window can spuriously match the new hash, leading SIMD `find`
+        // to dereference an arena slot whose entry was already yielded by
+        // (and hence moved out of) this Drain — that read would be UB.
+        // Pre-zeroing is the cheapest way to make `mem::forget(drain)`
+        // followed by arbitrary cache use sound: the cache sees a fully
+        // consistent empty state irrespective of how many entries the
+        // user actually consumed before forgetting.
+        let old_lens: Box<[usize]> = cache
+            .shards
+            .iter_mut()
+            .map(|sh| {
+                let l = sh.len;
+                for t in &mut sh.tags[..l] {
+                    *t = EMPTY;
+                }
+                sh.len = 0;
+                sh.hand = 0;
+                l
+            })
+            .collect();
+        Drain {
+            cache,
+            old_lens,
+            shard_idx: 0,
+            next_id: 0,
+        }
+    }
+}
+
+impl<K, V, S, H> Iterator for Drain<'_, K, V, S, H>
+where
+    S: SlotSize,
+    H: BuildHasher,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        loop {
+            if self.shard_idx >= self.old_lens.len() {
+                return None;
+            }
+            let old_len = self.old_lens[self.shard_idx];
+            if self.next_id >= old_len {
+                self.shard_idx += 1;
+                self.next_id = 0;
+                continue;
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            let sh = &self.cache.shards[self.shard_idx];
+            // SAFETY: by I8, the shard's live ids at the time of `Drain::new`
+            // were exactly `0..old_lens[shard_idx]`, so `entries[id]` was
+            // initialized then. No prior `next()` call has moved `id` out
+            // (the monotonic `next_id` counter ensures each id is visited
+            // at most once), and `Drain::new` did not touch the entries
+            // arena. Therefore `entry_ptr(id)` points at an initialized
+            // `Entry<K, V>`. The `next_id` advance happens *before* the
+            // read, so an unwind during `Drop` cleanup will not revisit
+            // this id even if the read itself somehow panicked (it cannot
+            // — `ptr::read` is a memcpy).
+            let entry = unsafe { std::ptr::read(sh.entry_ptr(id)) };
+            return Some((entry.key, entry.value));
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let mut remaining = 0usize;
+        if self.shard_idx < self.old_lens.len() {
+            remaining += self.old_lens[self.shard_idx].saturating_sub(self.next_id);
+            for &l in &self.old_lens[self.shard_idx + 1..] {
+                remaining += l;
+            }
+        }
+        (remaining, Some(remaining))
+    }
+}
+
+impl<K, V, S, H> ExactSizeIterator for Drain<'_, K, V, S, H>
+where
+    S: SlotSize,
+    H: BuildHasher,
+{
+}
+
+impl<K, V, S, H> std::iter::FusedIterator for Drain<'_, K, V, S, H>
+where
+    S: SlotSize,
+    H: BuildHasher,
+{
+}
+
+impl<K, V, S, H> Drop for Drain<'_, K, V, S, H>
+where
+    S: SlotSize,
+    H: BuildHasher,
+{
+    /// Drops every still-pending entry. Mirrors [`std::vec::Drain`]'s
+    /// "consume the rest" semantics so that an early-dropped iterator
+    /// always leaves the cache empty (rather than half-drained). A user
+    /// `Drop` that panics during this cleanup pass is treated like any
+    /// other double-panic — the second panic aborts.
+    fn drop(&mut self) {
+        while self.next().is_some() {}
     }
 }
 
