@@ -32,6 +32,7 @@
 
 use crate::hash::Xxh3Build;
 use std::borrow::Borrow;
+use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::mem::{ManuallyDrop, MaybeUninit};
 
@@ -740,6 +741,49 @@ where
     }
 }
 
+impl<K, V, S> Clone for Inner<K, V, S>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: SlotSize,
+{
+    fn clone(&self) -> Self {
+        // Clone every live (key, value) into an owned Vec first. If any user
+        // Clone impl panics partway, the partial Vec drops cleanly and we
+        // never touch the destination Inner — so the destination cannot end
+        // up with a LIVE tag pointing at an uninitialized slot.
+        let mut cloned: Vec<(usize, Entry<K, V>)> = Vec::with_capacity(self.len);
+        for i in 0..self.len {
+            let t = self.tags[i];
+            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
+            let id = Self::id_of(t);
+            // SAFETY: live ⟹ entries[id] initialized (I6).
+            let src = unsafe { &*self.entry_ptr(id) };
+            cloned.push((
+                id,
+                Entry {
+                    key: src.key.clone(),
+                    value: src.value.clone(),
+                },
+            ));
+        }
+
+        let mut new = Inner::<K, V, S>::new(self.capacity);
+        // tags arrays have identical length (both = round_up(capacity, LANE).max(LANE)).
+        new.tags.copy_from_slice(&self.tags);
+        new.hand = self.hand;
+        new.len = self.len;
+        for (id, entry) in cloned {
+            // SAFETY: id matches a LIVE tag in the freshly-built `new`; the
+            // slot was MaybeUninit::uninit and no other write has touched it.
+            unsafe {
+                std::ptr::write(new.entry_ptr_mut(id), entry);
+            }
+        }
+        new
+    }
+}
+
 impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
     fn drop(&mut self) {
         // Enumerate live tags, extract their ids, and drop entries[id].
@@ -995,6 +1039,58 @@ where
     #[inline]
     fn shard_of_hash(&self, hash: u64) -> usize {
         (hash as usize) & self.shard_mask
+    }
+}
+
+impl<K, V, S, H> Clone for Cache<K, V, S, H>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: SlotSize,
+    H: BuildHasher + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            shards: self.shards.to_vec().into_boxed_slice(),
+            shard_mask: self.shard_mask,
+            hasher: self.hasher.clone(),
+            has_avx2_bmi1: self.has_avx2_bmi1,
+        }
+    }
+}
+
+impl<K, V, S, H> fmt::Debug for Cache<K, V, S, H>
+where
+    K: fmt::Debug + Hash + Eq,
+    V: fmt::Debug,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    /// Renders the cache as a map of its current entries plus capacity / shard
+    /// metadata. Iteration order is unspecified (`Cache::iter` order); the
+    /// VISITED bit is **not** set, so `Debug` printing does not affect SIEVE
+    /// eviction priority.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cache")
+            .field("capacity", &self.capacity())
+            .field("len", &self.len())
+            .field("shards", &self.shards())
+            .field("entries", &DebugEntries(self))
+            .finish()
+    }
+}
+
+struct DebugEntries<'a, K, V, S: SlotSize, H: BuildHasher>(&'a Cache<K, V, S, H>);
+
+impl<K, V, S, H> fmt::Debug for DebugEntries<'_, K, V, S, H>
+where
+    K: fmt::Debug + Hash + Eq,
+    V: fmt::Debug,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.0.iter()).finish()
     }
 }
 
