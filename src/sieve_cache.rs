@@ -577,6 +577,150 @@ where
         Some(entry.value)
     }
 
+    /// Filters entries in place via `f(&K, &mut V) -> bool`. Single-pass
+    /// compaction over `tags[0..len]` plus a bitmap-based id remap to restore I8
+    /// (live ids = `0..len`). Avoids the per-deletion `find` + memmove +
+    /// id-swap that a naive `iter`+`remove` loop would pay (`O(k·n)` → `O(n)`
+    /// with the per-shard `n ≤ MAX_PER_SHARD` cap making the id remap a fixed
+    /// `≤ 64×64` bitscan).
+    fn retain<F>(&mut self, f: &mut F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        let old_len = self.len;
+        let old_hand = self.hand;
+
+        // Panic guard: if `f` unwinds, drop every still-live entry and reset
+        // the shard to empty so subsequent operations cannot UAF on a tag
+        // pointing at a dropped slot. The keep/drop pass below maintains the
+        // invariant that `tags[i] & LIVE != 0` iff `entries[id_of(tags[i])]`
+        // is still initialized, so this loop is sound at any panic point.
+        struct Guard<'a, K, V, S: SlotSize> {
+            inner: &'a mut Inner<K, V, S>,
+        }
+        impl<K, V, S: SlotSize> Drop for Guard<'_, K, V, S> {
+            fn drop(&mut self) {
+                for i in 0..self.inner.tags.len() {
+                    let t = self.inner.tags[i];
+                    if t & LIVE != 0 {
+                        let id = Inner::<K, V, S>::id_of(t);
+                        // SAFETY: LIVE bit ⟹ entries[id] initialized (I6).
+                        unsafe { std::ptr::drop_in_place(self.inner.entry_ptr_mut(id)) };
+                        self.inner.tags[i] = EMPTY;
+                    }
+                }
+                self.inner.len = 0;
+                self.inner.hand = 0;
+            }
+        }
+        let guard = Guard { inner: self };
+        let inner = &mut *guard.inner;
+
+        // Pass 1: walk tags[0..old_len], decide keep/drop, compact survivors
+        // into tags[0..write] in place. Each iteration is structured so that
+        // if `f` panics, the only mutation already committed is to the slot
+        // currently being read — and that slot is left in a state the guard's
+        // Drop can clean up uniformly (LIVE tag ⟹ initialized entry).
+        let mut write = 0usize;
+        let mut drops_before_hand = 0usize;
+        for read in 0..old_len {
+            let t = inner.tags[read];
+            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
+            let id = Self::id_of(t);
+            // SAFETY: LIVE ⟹ entries[id] initialized (I6). The closure receives
+            // &K and &mut V via raw-pointer reborrow; nothing else aliases.
+            let keep = unsafe {
+                let p = inner.entry_ptr_mut(id);
+                f(&(*p).key, &mut (*p).value)
+            };
+            if keep {
+                if write != read {
+                    inner.tags[write] = t;
+                    inner.tags[read] = EMPTY;
+                }
+                write += 1;
+            } else {
+                // Zero the tag *before* dropping so an intervening panic in
+                // Drop (rare but possible) can't leave a stale LIVE tag
+                // pointing at an uninitialized slot.
+                inner.tags[read] = EMPTY;
+                // SAFETY: LIVE ⟹ entries[id] initialized (I6). Tag has just
+                // been cleared so the guard's cleanup will not visit this id.
+                unsafe { std::ptr::drop_in_place(inner.entry_ptr_mut(id)) };
+                if read < old_hand {
+                    drops_before_hand += 1;
+                }
+            }
+        }
+
+        // Commit new len + hand. The remaining tags[write..old_len] are
+        // already EMPTY (every iteration that increased write zeroed read,
+        // every drop iteration zeroed read), so I4' is preserved.
+        inner.len = write;
+        inner.hand = if old_hand >= old_len {
+            0
+        } else {
+            let h = old_hand - drops_before_hand;
+            if h >= write { 0 } else { h }
+        };
+
+        // Pass 2: restore I8 (live ids = 0..write). Surviving ids are some
+        // subset of {0..old_len} of size `write`; remap any id ≥ write down
+        // to a free slot id < write via a bitmap pairing. Per-shard capacity
+        // is bounded by MAX_PER_SHARD (= 64), so a single u64 holds the
+        // occupancy and we never need a Vec/HashSet here.
+        if write > 0 {
+            let mut occupied: u64 = 0;
+            for i in 0..write {
+                occupied |= 1u64 << Self::id_of(inner.tags[i]);
+            }
+            let low_mask: u64 = if write >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << write) - 1
+            };
+            let mut high = occupied & !low_mask;
+            let mut free_low = !occupied & low_mask;
+            debug_assert_eq!(
+                high.count_ones(),
+                free_low.count_ones(),
+                "high/low remap counts must agree (counting argument)"
+            );
+            while high != 0 {
+                let h_id = high.trailing_zeros() as usize;
+                let l_id = free_low.trailing_zeros() as usize;
+                debug_assert!(h_id >= write && l_id < write);
+                // SAFETY: h_id is occupied (live), l_id was unoccupied (its
+                // bit in `occupied` is 0 ⟹ no live tag references it ⟹
+                // entries[l_id] is uninitialized).
+                unsafe {
+                    let v = std::ptr::read(inner.entry_ptr(h_id));
+                    std::ptr::write(inner.entry_ptr_mut(l_id), v);
+                }
+                let mut found = false;
+                for i in 0..write {
+                    let t = inner.tags[i];
+                    if Self::id_of(t) == h_id {
+                        let cleared = t & !Self::ID_MASK;
+                        let new_id_field = (l_id as u16) << Self::ID_SHIFT;
+                        inner.tags[i] = cleared | new_id_field;
+                        found = true;
+                        break;
+                    }
+                }
+                debug_assert!(
+                    found,
+                    "high id {h_id} should be referenced by some live tag"
+                );
+                high &= high - 1;
+                free_low &= free_low - 1;
+            }
+        }
+
+        // Disarm the panic guard; the borrow of `inner` ends here.
+        std::mem::forget(guard);
+    }
+
     /// Drops every live entry and resets the shard to empty. Tags in `tags[0..len]`
     /// are zeroed back to EMPTY (the slack `tags[len..]` is already EMPTY under I4').
     fn clear(&mut self) {
@@ -803,6 +947,25 @@ where
         }
     }
 
+    /// Retains only the entries for which `f(&k, &mut v)` returns `true`.
+    /// Order of visitation is unspecified. Survivors keep their VISITED state
+    /// — `retain` is a non-promoting maintenance operation and does not
+    /// affect SIEVE eviction priority for the entries it leaves behind
+    /// (mirrors `iter` / `peek`). If `f` panics the cache is left empty but
+    /// in a consistent state; the panic resumes after cleanup.
+    ///
+    /// Linear in the number of live entries: a single in-place compaction
+    /// pass per shard, with no per-deletion hash lookup or memmove (unlike
+    /// calling `remove` in a loop, which is `O(k·n)` per shard).
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        for sh in self.shards.iter_mut() {
+            sh.retain(&mut f);
+        }
+    }
+
     /// Returns an iterator over `(&K, &V)` pairs across all shards.
     /// Iteration order is unspecified and may change between releases — SIEVE
     /// has no LRU/MRU concept, and shards are walked in `shard_of_hash` order.
@@ -893,8 +1056,6 @@ where
         self.contains_key(key)
     }
 }
-
-// ---------------- tests ----------------
 
 #[cfg(test)]
 mod tests;
