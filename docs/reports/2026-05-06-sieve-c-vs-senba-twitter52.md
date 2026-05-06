@@ -11,25 +11,27 @@ tool's full stack at three capacities (0.1% / 1% / 10% of footprint),
 | capacity | tool | variant | miss ratio | MQPS | ns/op |
 |---:|---|---|---:|---:|---:|
 | 144 | cachesim | Sieve (C) | 0.4881 | 2.62 | 382 |
-| 144 | senba | sieve_orig (Rust) | 0.4881 | 27.80 | 36.0 |
-| 144 | senba | Cache n16 | 0.5473 | 35.28 | 28.3 |
+| 144 | senba | sieve_orig (Rust) | 0.4881 | 27.47 | 36.4 |
+| 144 | senba | Cache n16 | 0.5473 | 35.48 | 28.2 |
 | 1435 | cachesim | Sieve (C) | 0.3216 | 2.61 | 383 |
-| 1435 | senba | sieve_orig (Rust) | 0.3216 | 34.51 | 29.0 |
-| 1435 | senba | Cache n32 | 0.3658 | 33.63 | 29.7 |
+| 1435 | senba | sieve_orig (Rust) | 0.3216 | 34.15 | 29.3 |
+| 1435 | senba | Cache n32 | 0.3658 | 33.27 | 30.1 |
 | 14354 | cachesim | Sieve (C) | 0.1973 | 2.52 | 397 |
-| 14354 | senba | sieve_orig (Rust) | 0.1973 | 42.90 | 23.3 |
-| 14354 | senba | Cache n256 | 0.2317 | 34.70 | 28.8 |
+| 14354 | senba | sieve_orig (Rust) | 0.1973 | 44.03 | 22.7 |
+| 14354 | senba | Cache n256 | 0.2317 | 38.00 | 26.3 |
 
 **Headline numbers**
-- senba's faithful Rust port (`sieve_orig`) is **~11–17× faster** than the
+- senba's faithful Rust port (`sieve_orig`) is **~10–17× faster** than the
   C reference (`libCacheSim/cachesim` running `Sieve.c`).
-- senba's publishable `Cache<u64,u64>` (set-associative) is **~13–14× faster**
+- senba's publishable `Cache<u64,u64>` (set-associative) is **~13–15× faster**
   than cachesim, with somewhat worse hit ratio (set-associative trade-off).
 - Hit ratio of `sieve_orig` matches cachesim Sieve **exactly** at all three
   capacities (sanity check: both tools ate the same trace).
 
 **Caveat — this is system-level, not algorithm-level.** Most of the gap is
 NOT the SIEVE algorithm. See [Caveats](#caveats).
+
+![cachesim vs senba MQPS](../figures/c_vs_senba_twitter52_mqps.png)
 
 ## Setup
 
@@ -73,16 +75,16 @@ confirms it.
    This strongly suggests its bottleneck is **per-request fixed cost**
    (CSV scanf + `request_t` build + vtable dispatch), not the SIEVE work,
    which scales differently with cap.
-4. **senba's MQPS rises with cap** (27.80 → 34.51 → 42.90 for `sieve_orig`).
+4. **senba's MQPS rises with cap** (27.47 → 34.15 → 44.03 for `sieve_orig`).
    This is the opposite signal: bigger caches mean fewer evictions and
    hand-walks per request, so the algorithm cost falls.
-5. **`senba::Cache` is roughly cap-independent** (~33–35 MQPS), suggesting
+5. **`senba::Cache` is roughly cap-independent** (~33–38 MQPS), suggesting
    its bottleneck is the bucket lookup itself rather than eviction work —
    consistent with set-associative scans.
 
 ## Caveats
 
-The 11–17× ratio is **not** a SIEVE-algorithm comparison. The harnesses
+The 10–17× ratio is **not** a SIEVE-algorithm comparison. The harnesses
 differ in ways that load most of the runtime:
 
 - **Trace I/O is in the timing on cachesim, not on senba.** cachesim
@@ -153,14 +155,14 @@ Findings:
 | capacity | tool | variant | miss ratio | MQPS | gap |
 |---:|---|---|---:|---:|---:|
 | 144 | cachesim-bin | Sieve (C) | 0.4881 | 7.56 | 1.0× |
-| 144 | senba | sieve_orig (Rust) | 0.4881 | 27.80 | 3.7× |
-| 144 | senba | Cache n16 | 0.5473 | 35.28 | 4.7× |
+| 144 | senba | sieve_orig (Rust) | 0.4881 | 27.47 | 3.6× |
+| 144 | senba | Cache n16 | 0.5473 | 35.48 | 4.7× |
 | 1435 | cachesim-bin | Sieve (C) | 0.3216 | 7.72 | 1.0× |
-| 1435 | senba | sieve_orig (Rust) | 0.3216 | 34.51 | 4.5× |
-| 1435 | senba | Cache n32 | 0.3658 | 33.63 | 4.4× |
+| 1435 | senba | sieve_orig (Rust) | 0.3216 | 34.15 | 4.4× |
+| 1435 | senba | Cache n32 | 0.3658 | 33.27 | 4.3× |
 | 14354 | cachesim-bin | Sieve (C) | 0.1973 | 7.47 | 1.0× |
-| 14354 | senba | sieve_orig (Rust) | 0.1973 | 42.90 | 5.7× |
-| 14354 | senba | Cache n256 | 0.2317 | 34.70 | 4.6× |
+| 14354 | senba | sieve_orig (Rust) | 0.1973 | 44.03 | 5.9× |
+| 14354 | senba | Cache n256 | 0.2317 | 38.00 | 5.1× |
 
 The 4–6× gap is still **not an algorithm comparison** — it bundles the
 two stacks' hashmap, dispatch model, and per-request bookkeeping. To
@@ -173,5 +175,7 @@ runs is the cache implementation.
 - Spec: [`2026-05-06-sieve-c-vs-senba-twitter52-design.md`](2026-05-06-sieve-c-vs-senba-twitter52-design.md)
 - Raw data (csv): [`data/2026-05-06-sieve-c-vs-senba-twitter52.csv`](data/2026-05-06-sieve-c-vs-senba-twitter52.csv)
 - Raw data (oracleGeneral): [`data/2026-05-06-sieve-c-vs-senba-twitter52-oraclegen.csv`](data/2026-05-06-sieve-c-vs-senba-twitter52-oraclegen.csv)
+- Plot script: [`scripts/plot_c_vs_senba_twitter52.py`](../../scripts/plot_c_vs_senba_twitter52.py)
+- Figure: [`figures/c_vs_senba_twitter52_mqps.png`](../figures/c_vs_senba_twitter52_mqps.png)
 - Reader: `src/workload/file.rs::libcachesim_csv_from_path`
 - Bench arm: `src/bin/bench.rs` `--source libcachesim-csv`
