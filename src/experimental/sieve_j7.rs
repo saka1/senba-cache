@@ -571,7 +571,7 @@ mod tests {
     /// 最終的に key 等価で確定するため、key set / get 結果は一致するはず。
     #[test]
     fn matches_j5_externally() {
-        use crate::sieve_j5::SieveCache as J5;
+        use crate::experimental::sieve_j5::SieveCache as J5;
         let cap = 128usize;
         let mut a: J5<u64, u64, 8> = J5::new(cap);
         let mut b: SieveCache<u64, u64, 8> = SieveCache::new(cap);
@@ -592,7 +592,7 @@ mod tests {
     /// j6 とも外部から見て一致すること (= 3 系列で外部観測 stable)。
     #[test]
     fn matches_j6_externally() {
-        use crate::sieve_j6::SieveCache as J6;
+        use crate::experimental::sieve_j6::SieveCache as J6;
         let cap = 128usize;
         let mut a: J6<u64, u64, 8> = J6::new(cap);
         let mut b: SieveCache<u64, u64, 8> = SieveCache::new(cap);

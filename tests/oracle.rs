@@ -3,7 +3,7 @@
 
 use senba::workload::file;
 use senba::workload::zipf::ZipfGen;
-use senba::{CacheImpl, sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3};
+use senba::{CacheImpl, experimental::{sieve_j3, sieve_j8, sieve_v0, sieve_v1, sieve_v2, sieve_v3}, sieve_orig};
 
 fn run<C: CacheImpl<u64, u64>>(
     trace: impl Iterator<Item = u64>,

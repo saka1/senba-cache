@@ -821,7 +821,7 @@ mod tests {
     /// j7 と外部一致: 同じ trace を流して各 key の get 結果が一致。
     #[test]
     fn matches_j7_externally() {
-        use crate::sieve_j7::SieveCache as J7;
+        use crate::experimental::sieve_j7::SieveCache as J7;
         let cap = 128usize;
         let mut a: J7<u64, u64, 8> = J7::new(cap);
         let mut b: SieveCache<u64, u64, 8> = SieveCache::new(cap);

@@ -18,13 +18,13 @@ use std::time::Instant;
 use senba::CacheImpl;
 // 2026-05-05: ベースラインを orig vs j7 に絞り込み。過去 variant は
 // 必要になれば use と matcher を復活させる (テスト・実装は残置)。
-// use senba::sieve_j3::SieveCache as J3;
-// use senba::sieve_j4::SieveCache as J4;
-// use senba::sieve_j5::SieveCache as J5;
-// use senba::sieve_j6::SieveCache as J6;
+// use senba::experimental::sieve_j3::SieveCache as J3;
+// use senba::experimental::sieve_j4::SieveCache as J4;
+// use senba::experimental::sieve_j5::SieveCache as J5;
+// use senba::experimental::sieve_j6::SieveCache as J6;
 use senba::Cache as Senba;
-use senba::sieve_j7::SieveCache as J7;
-use senba::sieve_j8::SieveCache as J8;
+use senba::experimental::sieve_j7::SieveCache as J7;
+use senba::experimental::sieve_j8::SieveCache as J8;
 use senba::sieve_orig::SieveCache as Orig;
 
 /// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
@@ -127,8 +127,8 @@ impl senba::CacheImpl<u64, u64> for Moka {
         self.inner.contains_key(key)
     }
 }
-// use senba::sieve_v0::SieveCache as V0;
-// use senba::sieve_v3::SieveCache as V3;
+// use senba::experimental::sieve_v0::SieveCache as V0;
+// use senba::experimental::sieve_v3::SieveCache as V3;
 use senba::workload::file;
 use senba::workload::zipf::ZipfGen;
 

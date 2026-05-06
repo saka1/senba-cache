@@ -1,36 +1,49 @@
-//! J5 — j4 から double-hash を排除した版。
+//! J4 — set-associative SIEVE。`SieveJ3` を `SHARDS` 個並べ、key の hash の
+//! 下位ビットでシャードを選ぶ薄いラッパー。並行性は意図しない (単スレ前提)。
 //!
-//! ## 動機
+//! ## 検証ターゲット
 //!
-//! `2026-05-05-sieve-j4-pershard-vs-footprint.md` で「j4 がまだ orig より遅い
-//! ~3 ns の正体」を H3 (double-hash 固定費) と仮置きしたが、未測定。j4 は
-//! per-op で **2 回** key を hash する:
+//! 1. **スループット**: 同一総容量 (cap = SHARDS × per_shard) で `j3` 単一に
+//!    対し劣化しないか / 勝てるか。per-shard が小さい (≤128 程度) と内部状態が
+//!    L1/L2 に収まり、scan / hash table が cache miss しにくい想定。
+//! 2. **set-associative tax**: `sieve_orig` (グローバル単一 SIEVE) と比べて
+//!    miss ratio がどれだけ増えるか。partition の境界をまたぐ working set を
+//!    持つワークロードほど劣化が大きい予想。
 //!
-//! 1. shard 選択用 (`shard_of` で `hash_one(key)`)
-//! 2. 内部 `SieveJ3::tag_of` で再 hash → tag
+//! ## 既知の handicap (j5 で解消済み)
 //!
-//! 両者は同じ XXH3 を回しているだけなので、外で 1 度計算した 64-bit hash の
-//! 下位ビットで shard を選び、上位 8-bit から tag を作って j3 に渡せば 2 を
-//! 削れる。それが j5。
+//! 現状 j4 は per-op で **2 回 hash する** (shard 選択用 + 内部 j3 の `tag_of`)。
+//! 共通の build hasher を共有しているが API 境界で再ハッシュは避けられない。
+//! throughput 比較ではこの固定オーバーヘッドが j4 を不利にするが、(2) hit
+//! ratio 比較はこの overhead と独立に成立する。
 //!
-//! ## j4 との差分
+//! `sieve_j5.rs` で j3 に `get_with_hash` 等を生やして double-hash を除去した
+//! 結果、cell に依らず ~7 ns/op の固定費だったことが確定した
+//! (`docs/reports/2026-05-05-sieve-j5-doublehash-ab.md`)。j4 自身は AB の歴史
+//! 保存目的でそのまま残し、以降の throughput 比較は j5 を採る。
 //!
-//! - j4 (`sieve_j4.rs`) は触らない。同一 run の AB ベースラインとして残す。
-//! - j5 は j3 の `pub(crate) fn {get,insert,contains}_with_hash` を呼ぶ。
-//!   それ以外の構造 (shard 配列 / const generic SHARDS / cap 分配) は完全に
-//!   j4 を踏襲するので、観測される差は double-hash 1 個分。
+//! ## bit 配分
 //!
-//! ## 期待される結果
+//! - shard 選択: `hash & (SHARDS - 1)` (下位 `log2(SHARDS)` ビット)
+//! - 内部 j3 の tag: `(hash >> 56) | 0x80` (上位 8 ビット)
 //!
-//! 親レポートの予想: cap=256 / SHARDS=8 (per_shard=32, scan が SIMD 1 chunk で
-//! 飽和済み) で j4=34 ns。これが j5 で 28 ns 程度まで落ちれば H3 ≈ 5–10 ns/op
-//! の妥当性が立つ。落ちなければ H3 は弱い (= 残り差は double-hash 以外の何か)。
+//! 上位/下位で分けて、同一 hash 出力でも shard と tag が独立 entropy を
+//! 持つようにする。ここを上位ビット同士で取ると、shard 内では tag の最上位
+//! 数ビットが定数化して SIMD scan の false-match 率が悪化する。
+//!
+//! ## const generic の N
+//!
+//! `SieveCache<K, V, SHARDS>` で SHARDS を const generic に取る。デフォルト
+//! N = 8 (cap=1024 を per-shard=128 に分割するのが当面の主実験帯)。
+//! `assert!(SHARDS.is_power_of_two())` を `new` 内で課して、shard 選択を
+//! 高速な mask 操作に維持する (一般 N だと % 演算が必要)。
 
+use crate::experimental::sieve_j3::SieveCache as J3;
 use crate::hash::Xxh3Build;
-use crate::sieve_j3::SieveCache as J3;
 use std::hash::{BuildHasher, Hash};
 
-/// j4 と同じ既定。cap=1024 を per-shard=128 に分割するのが当面の主実験帯。
+/// デフォルトのシャード数 (= `SieveCache<K, V>` で SHARDS を省略した時の値)。
+/// cap=1024 を per-shard=128 に分割するのが当面の主実験帯。
 pub const DEFAULT_SHARDS: usize = 8;
 
 pub struct SieveCache<K, V, const SHARDS: usize = DEFAULT_SHARDS> {
@@ -42,6 +55,8 @@ impl<K, V, const SHARDS: usize> SieveCache<K, V, SHARDS>
 where
     K: Hash + Eq,
 {
+    /// 総容量 `capacity` を `SHARDS` で等分。割り切れない端数は最初の
+    /// `capacity % SHARDS` 個のシャードに +1 ずつ振る (合計が必ず `capacity`)。
     pub fn new(capacity: usize) -> Self {
         assert!(SHARDS > 0, "SHARDS must be > 0");
         assert!(
@@ -77,26 +92,25 @@ where
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
-        let h = self.hasher.hash_one(key);
-        self.shards[Self::shard_of_hash(h)].contains_with_hash(key, h)
+        self.shards[self.shard_of(key)].contains_key(key)
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
-        let h = self.hasher.hash_one(key);
-        let idx = Self::shard_of_hash(h);
-        self.shards[idx].get_with_hash(key, h)
+        let idx = self.shard_of(key);
+        self.shards[idx].get(key)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
-        let h = self.hasher.hash_one(&key);
-        let idx = Self::shard_of_hash(h);
-        self.shards[idx].insert_with_hash(key, value, h)
+        let idx = self.shard_of(&key);
+        self.shards[idx].insert(key, value)
     }
 
     #[inline]
-    fn shard_of_hash(hash: u64) -> usize {
-        // 下位ビットで shard 選択。j3 の tag (上位 8 bit) と独立 entropy。
-        (hash as usize) & (SHARDS - 1)
+    fn shard_of(&self, key: &K) -> usize {
+        // 下位ビットで shard 選択。j3 内部 tag (上位 8 bit) と独立 entropy。
+        // SHARDS が 2^k であることは new で assert 済み、`& (SHARDS-1)` が
+        // `% SHARDS` と等価。
+        (self.hasher.hash_one(key) as usize) & (SHARDS - 1)
     }
 }
 
@@ -126,10 +140,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    //! j4 のテストミラー。same shape, same invariants。j4 と同じ trace に対し
-    //! 同じ evict 列を返すかは tests/oracle.rs (or 既存の oracle test) で別途。
-
     use super::*;
+
+    // ---- j3 のテストミラー (基本 invariants) ----
 
     const TEST_SHARDS: usize = DEFAULT_SHARDS;
 
@@ -186,6 +199,23 @@ mod tests {
     }
 
     #[test]
+    fn capacity_with_remainder_sums_correctly() {
+        for cap in [
+            TEST_SHARDS,
+            TEST_SHARDS + 1,
+            TEST_SHARDS + 3,
+            TEST_SHARDS * 7 + 5,
+        ] {
+            let cache: SieveCache<u64, u64> = SieveCache::new(cap);
+            assert_eq!(
+                cache.capacity(),
+                cap,
+                "capacity sum mismatch for total cap={cap}"
+            );
+        }
+    }
+
+    #[test]
     fn churn_keeps_a_full_capacity_set() {
         let cap = TEST_SHARDS * 16;
         let mut cache: SieveCache<u64, u64> = SieveCache::new(cap);
@@ -215,6 +245,45 @@ mod tests {
     }
 
     #[test]
+    fn distinct_keys_round_trip_when_each_shard_has_room() {
+        let n: u64 = 64;
+        let cap = TEST_SHARDS * n as usize;
+        let mut cache: SieveCache<u64, u64> = SieveCache::new(cap);
+        for k in 0..n {
+            cache.insert(k, k * 7);
+        }
+        for k in 0..n {
+            assert_eq!(cache.get(&k), Some(&(k * 7)), "miss for key {k}");
+        }
+    }
+
+    #[test]
+    fn observes_set_associative_tax_at_unit_cap() {
+        let n: u64 = 256;
+        let cap = n as usize;
+        let mut cache: SieveCache<u64, u64> = SieveCache::new(cap);
+        let mut evictions = 0usize;
+        for k in 0..n {
+            if cache.insert(k, k).is_some() {
+                evictions += 1;
+            }
+        }
+        assert!(evictions > 0);
+        assert!(cache.len() < cap);
+        assert_eq!(cache.len(), n as usize - evictions);
+    }
+
+    #[test]
+    fn drop_runs_for_live_entries_only() {
+        let mut cache: SieveCache<u64, String> = SieveCache::new(TEST_SHARDS * 4);
+        for k in 0..100u64 {
+            cache.insert(k, format!("value-{k}"));
+        }
+        assert_eq!(cache.len(), TEST_SHARDS * 4);
+    }
+
+    /// const generic で N を変えても動く (N=2 と N=16 を sanity check)。
+    #[test]
     fn works_with_non_default_shards() {
         let mut cache_2: SieveCache<u64, u64, 2> = SieveCache::new(64);
         let mut cache_16: SieveCache<u64, u64, 16> = SieveCache::new(64);
@@ -226,29 +295,5 @@ mod tests {
         assert!(cache_16.len() <= 64);
         assert_eq!(cache_2.capacity(), 64);
         assert_eq!(cache_16.capacity(), 64);
-    }
-
-    /// j4 と j5 が同じ trace で同じ最終状態 (= 同じ key set / 同じ value)
-    /// を返すことを確認。double-hash の有無は外部から観測できる差分を生まない
-    /// (shard 選択も tag も同じ XXH3 の同じビット範囲から作るため)。
-    #[test]
-    fn matches_j4_externally() {
-        use crate::sieve_j4::SieveCache as J4;
-        let cap = 128usize;
-        let mut a: J4<u64, u64, 8> = J4::new(cap);
-        let mut b: SieveCache<u64, u64, 8> = SieveCache::new(cap);
-        // Zipf 風に偏らせた trace。同じ seed / 同じ key 列なら state が一致する。
-        for k in 0..10_000u64 {
-            let key = (k * 2654435761) % 1024;
-            let _ = a.insert(key, key);
-            let _ = b.insert(key, key);
-        }
-        for k in 0..1024u64 {
-            assert_eq!(
-                a.get(&k).copied(),
-                b.get(&k).copied(),
-                "j4 と j5 が key {k} で食い違う"
-            );
-        }
     }
 }

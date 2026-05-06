@@ -917,7 +917,7 @@ mod tests {
     /// j8 (single-thread oracle) と 1 shard 同期で外部一致。
     #[test]
     fn matches_j8_externally_1shard() {
-        use crate::sieve_j8::SieveCache as J8;
+        use crate::experimental::sieve_j8::SieveCache as J8;
         let cap = 64usize;
         let mut a: J8<u64, u64, 1> = J8::new(cap);
         let b: ConcurrentSieveCache<u64, u64, 1> = ConcurrentSieveCache::new(cap);

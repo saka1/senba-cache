@@ -66,18 +66,18 @@ edits invalidate prior saved baselines.
 
 ## Architecture
 
-Layout:
+Top-level (library surface):
 
-- `src/cache.rs` — `Cache<K, V>` trait (placeholder). Note: SIEVE's `get` semantically needs `&mut self` (it sets the visited bit), so the current trait signature is **not** yet a good fit and the SIEVE modules below do not implement it. Aligning the trait with SIEVE is future work.
-- `src/error.rs` — `Error` enum and `Result<T>` alias.
-- `src/lib.rs` — re-exports `Cache`, `Error`, `Result` and declares the SIEVE modules.
+- `src/cache.rs` — `Cache<K, V>` trait (placeholder; SIEVE's `get` needs `&mut self`, so trait alignment is future work).
+- `src/sieve_cache.rs` — **library-grade SIEVE implementation** (`Cache`, `SlotSize`). This is the stable, benchmarked surface; `benches/sieve_cache_perf.rs` guards its perf.
+- `src/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/.../Sieve.c`). Doubly-linked list + single hand + per-entry visited bit, in safe Rust via an arena. **Treat this as the spec / oracle** — every variant's hit/miss behavior on any trace must match `sieve_orig` exactly.
+- `src/hash.rs`, `src/workload/` — shared utilities (xxh3, Zipf, trace replay).
+- `src/lib.rs` — module declarations and re-exports.
 
-SIEVE implementations (each is a self-contained module under `src/`):
+Experimental variants:
 
-- `src/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/libCacheSim/libCacheSim/cache/eviction/Sieve.c`). Doubly-linked list (head=newest, tail=oldest) + single hand pointer + per-entry `freq` visited bit. Implemented in safe Rust via an arena (`Vec<MaybeUninit<Node>>` + `free_list`) with `NodeId = u32` prev/next (`NIL = u32::MAX` sentinel). **Treat this as the spec / oracle** — when adding a new variant, its hit/miss behavior on any trace must match `sieve_orig` exactly.
-- `src/sieve_v0.rs` — first experimental variant. Single contiguous `Vec` "logical queue" with tombstone marking + periodic compaction, instead of a linked list. Same external API as `sieve_orig` for direct comparison.
-
-Both SIEVE modules expose the same v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`, plus `remove` on `sieve_orig`) so they can be benchmarked / property-tested against each other with the same harness.
+- `src/experimental/` — historical / exploratory SIEVE variants (`sieve_v0..v3`, `sieve_j3..j8`, `sieve_c8`), each a self-contained module exposing the v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`). Used by `benches/micro.rs` and the `bin/bench*` harnesses for comparison; **not part of the library surface**.
+- `docs/reports/` — write-ups of what each experiment showed (see "Documenting results" below). The code in `src/experimental/` is the artifact; the reports are the conclusions.
 
 ## Documenting results
 
@@ -94,7 +94,7 @@ Reports are the primary output of this project. Code and bench numbers that aren
 
 ## Adding a new SIEVE variant
 
-1. Add `src/sieve_<name>.rs` with the same public API as `sieve_orig`.
-2. Register it in `src/lib.rs` next to the existing modules.
+1. Add `src/experimental/sieve_<name>.rs` with the same public API as `sieve_orig`.
+2. Register it in `src/experimental/mod.rs`.
 3. Mirror the test names in `sieve_orig` so equivalent behavior is checked side-by-side.
 4. The bar for correctness is "produces the same evicted-key sequence as `sieve_orig` on the same input trace" — not just "passes the unit tests".

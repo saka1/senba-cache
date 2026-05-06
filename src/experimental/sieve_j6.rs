@@ -573,7 +573,7 @@ mod tests {
     /// 最終的な find は key 等価で確定するため evict 列は一致するはず。
     #[test]
     fn matches_j5_externally() {
-        use crate::sieve_j5::SieveCache as J5;
+        use crate::experimental::sieve_j5::SieveCache as J5;
         let cap = 128usize;
         let mut a: J5<u64, u64, 8> = J5::new(cap);
         let mut b: SieveCache<u64, u64, 8> = SieveCache::new(cap);

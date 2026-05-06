@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use senba::sieve_c8::ConcurrentSieveCache;
+use senba::experimental::sieve_c8::ConcurrentSieveCache;
 use senba::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
