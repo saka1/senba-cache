@@ -626,11 +626,11 @@ impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
 /// assert_eq!(c.remove(&1), Some("hello".to_string()));
 /// assert_eq!(c.get(&1), None);
 /// ```
-pub struct Cache<K, V, S: SlotSize = Slot32> {
+pub struct Cache<K, V, S: SlotSize = Slot32, H: BuildHasher = Xxh3Build> {
     shards: Box<[Inner<K, V, S>]>,
     /// `shards.len() - 1`. Cached so `shard_of_hash` is a single AND.
     shard_mask: usize,
-    hasher: Xxh3Build,
+    hasher: H,
     /// AVX2 + BMI1 availability, resolved once in `new` so the SIMD dispatch in
     /// `Inner::find` is a single boolean load instead of a re-entry into
     /// `is_x86_feature_detected!` on every cache op. BMI1 is implied by AVX2 on
@@ -638,28 +638,50 @@ pub struct Cache<K, V, S: SlotSize = Slot32> {
     has_avx2_bmi1: bool,
 }
 
-impl<K, V, S> Cache<K, V, S>
+impl<K, V, S> Cache<K, V, S, Xxh3Build>
 where
     K: Hash + Eq,
     S: SlotSize,
 {
-    /// Creates a cache with `capacity` total entries. The shard count is the
-    /// smallest power of two `N` such that `ceil(capacity / N) <= MAX_PER_SHARD`,
-    /// i.e. `N = next_pow2(ceil(capacity / MAX_PER_SHARD))` (clamped to ≥ 1).
+    /// Creates a cache with `capacity` total entries and the default
+    /// [`Xxh3Build`] hasher. The shard count is the smallest power of two `N`
+    /// such that `ceil(capacity / N) <= MAX_PER_SHARD`, i.e.
+    /// `N = next_pow2(ceil(capacity / MAX_PER_SHARD))` (clamped to ≥ 1).
     /// The 6-bit per-shard id field then accommodates every entry without
     /// further tuning.
     pub fn new(capacity: usize) -> Self {
+        Self::with_hasher(capacity, Xxh3Build)
+    }
+
+    /// Creates a cache with an explicit shard count and the default
+    /// [`Xxh3Build`] hasher. `shards` must be a power of two, `>= 1`, and
+    /// small enough that `ceil(capacity / shards) <= MAX_PER_SHARD` holds.
+    /// Mainly useful for benchmarking / oracle comparison; prefer
+    /// [`Cache::new`] in production code.
+    pub fn with_shards(capacity: usize, shards: usize) -> Self {
+        Self::with_shards_and_hasher(capacity, shards, Xxh3Build)
+    }
+}
+
+impl<K, V, S, H> Cache<K, V, S, H>
+where
+    K: Hash + Eq,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    /// Creates a cache with `capacity` total entries and the supplied
+    /// [`BuildHasher`]. Auto-shards as in [`Cache::new`].
+    pub fn with_hasher(capacity: usize, hasher: H) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
         let n_min = capacity.div_ceil(MAX_PER_SHARD).max(1);
         let shards = n_min.next_power_of_two();
-        Self::with_shards(capacity, shards)
+        Self::with_shards_and_hasher(capacity, shards, hasher)
     }
 
-    /// Creates a cache with an explicit shard count. `shards` must be a power
-    /// of two, `>= 1`, and small enough that `ceil(capacity / shards) <= MAX_PER_SHARD`
-    /// holds. Mainly useful for benchmarking / oracle comparison; prefer
-    /// [`Cache::new`] in production code.
-    pub fn with_shards(capacity: usize, shards: usize) -> Self {
+    /// Creates a cache with an explicit shard count and the supplied
+    /// [`BuildHasher`]. `shards` must be a power of two, `>= 1`, and small
+    /// enough that `ceil(capacity / shards) <= MAX_PER_SHARD` holds.
+    pub fn with_shards_and_hasher(capacity: usize, shards: usize, hasher: H) -> Self {
         assert!(shards > 0, "shards must be > 0");
         assert!(
             shards.is_power_of_two(),
@@ -690,7 +712,7 @@ where
         Self {
             shards: inners.into_boxed_slice(),
             shard_mask: shards - 1,
-            hasher: Xxh3Build,
+            hasher,
             has_avx2_bmi1,
         }
     }

@@ -731,3 +731,32 @@ fn borrow_lookup_string_via_str() {
     assert_eq!(cache.remove("alpha"), Some(1));
     assert!(!cache.contains_key("alpha"));
 }
+
+#[test]
+fn with_hasher_uses_custom_buildhasher() {
+    use std::collections::hash_map::RandomState;
+
+    let mut cache: Cache<u64, u64, Slot32, RandomState> =
+        Cache::with_hasher(TEST_SHARDS * 4, RandomState::new());
+    for k in 0..16u64 {
+        assert!(cache.insert(k, k * 10).is_none());
+    }
+    for k in 0..16u64 {
+        assert_eq!(cache.get(&k), Some(&(k * 10)));
+    }
+    assert_eq!(cache.len(), 16);
+    assert_eq!(cache.capacity(), TEST_SHARDS * 4);
+}
+
+#[test]
+fn with_shards_and_hasher_routes_through_custom_hasher() {
+    use std::collections::hash_map::RandomState;
+
+    let mut cache: Cache<String, u64, Slot32, RandomState> =
+        Cache::with_shards_and_hasher(32, 4, RandomState::new());
+    cache.insert("alpha".to_string(), 1);
+    cache.insert("beta".to_string(), 2);
+    assert_eq!(cache.shards(), 4);
+    assert_eq!(cache.get("alpha"), Some(&1));
+    assert_eq!(cache.get("beta"), Some(&2));
+}
