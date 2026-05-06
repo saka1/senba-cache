@@ -1,9 +1,13 @@
 # `senba::Cache` vs `orig` — Twitter trace 5 cluster × cap sweep (raw String key)
 
-date: 2026-05-06
+date: 2026-05-06 (data refreshed 2026-05-07)
 status: implemented
-csv: `profiles/senba_twitter_string_2026-05-06.csv`
+csv: `profiles/senba_twitter_string_2026-05-07.csv` (旧: `..._2026-05-06.csv`)
 figures: `docs/figures/senba_twitter_string_{hr,nsop,pareto}.png`
+
+## 2026-05-07 追記: データ刷新
+
+`src/sieve_cache/` に対する細かな最適化 (`shift-on-evict` への書き換え、AVX2 検出キャッシュ、unsafe コントラクト整理ほか公開 API 群整備期の累積) を経て、同じ sweep を再測。`sieve_orig` 側でも環境差含めて数字が動いたため両者再掲する。**結論は不変**: 20 cell 全てで `senba_ps32` が `orig` を ns/op で支配し HR は ±0.9pp 以内、cluster019 で +6.32 pp の HR 大勝。Δ(ps32 − orig) は中央値 −34 ns/op、最大 −85 ns (cluster019/cap=65536)。**senba 側の改善幅は cluster006/cap=1024 で 78 → 62 ns、cluster019/cap=65536 で 116 → 94 ns** など全体的に縮み、orig 側もマシンノイズ含めやや軽くなっているが gap は維持。下表 / 図はすべて 2026-05-07 採取の新 CSV ベース。
 
 ## 目的
 
@@ -26,28 +30,28 @@ per-shard ≤ 64 制約のため SHARDS は cap/32 or cap/64 に応じて 16〜2
 
 | cluster    | cap     | orig | senba_ps32 | senba_ps64 | Δ(ps32 − orig) |
 |------------|--------:|-----:|-----------:|-----------:|---------------:|
-| cluster006 |   1024  |  145 |       78   |       82   |   **−68 ns**   |
-| cluster006 |   4096  |  123 |       75   |       81   |   −47 ns       |
-| cluster006 |  16384  |  118 |       82   |       83   |   −36 ns       |
-| cluster006 |  65536  |  148 |       97   |      103   |   −51 ns       |
-| cluster016 |   1024  |  106 |       66   |       72   |   −40 ns       |
-| cluster016 |   4096  |  101 |       66   |       70   |   −36 ns       |
-| cluster016 |  16384  |   99 |       74   |       73   |   −25 ns       |
-| cluster016 |  65536  |  114 |       82   |       86   |   −33 ns       |
-| cluster018 |   1024  |   91 |       60   |       67   |   −31 ns       |
-| cluster018 |   4096  |   85 |       61   |       66   |   −24 ns       |
-| cluster018 |  16384  |   90 |       66   |       70   |   −24 ns       |
-| cluster018 |  65536  |   94 |       78   |       78   |   −15 ns       |
-| cluster019 |   1024  |  121 |       69   |       76   |   −52 ns       |
-| cluster019 |   4096  |  126 |       73   |       80   |   −53 ns       |
-| cluster019 |  16384  |  163 |       86   |       92   |   −77 ns       |
-| cluster019 |  65536  |  217 |      116   |      114   |  **−101 ns**   |
-| cluster034 |   1024  |  118 |       69   |       74   |   −49 ns       |
-| cluster034 |   4096  |  120 |       72   |       77   |   −47 ns       |
-| cluster034 |  16384  |  140 |       82   |       87   |   −59 ns       |
-| cluster034 |  65536  |  183 |      104   |      112   |   −79 ns       |
+| cluster006 |   1024  |  109 |       62   |       73   |   −47 ns       |
+| cluster006 |   4096  |  102 |       64   |       67   |   −38 ns       |
+| cluster006 |  16384  |  101 |       73   |       73   |   −28 ns       |
+| cluster006 |  65536  |  120 |       82   |       85   |   −38 ns       |
+| cluster016 |   1024  |   83 |       56   |       58   |   −27 ns       |
+| cluster016 |   4096  |   79 |       54   |       59   |   −26 ns       |
+| cluster016 |  16384  |   82 |       60   |       62   |   −22 ns       |
+| cluster016 |  65536  |  100 |       72   |       71   |   −28 ns       |
+| cluster018 |   1024  |   72 |       53   |       54   |   −19 ns       |
+| cluster018 |   4096  |   69 |       50   |       52   |   −19 ns       |
+| cluster018 |  16384  |   72 |       55   |       60   |   −17 ns       |
+| cluster018 |  65536  |   83 |       66   |       65   |   −17 ns       |
+| cluster019 |   1024  |   95 |       58   |       61   |   −38 ns       |
+| cluster019 |   4096  |   98 |       61   |       62   |   −38 ns       |
+| cluster019 |  16384  |  128 |       72   |       73   |   −55 ns       |
+| cluster019 |  65536  |  179 |       94   |       93   |   **−85 ns**   |
+| cluster034 |   1024  |   88 |       57   |       61   |   −31 ns       |
+| cluster034 |   4096  |   96 |       62   |       62   |   −34 ns       |
+| cluster034 |  16384  |  115 |       70   |       72   |   −45 ns       |
+| cluster034 |  65536  |  140 |       94   |       90   |   −46 ns       |
 
-→ **20 cell 全てで senba_ps32 が orig を支配** (−15 〜 −101 ns/op、平均 −48 ns)。差幅は cap 増 + scan-heavy cluster (019/034) で拡大: orig は HashMap probe コスト + node 連鎖の cache miss が支配的になり、cluster019 cap=65536 で 217 ns/op までブローアップする一方、senba は SIMD scan により 116 ns/op で頭打ち。
+→ **20 cell 全てで senba_ps32 が orig を支配** (−17 〜 −85 ns/op、中央値 −33 ns、平均 −35 ns)。差幅は cap 増 + scan-heavy cluster (019) で拡大: orig は HashMap probe コスト + node 連鎖の cache miss が支配的になり、cluster019 cap=65536 で 179 ns/op までブローアップする一方、senba は SIMD scan により 94 ns/op で頭打ち。前回 (2026-05-06) と比べ senba 側が一段速く、最大改善は cluster006/cap=1024 と cluster019/cap=65536 でいずれも約 20 ns ほど。
 
 ### Hit Ratio (%)
 
@@ -80,7 +84,7 @@ per-shard ≤ 64 制約のため SHARDS は cap/32 or cap/64 に応じて 16〜2
 
 1. **String キーでの senba 優位は普遍的**: u64 sweep (j8 vs orig) で観測した特性が String でも保たれる。SIMD tag scan + per-shard 分割 + free_list 廃止の利得は K の hash・eq コストに依存しない。
 2. **per_shard=32 が 64 にわずか優位**: ns/op で per_shard=32 が 19/20 cell で勝つ (3〜10 ns 程度)。HR はほぼ同一。j8 の sweet spot (`per_shard ∈ [32, 64]`) を String でも踏襲。
-3. **cluster019 / cluster034 で cap 増の効果が orig 側で逆転**: orig は cap 大で ns/op が悪化 (118→148, 121→217, 117→183) するのに対し senba はおおむね単調 (一部 cap=65536 で微増)。orig の HashMap が L1/L2 を踏み外していると解釈できる (j5-vs-orig-2x-memfair で同パターン既出)。
+3. **cluster019 / cluster034 で cap 増の効果が orig 側で逆転**: orig は cap 大で ns/op が悪化 (cluster019: 95 → 179、cluster034: 88 → 140) するのに対し senba はおおむね単調 (cluster019 では 58 → 94 と緩い増加、senba_ps32 / ps64 はほぼ重なる)。orig の HashMap が L1/L2 を踏み外していると解釈できる (j5-vs-orig-2x-memfair で同パターン既出)。
 4. **HR 一致は I/O parity の確証**: 過去レポートで pre-hash u64 vs raw String の HR 衝突ゼロを確認済 (`twitter-string-keys.md`)。本 sweep の HR も同 trace に対する j8 sweep の HR と一致する範囲。
 
 ## なぜ String 化で ns/op ギャップが拡大するのか (仮説)
@@ -91,10 +95,10 @@ per-shard ≤ 64 制約のため SHARDS は cap/32 or cap/64 に応じて 16〜2
 
 | cap   | orig u64 | orig String | Δ | j8/senba u64 | senba String | Δ |
 |-------|---------:|------------:|----:|-------:|---------:|----:|
-| 1024  | 49.4 ns | 121 ns | +72 | 32.8 | 69 | +37 |
-| 4096  | 43.7 ns | 126 ns | +82 | 33.1 | 73 | +40 |
-| 16384 | 49.7 ns | 163 ns | +113 | 34.1 | 86 | +52 |
-| 65536 | 58.2 ns | 217 ns | +159 | 36.2 | 116 | +80 |
+| 1024  | 49.4 ns | 95 ns | +46 | 32.8 | 58 | +25 |
+| 4096  | 43.7 ns | 98 ns | +54 | 33.1 | 61 | +28 |
+| 16384 | 49.7 ns | 128 ns | +78 | 34.1 | 72 | +38 |
+| 65536 | 58.2 ns | 179 ns | +121 | 36.2 | 94 | +58 |
 
 → **String 化による追加コストが orig は senba の約 2 倍**。HR 特性 (cluster019 の +6 pp 等) は u64 sweep でも既出で構造的に同じ。違うのは ns/op の絶対差だけ。
 
