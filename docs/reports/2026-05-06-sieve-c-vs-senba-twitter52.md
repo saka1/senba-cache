@@ -112,9 +112,66 @@ format (libCacheSim's binary trace) and re-running cachesim on it; if the
 flat ~2.5 MQPS jumps significantly, the bottleneck is confirmed as CSV
 parsing rather than the cache stack itself.
 
+## Follow-up: cachesim on oracleGeneral binary trace
+
+To isolate how much of cachesim's flat ~2.5 MQPS was CSV parse cost,
+the trace was converted to libCacheSim's binary `oracleGeneral` format
+(24 B/req, no per-request scanf):
+
+```
+traceConv twitter_cluster52.csv csv -o twitter_cluster52.oracleGeneral \
+  -t "obj-id-col=2,delimiter=,,has-header=true,obj-id-is-num=true"
+```
+
+23 MB output, 1M req, working set 143,542 — matches earlier footprint.
+Re-running cachesim with the same Sieve algorithm and caps:
+
+| capacity | trace | miss ratio | MQPS (median of 5) | speedup vs CSV |
+|---:|---|---:|---:|---:|
+| 144 | csv | 0.4881 | 2.62 | — |
+| 144 | oracleGeneral | 0.4881 | **7.56** | **2.9×** |
+| 1435 | csv | 0.3216 | 2.61 | — |
+| 1435 | oracleGeneral | 0.3216 | **7.72** | **3.0×** |
+| 14354 | csv | 0.1973 | 2.52 | — |
+| 14354 | oracleGeneral | 0.1973 | **7.47** | **3.0×** |
+
+Findings:
+- **CSV parse was ~⅔ of cachesim's wall-clock**. Roughly cap-independent
+  3× speedup confirms the CSV path was a per-request fixed cost.
+- HR identical between CSV and oracleGeneral runs across all caps (sanity
+  on the conversion).
+- **cachesim-bin MQPS still flat** (7.47–7.72 across caps). The flatness
+  signature has not gone away — it just moved from CSV-parse to whatever
+  is left (vtable dispatch, `request_t` build, glib hashtable).
+- **senba vs cachesim-bin gap: ~4–6×**, down from ~11–17× on the CSV
+  comparison. The remaining gap is the genuine cache-stack overhead
+  (libCacheSim's generic `cache_t` plumbing + hashtable). The SIEVE
+  algorithm proper appears to be small relative to that infrastructure.
+
+### Updated headline table
+
+| capacity | tool | variant | miss ratio | MQPS | gap |
+|---:|---|---|---:|---:|---:|
+| 144 | cachesim-bin | Sieve (C) | 0.4881 | 7.56 | 1.0× |
+| 144 | senba | sieve_orig (Rust) | 0.4881 | 27.80 | 3.7× |
+| 144 | senba | Cache n16 | 0.5473 | 35.28 | 4.7× |
+| 1435 | cachesim-bin | Sieve (C) | 0.3216 | 7.72 | 1.0× |
+| 1435 | senba | sieve_orig (Rust) | 0.3216 | 34.51 | 4.5× |
+| 1435 | senba | Cache n32 | 0.3658 | 33.63 | 4.4× |
+| 14354 | cachesim-bin | Sieve (C) | 0.1973 | 7.47 | 1.0× |
+| 14354 | senba | sieve_orig (Rust) | 0.1973 | 42.90 | 5.7× |
+| 14354 | senba | Cache n256 | 0.2317 | 34.70 | 4.6× |
+
+The 4–6× gap is still **not an algorithm comparison** — it bundles the
+two stacks' hashmap, dispatch model, and per-request bookkeeping. To
+pin it down further, the FFI option (b) is required: link `Sieve.c`
+into senba's bench harness so the only difference between two timed
+runs is the cache implementation.
+
 ## Files
 
 - Spec: [`2026-05-06-sieve-c-vs-senba-twitter52-design.md`](2026-05-06-sieve-c-vs-senba-twitter52-design.md)
-- Raw data: [`data/2026-05-06-sieve-c-vs-senba-twitter52.csv`](data/2026-05-06-sieve-c-vs-senba-twitter52.csv)
+- Raw data (csv): [`data/2026-05-06-sieve-c-vs-senba-twitter52.csv`](data/2026-05-06-sieve-c-vs-senba-twitter52.csv)
+- Raw data (oracleGeneral): [`data/2026-05-06-sieve-c-vs-senba-twitter52-oraclegen.csv`](data/2026-05-06-sieve-c-vs-senba-twitter52-oraclegen.csv)
 - Reader: `src/workload/file.rs::libcachesim_csv_from_path`
 - Bench arm: `src/bin/bench.rs` `--source libcachesim-csv`
