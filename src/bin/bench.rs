@@ -15,17 +15,17 @@
 
 use std::time::Instant;
 
-use senba::CacheImpl;
+use senba_cache::CacheImpl;
 // 2026-05-05: ベースラインを orig vs j7 に絞り込み。過去 variant は
 // 必要になれば use と matcher を復活させる (テスト・実装は残置)。
-// use senba::experimental::sieve_j3::SieveCache as J3;
-// use senba::experimental::sieve_j4::SieveCache as J4;
-// use senba::experimental::sieve_j5::SieveCache as J5;
-// use senba::experimental::sieve_j6::SieveCache as J6;
-use senba::Cache as Senba;
-use senba::experimental::sieve_j7::SieveCache as J7;
-use senba::experimental::sieve_j8::SieveCache as J8;
-use senba::sieve_orig::SieveCache as Orig;
+// use senba_cache::experimental::sieve_j3::SieveCache as J3;
+// use senba_cache::experimental::sieve_j4::SieveCache as J4;
+// use senba_cache::experimental::sieve_j5::SieveCache as J5;
+// use senba_cache::experimental::sieve_j6::SieveCache as J6;
+use senba_cache::Cache as Senba;
+use senba_cache::experimental::sieve_j7::SieveCache as J7;
+use senba_cache::experimental::sieve_j8::SieveCache as J8;
+use senba_cache::sieve_orig::SieveCache as Orig;
 
 /// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
 /// thin wrapper。bench でのみ使うので bench.rs 内に閉じる。
@@ -53,7 +53,7 @@ struct MiniMoka {
 
 const MINI_MOKA_DUMMY: u64 = 0;
 
-impl senba::CacheImpl<u64, u64> for MiniMoka {
+impl senba_cache::CacheImpl<u64, u64> for MiniMoka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: mini_moka::sync::Cache::new(capacity as u64),
@@ -99,7 +99,7 @@ struct Moka {
 
 const MOKA_DUMMY: u64 = 0;
 
-impl senba::CacheImpl<u64, u64> for Moka {
+impl senba_cache::CacheImpl<u64, u64> for Moka {
     fn new(capacity: usize) -> Self {
         Self {
             inner: moka::sync::Cache::new(capacity as u64),
@@ -127,10 +127,10 @@ impl senba::CacheImpl<u64, u64> for Moka {
         self.inner.contains_key(key)
     }
 }
-// use senba::experimental::sieve_v0::SieveCache as V0;
-// use senba::experimental::sieve_v3::SieveCache as V3;
-use senba::workload::file;
-use senba::workload::zipf::ZipfGen;
+// use senba_cache::experimental::sieve_v0::SieveCache as V0;
+// use senba_cache::experimental::sieve_v3::SieveCache as V3;
+use senba_cache::workload::file;
+use senba_cache::workload::zipf::ZipfGen;
 
 struct Args {
     source: String,
@@ -174,9 +174,9 @@ fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
     }
 }
 
-/// senba::Cache 専用 driver。`with_shards` を呼ぶために CacheImpl 経由ではなく
+/// senba_cache::Cache 専用 driver。`with_shards` を呼ぶために CacheImpl 経由ではなく
 /// 具体型を直接構築する。`drive` と同じ計測ロジック。
-fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> Stats {
+fn drive_senba<S: senba_cache::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> Stats {
     let mut c = Senba::<u64, u64, S>::with_shards(cap, shards);
     let mut hits = 0u64;
     let mut misses = 0u64;
@@ -200,7 +200,7 @@ fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> 
     }
 }
 
-fn drive_senba_str<S: senba::SlotSize>(trace: &[String], cap: usize, shards: usize) -> Stats {
+fn drive_senba_str<S: senba_cache::SlotSize>(trace: &[String], cap: usize, shards: usize) -> Stats {
     let mut c = Senba::<String, u64, S>::with_shards(cap, shards);
     let mut hits = 0u64;
     let mut misses = 0u64;
@@ -386,22 +386,22 @@ fn run_string_keys(args: &Args) {
     println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
     for v in &args.variants {
         for &cap in &args.capacities {
-            // 現状 String 経路は orig と senba::Cache (default Slot32, 8 shards) のみ。
-            // senba::Cache<String, u64> は Entry<String, u64> = 32B で Slot32 にちょうど収まる。
+            // 現状 String 経路は orig と senba_cache::Cache (default Slot32, 8 shards) のみ。
+            // senba_cache::Cache<String, u64> は Entry<String, u64> = 32B で Slot32 にちょうど収まる。
             // Slot32 default: Entry<String, u64> = 24 + 8 = 32B ちょうど。
             // SHARDS は cap / per_shard に応じて選択 (per-shard ≤ 64 制約のため
             // cap が大きいほど SHARDS を増やす必要がある)。
             let s = match v.as_str() {
                 "orig" => drive_str::<Orig<String, u64>>(&trace, cap),
                 "senba" => drive_str::<Senba<String, u64>>(&trace, cap),
-                "senba_n16" => drive_senba_str::<senba::Slot32>(&trace, cap, 16),
-                "senba_n32" => drive_senba_str::<senba::Slot32>(&trace, cap, 32),
-                "senba_n64" => drive_senba_str::<senba::Slot32>(&trace, cap, 64),
-                "senba_n128" => drive_senba_str::<senba::Slot32>(&trace, cap, 128),
-                "senba_n256" => drive_senba_str::<senba::Slot32>(&trace, cap, 256),
-                "senba_n512" => drive_senba_str::<senba::Slot32>(&trace, cap, 512),
-                "senba_n1024" => drive_senba_str::<senba::Slot32>(&trace, cap, 1024),
-                "senba_n2048" => drive_senba_str::<senba::Slot32>(&trace, cap, 2048),
+                "senba_n16" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 16),
+                "senba_n32" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 32),
+                "senba_n64" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 64),
+                "senba_n128" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 128),
+                "senba_n256" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 256),
+                "senba_n512" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 512),
+                "senba_n1024" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 1024),
+                "senba_n2048" => drive_senba_str::<senba_cache::Slot32>(&trace, cap, 2048),
                 other => panic!("unknown variant for twitter-string: {other}"),
             };
             println!(
@@ -497,16 +497,16 @@ fn main() {
                 "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap),
                 "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap),
                 "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
-                // senba::Cache<u64, u64> (Slot32 default). per-shard <= 64 制約のため
+                // senba_cache::Cache<u64, u64> (Slot32 default). per-shard <= 64 制約のため
                 // cap が大きいときは SHARDS を増やす必要がある (cap=30000 → n512 等)。
-                "senba_n16" => drive_senba::<senba::Slot32>(&trace, cap, 16),
-                "senba_n32" => drive_senba::<senba::Slot32>(&trace, cap, 32),
-                "senba_n64" => drive_senba::<senba::Slot32>(&trace, cap, 64),
-                "senba_n128" => drive_senba::<senba::Slot32>(&trace, cap, 128),
-                "senba_n256" => drive_senba::<senba::Slot32>(&trace, cap, 256),
-                "senba_n512" => drive_senba::<senba::Slot32>(&trace, cap, 512),
-                "senba_n1024" => drive_senba::<senba::Slot32>(&trace, cap, 1024),
-                "senba_n2048" => drive_senba::<senba::Slot32>(&trace, cap, 2048),
+                "senba_n16" => drive_senba::<senba_cache::Slot32>(&trace, cap, 16),
+                "senba_n32" => drive_senba::<senba_cache::Slot32>(&trace, cap, 32),
+                "senba_n64" => drive_senba::<senba_cache::Slot32>(&trace, cap, 64),
+                "senba_n128" => drive_senba::<senba_cache::Slot32>(&trace, cap, 128),
+                "senba_n256" => drive_senba::<senba_cache::Slot32>(&trace, cap, 256),
+                "senba_n512" => drive_senba::<senba_cache::Slot32>(&trace, cap, 512),
+                "senba_n1024" => drive_senba::<senba_cache::Slot32>(&trace, cap, 1024),
+                "senba_n2048" => drive_senba::<senba_cache::Slot32>(&trace, cap, 2048),
                 // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
                 "mini_moka" => drive::<MiniMoka>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。

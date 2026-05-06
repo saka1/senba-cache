@@ -42,8 +42,8 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use senba::experimental::sieve_c8::ConcurrentSieveCache;
-use senba::workload::zipf::ZipfGen;
+use senba_cache::experimental::sieve_c8::ConcurrentSieveCache;
+use senba_cache::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
 /// 大きすぎると tail latency が見えず、小さすぎると Instant overhead が支配する。

@@ -738,7 +738,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "senba"
+name = "senba-cache"
 version = "0.1.0"
 dependencies = [
  "criterion",

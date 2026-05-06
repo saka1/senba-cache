@@ -1,4 +1,4 @@
-//! `senba::Cache` — library-grade SIEVE implementation built on the j8 series,
+//! `senba_cache::Cache` — library-grade SIEVE implementation built on the j8 series,
 //! with automatic padding via the `SlotSize` abstraction.
 //!
 //! Design details: `docs/reports/2026-05-06-senba-sievecache-design.md`.
@@ -90,7 +90,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// Const-eval: `sizeof(Entry<K, V>) <= S::SIZE`.
     const _SIZE_OK: () = assert!(
         std::mem::size_of::<Entry<K, V>>() <= S::SIZE,
-        "senba::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
+        "senba_cache::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
          Try a larger SlotSize (e.g. Slot64)."
     );
 
@@ -100,7 +100,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// (`tag & ID_MASK = id × S::SIZE`). This catches that at compile time.
     const _STORAGE_SIZE_OK: () = assert!(
         std::mem::size_of::<<S as SlotSize>::Storage<Entry<K, V>>>() == S::SIZE,
-        "senba::Cache: SlotStorage size differs from SlotSize::SIZE. \
+        "senba_cache::Cache: SlotStorage size differs from SlotSize::SIZE. \
          (likely caused by Entry alignment > 8 byte)"
     );
 
@@ -845,7 +845,7 @@ impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
 /// (see [`Cache::new`]); use [`Cache::with_shards`] to override.
 ///
 /// ```
-/// use senba::Cache;
+/// use senba_cache::Cache;
 ///
 /// // default Slot32: Entry<u64, String> (sizeof=32) fits exactly
 /// let mut c: Cache<u64, String> = Cache::new(8);
@@ -1313,6 +1313,10 @@ where
 // impl on the trait). All sibling variants (sieve_orig, sieve_v*, sieve_j*) follow
 // the same convention, so cross-variant bench / oracle drivers stay symmetric.
 // `Cache::remove` is available on the inherent impl above when needed directly.
+//
+// Gated behind the `experimental` feature because `CacheImpl` is research /
+// dev tooling — see `src/experimental/mod.rs` for the trait definition.
+#[cfg(feature = "experimental")]
 impl<K, V, S> crate::CacheImpl<K, V> for Cache<K, V, S>
 where
     K: Hash + Eq,

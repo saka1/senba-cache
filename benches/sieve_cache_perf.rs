@@ -1,4 +1,4 @@
-//! Performance regression bench for `senba::Cache` (the library-grade SIEVE
+//! Performance regression bench for `senba_cache::Cache` (the library-grade SIEVE
 //! in `src/sieve_cache.rs`). Quality-gate companion to `cargo test` /
 //! `cargo clippy`: run with criterion's `--save-baseline` / `--baseline` so
 //! any non-trivial edit to `sieve_cache.rs` (or the modules it depends on)
@@ -35,8 +35,8 @@
 //! investigate before merging.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use senba::workload::zipf::ZipfGen;
-use senba::{Cache, Slot32, Slot64};
+use senba_cache::workload::zipf::ZipfGen;
+use senba_cache::{Cache, Slot32, Slot64};
 use std::hint::black_box;
 use std::time::Duration;
 

@@ -193,6 +193,7 @@ fn remove_insert_churn() {
 
 /// Cross-checks insert/get behavior against sieve_orig (oracle) with a single shard.
 #[test]
+#[cfg(feature = "experimental")]
 fn matches_sieve_orig_externally_1shard() {
     use crate::sieve_orig::SieveCache as Orig;
     let cap = 64usize;
@@ -214,6 +215,7 @@ fn matches_sieve_orig_externally_1shard() {
 
 /// All three brackets (Slot16/32/64) must match sieve_orig semantics for Entry<u64,u64>.
 #[test]
+#[cfg(feature = "experimental")]
 fn matches_sieve_orig_per_slot() {
     use crate::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
@@ -238,6 +240,7 @@ fn matches_sieve_orig_per_slot() {
 
 /// Cross-checks remove behavior against sieve_orig with interleaved operations.
 #[test]
+#[cfg(feature = "experimental")]
 fn remove_during_churn_oracle_match() {
     use crate::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
@@ -269,6 +272,7 @@ fn remove_during_churn_oracle_match() {
 /// from the scalar path. Both must still agree with `sieve_orig` on every key,
 /// covering misses (no key in tags) and hits (key present at small `tail`).
 #[test]
+#[cfg(feature = "experimental")]
 fn find_avx2_low_fill_matches_oracle() {
     use crate::sieve_orig::SieveCache as Orig;
     // capacity 64 → order_cap = round_up(128, 16) = 128. With only a handful of
@@ -614,6 +618,7 @@ fn retain_restores_i8() {
 /// semantics) to a sequence of `remove` calls on the same victims, so future
 /// eviction order matches the oracle.
 #[test]
+#[cfg(feature = "experimental")]
 fn retain_matches_remove_loop_for_eviction_order() {
     use crate::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
