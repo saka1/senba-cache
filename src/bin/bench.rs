@@ -235,7 +235,7 @@ fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench --source <zipf|file|twitter|twitter-string> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
+                    "usage: bench --source <zipf|file|twitter|twitter-string|libcachesim-csv> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
                 );
                 std::process::exit(0);
             }
@@ -302,6 +302,19 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .as_ref()
                 .expect("--path required for --source twitter");
             let it = file::twitter_csv_from_path(p).expect("open trace");
+            match args.len {
+                Some(n) => it.take(n).collect(),
+                None => it.collect(),
+            }
+        }
+        // libCacheSim 同梱 CSV: `# time, object, size, next_access_vtime` 形式。
+        // object 列が数値 u64 なので String hash を経由せず直接食う。
+        "libcachesim-csv" => {
+            let p = args
+                .path
+                .as_ref()
+                .expect("--path required for --source libcachesim-csv");
+            let it = file::libcachesim_csv_from_path(p).expect("open trace");
             match args.len {
                 Some(n) => it.take(n).collect(),
                 None => it.collect(),
@@ -427,6 +440,16 @@ fn main() {
                 "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap),
                 "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap),
                 "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
+                // senba::Cache<u64, u64> (Slot32 default). per-shard <= 64 制約のため
+                // cap が大きいときは SHARDS を増やす必要がある (cap=30000 → n512 等)。
+                "senba_n16" => drive::<Senba<u64, u64, senba::Slot32, 16>>(&trace, cap),
+                "senba_n32" => drive::<Senba<u64, u64, senba::Slot32, 32>>(&trace, cap),
+                "senba_n64" => drive::<Senba<u64, u64, senba::Slot32, 64>>(&trace, cap),
+                "senba_n128" => drive::<Senba<u64, u64, senba::Slot32, 128>>(&trace, cap),
+                "senba_n256" => drive::<Senba<u64, u64, senba::Slot32, 256>>(&trace, cap),
+                "senba_n512" => drive::<Senba<u64, u64, senba::Slot32, 512>>(&trace, cap),
+                "senba_n1024" => drive::<Senba<u64, u64, senba::Slot32, 1024>>(&trace, cap),
+                "senba_n2048" => drive::<Senba<u64, u64, senba::Slot32, 2048>>(&trace, cap),
                 // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
                 "mini_moka" => drive::<MiniMoka>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。

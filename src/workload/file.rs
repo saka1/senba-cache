@@ -55,6 +55,41 @@ pub fn twitter_csv_from_path(
     }))
 }
 
+/// libCacheSim 同梱 CSV (`# time, object, size, next_access_vtime` 形式) から
+/// object id を `Iterator<Item = u64>` で返す。
+///
+/// 想定: `external/NSDI24-SIEVE/libCacheSim/data/twitter_cluster52.csv` 等。
+/// 各行は `0, 13053225291711363978, 737, 13` のように `, ` 区切り。
+///
+/// `twitter_csv_from_path` (OSDI'20 Yang 形式) との差:
+/// - col 1 が **数値** object id なので String hash を経由せず u64 で直接読む
+///   → libCacheSim 側 (cachesim) のキー扱いと対称になる
+/// - 先頭の `# ...` コメント行を skip する
+/// - `, ` の空白に対応するため `trim()` してからパースする
+pub fn libcachesim_csv_from_path(
+    path: impl AsRef<Path>,
+) -> io::Result<impl Iterator<Item = Key>> {
+    let file = File::open(path)?;
+    Ok(BufReader::new(file)
+        .lines()
+        .filter_map(|line| {
+            let line = line.expect("io error reading trace line");
+            if line.starts_with('#') {
+                return None;
+            }
+            let key_str = line
+                .split(',')
+                .nth(1)
+                .expect("malformed libCacheSim CSV row: no object column");
+            Some(
+                key_str
+                    .trim()
+                    .parse::<Key>()
+                    .expect("libCacheSim CSV object column is not a u64"),
+            )
+        }))
+}
+
 /// Twitter cache trace の CSV から **生 String キー**を `Iterator<Item = String>` で返す。
 ///
 /// `twitter_csv_from_path` の pre-hash 版に対する peer。`senba::Cache<K, V>` のように
