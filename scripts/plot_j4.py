@@ -4,7 +4,7 @@ Sources:
 - profiles/j4_capsweep_2026-05-05.csv     — cap sweep (N=8, varying cap)
 - profiles/j4_shardsweep_2026-05-05.csv   — SHARDS sweep (cap=1024, varying N)
 
-Run via: `uv run python scripts/plot_j4.py`
+Run via: `uv run --project scripts python scripts/plot_j4.py`
 Outputs PNGs to docs/figures/.
 """
 

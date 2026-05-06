@@ -3,7 +3,7 @@
 Source: profiles/j7_twitter_full_2026-05-05.csv (cluster × cap × per_shard × trial).
 Mirrors plot_j5_twitter.py to keep figure conventions identical.
 
-Run via: `uv run python scripts/plot_j7_twitter.py`
+Run via: `uv run --project scripts python scripts/plot_j7_twitter.py`
 """
 
 from pathlib import Path

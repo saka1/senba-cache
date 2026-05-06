@@ -3,7 +3,7 @@
 Source: profiles/senba_twitter_string_<date>.csv (cluster × cap × variant × trial).
 Clusters: cluster006, cluster016, cluster018, cluster019, cluster034.
 
-Run: `uv run python scripts/plot_senba_twitter_string.py`
+Run: `uv run --project scripts python scripts/plot_senba_twitter_string.py`
 """
 
 import sys

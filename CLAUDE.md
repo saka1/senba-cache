@@ -59,6 +59,19 @@ freely); `sieve_cache_perf.rs` is the stable contract for the library
 `Cache` and should only be edited deliberately, with the understanding that
 edits invalidate prior saved baselines.
 
+## Plot / analysis scripts (Python)
+
+Auxiliary plotting and analysis scripts live in `scripts/` as a **separate
+uv project** (`scripts/pyproject.toml`, `scripts/uv.lock`,
+`scripts/.python-version`). Run from anywhere in the repo with:
+
+```bash
+uv run --project scripts python scripts/<name>.py
+```
+
+Scripts resolve data paths via `Path(__file__).resolve().parent.parent`,
+so the current working directory does not matter.
+
 ## Conventions
 
 - Write all source code (identifiers, comments, doc comments) in **English**. Reports and other documentation do not need to be in English.

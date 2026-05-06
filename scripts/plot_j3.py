@@ -1,6 +1,6 @@
 """Visualize sieve_j3 bench results from docs/reports/2026-05-04-sieve-j3-bench.md.
 
-Run via: `uv run python scripts/plot_j3.py`
+Run via: `uv run --project scripts python scripts/plot_j3.py`
 Outputs PNGs to docs/figures/.
 """
 

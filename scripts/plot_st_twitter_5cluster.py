@@ -3,7 +3,7 @@
 Source: profiles/st_twitter_5cluster_2026-05-06.csv (cluster × cap × variant × trial).
 Clusters: cluster006, cluster016, cluster018, cluster019, cluster034.
 
-Run: `uv run python scripts/plot_st_twitter_5cluster.py`
+Run: `uv run --project scripts python scripts/plot_st_twitter_5cluster.py`
 """
 
 from pathlib import Path

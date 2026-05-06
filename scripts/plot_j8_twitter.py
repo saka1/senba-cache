@@ -6,7 +6,7 @@ Mirrors plot_j7_twitter.py to keep figure conventions identical.
 j8 has MAX_PER_SHARD=64, so per_shard ∈ {16, 32, 64} (vs j7's {32, 64, 128, 256}).
 Champion = per_shard=32 (matches the j7 chart's choice for direct visual comparison).
 
-Run via: `uv run python scripts/plot_j8_twitter.py`
+Run via: `uv run --project scripts python scripts/plot_j8_twitter.py`
 """
 
 from pathlib import Path

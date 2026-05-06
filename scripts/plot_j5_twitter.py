@@ -2,7 +2,7 @@
 
 Source: profiles/j5_twitter_pareto_<date>.csv (cluster × cap × per_shard × trial).
 
-Run via: `uv run python scripts/plot_j5_twitter.py`
+Run via: `uv run --project scripts python scripts/plot_j5_twitter.py`
 Outputs PNGs to docs/figures/.
 """
 

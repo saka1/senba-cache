@@ -3,7 +3,7 @@
 Source: profiles/minimoka_twitter_2026-05-06.csv (cluster × cap × variant × trial).
 Variants in this CSV: orig, j8_n{32,128,512,2048} (= per_shard=32 champion), mini_moka.
 
-Run via: `uv run python scripts/plot_minimoka_twitter.py`
+Run via: `uv run --project scripts python scripts/plot_minimoka_twitter.py`
 """
 
 from pathlib import Path
