@@ -28,6 +28,37 @@ cargo clippy --all-targets   # zero warnings (must include tests — CI runs --a
 cargo test                   # all tests pass
 ```
 
+### Performance regression check (`benches/sieve_cache_perf.rs`)
+
+Whenever a change touches `src/sieve_cache.rs` or the modules it depends on
+(`hash`, `workload`, …) in ways that could plausibly affect performance —
+hot-path edits, layout changes, dispatch changes, new branches in `find` /
+`insert` / `evict_one_returning_id`, etc. — run the perf-gate bench with
+criterion's baseline mechanism:
+
+```bash
+# before your change (or on the parent commit)
+cargo bench --bench sieve_cache_perf -- --save-baseline before
+# after your change
+cargo bench --bench sieve_cache_perf -- --baseline before
+```
+
+The bench has three scenarios (insert_u64 / mixed_u64 / insert_string) and
+finishes in ~10s. Criterion prints `Performance has regressed.` /
+`... has improved.` per scenario; treat **>5% regression on any scenario**
+as a signal to investigate before commit. Wall-clock noise on a quiet
+machine is typically ±2–3%, so 5% is a deliberate margin.
+
+Skipping the perf-gate is fine for pure documentation / test-only / clippy
+fixes — anything that demonstrably cannot affect the compiled `Cache` hot
+path. When in doubt, run it; it's cheap.
+
+This bench is **separate from `benches/micro.rs`** by design. `micro.rs` is
+the experimental playground (variants come and go, scenarios get rewritten
+freely); `sieve_cache_perf.rs` is the stable contract for the library
+`Cache` and should only be edited deliberately, with the understanding that
+edits invalidate prior saved baselines.
+
 ## Conventions
 
 - Write all source code (identifiers, comments, doc comments) in **English**. Reports and other documentation do not need to be in English.
