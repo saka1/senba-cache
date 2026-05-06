@@ -224,18 +224,18 @@ where
         LIVE | spread
     }
 
-    fn find(&self, key: &K, needle: u16, has_avx2: bool) -> Option<usize> {
+    fn find(&self, key: &K, needle: u16, has_avx2_bmi1: bool) -> Option<usize> {
         #[cfg(target_arch = "x86_64")]
         {
-            if has_avx2 {
-                // SAFETY: `has_avx2` was set from `is_x86_feature_detected!("avx2")` at
+            if has_avx2_bmi1 {
+                // SAFETY: `has_avx2_bmi1` was set from `is_x86_feature_detected!("avx2")` at
                 // Cache construction (see `Cache::new`), which also implies BMI1 on every
                 // CPU that ships AVX2. The detection result is valid for the process
                 // lifetime, so caching it is sound.
                 return unsafe { self.find_avx2(key, needle) };
             }
         }
-        let _ = has_avx2; // avoid unused-arg warning on non-x86_64
+        let _ = has_avx2_bmi1; // avoid unused-arg warning on non-x86_64
         self.find_scalar(key, needle)
     }
 
@@ -261,7 +261,7 @@ where
     ///
     /// The host CPU must support both AVX2 and BMI1 (BMI1 is implied by AVX2 on every
     /// x86_64 part shipped to date). The caller is responsible for the runtime feature
-    /// check; `Inner::find` performs it via the cached `has_avx2` flag set in
+    /// check; `Inner::find` performs it via the cached `has_avx2_bmi1` flag set in
     /// `Cache::new`.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
@@ -318,14 +318,14 @@ where
         None
     }
 
-    fn contains(&self, key: &K, hash: u64, has_avx2: bool) -> bool {
-        self.find(key, Self::needle_from_hash(hash), has_avx2)
+    fn contains(&self, key: &K, hash: u64, has_avx2_bmi1: bool) -> bool {
+        self.find(key, Self::needle_from_hash(hash), has_avx2_bmi1)
             .is_some()
     }
 
-    fn get(&mut self, key: &K, hash: u64, has_avx2: bool) -> Option<&V> {
+    fn get(&mut self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<&V> {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2)?;
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
         // SAFETY: pos was confirmed live by find.
@@ -333,9 +333,9 @@ where
         Some(&e.value)
     }
 
-    fn insert(&mut self, key: K, value: V, hash: u64, has_avx2: bool) -> Option<(K, V)> {
+    fn insert(&mut self, key: K, value: V, hash: u64, has_avx2_bmi1: bool) -> Option<(K, V)> {
         let needle = Self::needle_from_hash(hash);
-        if let Some(pos) = self.find(&key, needle, has_avx2) {
+        if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
             let id = Self::id_of(self.tags[pos]);
             // SAFETY: find confirmed the tag is live.
             let e = unsafe { &mut *self.entry_ptr_mut(id) };
@@ -456,9 +456,9 @@ where
     /// **swap-to-fill-gap**: after removing `removed_id`, swaps it with `self.len - 1`
     /// (the maximum live id) to restore I8 (live ids = `0..len`). This keeps the
     /// free-list-free structure intact so the warm-up branch works correctly on next insert.
-    fn remove(&mut self, key: &K, hash: u64, has_avx2: bool) -> Option<V> {
+    fn remove(&mut self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<V> {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2)?;
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
         let removed_id = Self::id_of(self.tags[pos]);
 
         // (1) Read Entry out of entries[removed_id], mark its tag EMPTY.
@@ -534,10 +534,11 @@ pub const DEFAULT_SHARDS: usize = 8;
 pub struct Cache<K, V, S: SlotSize = Slot32, const SHARDS: usize = DEFAULT_SHARDS> {
     shards: [Inner<K, V, S>; SHARDS],
     hasher: Xxh3Build,
-    /// AVX2 (and BMI1, implied) availability, resolved once in `new` so the SIMD
-    /// dispatch in `Inner::find` is a single boolean load instead of a re-entry
-    /// into `is_x86_feature_detected!` on every cache op.
-    has_avx2: bool,
+    /// AVX2 + BMI1 availability, resolved once in `new` so the SIMD dispatch in
+    /// `Inner::find` is a single boolean load instead of a re-entry into
+    /// `is_x86_feature_detected!` on every cache op. BMI1 is implied by AVX2 on
+    /// every x86_64 CPU shipped to date, so detecting AVX2 suffices.
+    has_avx2_bmi1: bool,
 }
 
 impl<K, V, S, const SHARDS: usize> Cache<K, V, S, SHARDS>
@@ -561,7 +562,7 @@ where
             let cap_i = base + if i < extra { 1 } else { 0 };
             Inner::new(cap_i)
         });
-        let has_avx2 = {
+        let has_avx2_bmi1 = {
             #[cfg(target_arch = "x86_64")]
             {
                 std::is_x86_feature_detected!("avx2")
@@ -574,7 +575,7 @@ where
         Self {
             shards,
             hasher: Xxh3Build,
-            has_avx2,
+            has_avx2_bmi1,
         }
     }
 
@@ -592,25 +593,25 @@ where
 
     pub fn contains_key(&self, key: &K) -> bool {
         let h = self.hasher.hash_one(key);
-        self.shards[Self::shard_of_hash(h)].contains(key, h, self.has_avx2)
+        self.shards[Self::shard_of_hash(h)].contains(key, h, self.has_avx2_bmi1)
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let h = self.hasher.hash_one(key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].get(key, h, self.has_avx2)
+        self.shards[i].get(key, h, self.has_avx2_bmi1)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let h = self.hasher.hash_one(&key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].insert(key, value, h, self.has_avx2)
+        self.shards[i].insert(key, value, h, self.has_avx2_bmi1)
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let h = self.hasher.hash_one(key);
         let i = Self::shard_of_hash(h);
-        self.shards[i].remove(key, h, self.has_avx2)
+        self.shards[i].remove(key, h, self.has_avx2_bmi1)
     }
 
     #[inline]
