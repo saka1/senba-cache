@@ -10,7 +10,7 @@
 //! - **Small scenario set**, so the whole run fits in ~10s.
 //! - **Fixed seeds and trace lengths**, so two runs on the same machine are
 //!   directly comparable via `--save-baseline` / `--baseline`.
-//! - **Public API only** (`Cache<K, V, S, SHARDS>`). No probing into `Inner`,
+//! - **Public API only** (`Cache<K, V, S>`). No probing into `Inner`,
 //!   no module-private tricks. If a refactor breaks the public path, this
 //!   bench notices.
 //! - **Three code paths covered**:
@@ -77,7 +77,7 @@ fn bench_insert_u64(c: &mut Criterion) {
     g.throughput(Throughput::Elements(trace.len() as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {
         b.iter_batched(
-            || Cache::<u64, u64, Slot32, 8>::new(CAP_U64),
+            || Cache::<u64, u64, Slot32>::with_shards(CAP_U64, 8),
             |mut c| {
                 for &k in trace {
                     c.insert(black_box(k), k);
@@ -99,7 +99,7 @@ fn bench_mixed_u64(c: &mut Criterion) {
     g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {
         b.iter_batched(
             || {
-                let mut c = Cache::<u64, u64, Slot32, 8>::new(CAP_U64);
+                let mut c = Cache::<u64, u64, Slot32>::with_shards(CAP_U64, 8);
                 // Warm-up so get() has a realistic hit ratio for Zipf 1.0.
                 for &k in trace.iter().take(CAP_U64 * 2) {
                     c.insert(k, k);
@@ -135,7 +135,7 @@ fn bench_insert_string(c: &mut Criterion) {
     g.throughput(Throughput::Elements(trace.len() as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP_STR), &trace, |b, trace| {
         b.iter_batched(
-            || Cache::<String, String, Slot64, 8>::new(CAP_STR),
+            || Cache::<String, String, Slot64>::with_shards(CAP_STR, 8),
             |mut c| {
                 for (k, v) in trace {
                     c.insert(black_box(k.clone()), v.clone());

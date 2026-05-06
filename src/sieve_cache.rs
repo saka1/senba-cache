@@ -3,7 +3,9 @@
 //!
 //! Design details: `docs/reports/2026-05-06-senba-sievecache-design.md`.
 //!
-//! - Public type: [`Cache`]`<K, V, S = Slot32, const SHARDS = 8>`
+//! - Public type: [`Cache`]`<K, V, S = Slot32>`. Shard count is chosen automatically
+//!   from `capacity` (smallest power of two with `per_shard <= MAX_PER_SHARD`).
+//!   Use [`Cache::with_shards`] to override explicitly.
 //! - [`SlotSize`] is a sealed trait; impls are [`Slot16`] / [`Slot32`] (default) / [`Slot64`]
 //! - The entries arena uses a **fixed stride of `S::SIZE`** (= automatic padding).
 //!   `sizeof(Entry<K, V>) <= S::SIZE` is enforced by const-eval with a friendly error message.
@@ -517,9 +519,9 @@ impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
 
 // ---------------- Public type Cache ----------------
 
-pub const DEFAULT_SHARDS: usize = 8;
-
 /// Publishable SIEVE cache. The entry stride is specified at the type level via `SlotSize`.
+/// The number of shards is chosen at construction time from `capacity`
+/// (see [`Cache::new`]); use [`Cache::with_shards`] to override.
 ///
 /// ```
 /// use senba::Cache;
@@ -531,8 +533,10 @@ pub const DEFAULT_SHARDS: usize = 8;
 /// assert_eq!(c.remove(&1), Some("hello".to_string()));
 /// assert_eq!(c.get(&1), None);
 /// ```
-pub struct Cache<K, V, S: SlotSize = Slot32, const SHARDS: usize = DEFAULT_SHARDS> {
-    shards: [Inner<K, V, S>; SHARDS],
+pub struct Cache<K, V, S: SlotSize = Slot32> {
+    shards: Box<[Inner<K, V, S>]>,
+    /// `shards.len() - 1`. Cached so `shard_of_hash` is a single AND.
+    shard_mask: usize,
     hasher: Xxh3Build,
     /// AVX2 + BMI1 availability, resolved once in `new` so the SIMD dispatch in
     /// `Inner::find` is a single boolean load instead of a re-entry into
@@ -541,27 +545,45 @@ pub struct Cache<K, V, S: SlotSize = Slot32, const SHARDS: usize = DEFAULT_SHARD
     has_avx2_bmi1: bool,
 }
 
-impl<K, V, S, const SHARDS: usize> Cache<K, V, S, SHARDS>
+impl<K, V, S> Cache<K, V, S>
 where
     K: Hash + Eq,
     S: SlotSize,
 {
+    /// Creates a cache with `capacity` total entries. The shard count is the
+    /// smallest power of two `N` such that `ceil(capacity / N) <= MAX_PER_SHARD`,
+    /// i.e. `N = next_pow2(ceil(capacity / MAX_PER_SHARD))` (clamped to ≥ 1).
+    /// The 6-bit per-shard id field then accommodates every entry without
+    /// further tuning.
     pub fn new(capacity: usize) -> Self {
-        assert!(SHARDS > 0, "SHARDS must be > 0");
+        assert!(capacity > 0, "capacity must be > 0");
+        let n_min = capacity.div_ceil(MAX_PER_SHARD).max(1);
+        let shards = n_min.next_power_of_two();
+        Self::with_shards(capacity, shards)
+    }
+
+    /// Creates a cache with an explicit shard count. `shards` must be a power
+    /// of two, `>= 1`, and small enough that `ceil(capacity / shards) <= MAX_PER_SHARD`
+    /// holds. Mainly useful for benchmarking / oracle comparison; prefer
+    /// [`Cache::new`] in production code.
+    pub fn with_shards(capacity: usize, shards: usize) -> Self {
+        assert!(shards > 0, "shards must be > 0");
         assert!(
-            SHARDS.is_power_of_two(),
-            "SHARDS ({SHARDS}) must be a power of two so shard select can be a bit mask"
+            shards.is_power_of_two(),
+            "shards ({shards}) must be a power of two so shard select can be a bit mask"
         );
         assert!(
-            capacity >= SHARDS,
-            "capacity ({capacity}) must be >= SHARDS ({SHARDS}) so each shard has cap >= 1"
+            capacity >= shards,
+            "capacity ({capacity}) must be >= shards ({shards}) so each shard has cap >= 1"
         );
-        let base = capacity / SHARDS;
-        let extra = capacity % SHARDS;
-        let shards: [Inner<K, V, S>; SHARDS] = std::array::from_fn(|i| {
-            let cap_i = base + if i < extra { 1 } else { 0 };
-            Inner::new(cap_i)
-        });
+        let base = capacity / shards;
+        let extra = capacity % shards;
+        let inners: Vec<Inner<K, V, S>> = (0..shards)
+            .map(|i| {
+                let cap_i = base + if i < extra { 1 } else { 0 };
+                Inner::new(cap_i)
+            })
+            .collect();
         let has_avx2_bmi1 = {
             #[cfg(target_arch = "x86_64")]
             {
@@ -573,7 +595,8 @@ where
             }
         };
         Self {
-            shards,
+            shards: inners.into_boxed_slice(),
+            shard_mask: shards - 1,
             hasher: Xxh3Build,
             has_avx2_bmi1,
         }
@@ -591,32 +614,37 @@ where
         self.shards.iter().all(|s| s.len == 0)
     }
 
+    /// Number of shards in this cache (always a power of two).
+    pub fn shards(&self) -> usize {
+        self.shard_mask + 1
+    }
+
     pub fn contains_key(&self, key: &K) -> bool {
         let h = self.hasher.hash_one(key);
-        self.shards[Self::shard_of_hash(h)].contains(key, h, self.has_avx2_bmi1)
+        self.shards[self.shard_of_hash(h)].contains(key, h, self.has_avx2_bmi1)
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let h = self.hasher.hash_one(key);
-        let i = Self::shard_of_hash(h);
+        let i = self.shard_of_hash(h);
         self.shards[i].get(key, h, self.has_avx2_bmi1)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let h = self.hasher.hash_one(&key);
-        let i = Self::shard_of_hash(h);
+        let i = self.shard_of_hash(h);
         self.shards[i].insert(key, value, h, self.has_avx2_bmi1)
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let h = self.hasher.hash_one(key);
-        let i = Self::shard_of_hash(h);
+        let i = self.shard_of_hash(h);
         self.shards[i].remove(key, h, self.has_avx2_bmi1)
     }
 
     #[inline]
-    fn shard_of_hash(hash: u64) -> usize {
-        (hash as usize) & (SHARDS - 1)
+    fn shard_of_hash(&self, hash: u64) -> usize {
+        (hash as usize) & self.shard_mask
     }
 }
 
@@ -624,7 +652,7 @@ where
 // impl on the trait). All sibling variants (sieve_orig, sieve_v*, sieve_j*) follow
 // the same convention, so cross-variant bench / oracle drivers stay symmetric.
 // `Cache::remove` is available on the inherent impl above when needed directly.
-impl<K, V, S, const SHARDS: usize> crate::CacheImpl<K, V> for Cache<K, V, S, SHARDS>
+impl<K, V, S> crate::CacheImpl<K, V> for Cache<K, V, S>
 where
     K: Hash + Eq,
     S: SlotSize,
@@ -655,7 +683,12 @@ where
 mod tests {
     use super::*;
 
-    const TEST_SHARDS: usize = DEFAULT_SHARDS;
+    /// Reference value used by tests that historically assumed the 8-shard default.
+    /// The auto-shard policy in `Cache::new` may pick a different count (it depends
+    /// on `capacity`), but every length / capacity assertion below treats this as
+    /// "the multiplier we used to size the test cache" rather than as the actual
+    /// shard count of the cache under test.
+    const TEST_SHARDS: usize = 8;
 
     // sizeof(Entry<u64, u64>) = 16 → fits Slot16 / Slot32 / Slot64.
     // sizeof(Entry<i32, i32>) = 8  → fits all three (with slack).
@@ -703,7 +736,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_when_full_and_unvisited() {
-        let mut cache: Cache<u64, u64, Slot32, 1> = Cache::new(2);
+        let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
         cache.insert(1, 10);
         cache.insert(2, 20);
         let evicted = cache.insert(3, 30);
@@ -716,7 +749,7 @@ mod tests {
 
     #[test]
     fn visited_entry_survives_first_pass() {
-        let mut cache: Cache<u64, u64, Slot32, 1> = Cache::new(2);
+        let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
         cache.insert(1, 10);
         cache.insert(2, 20);
         cache.get(&1);
@@ -726,7 +759,7 @@ mod tests {
 
     #[test]
     fn all_visited_clears_bits_then_evicts() {
-        let mut cache: Cache<u64, u64, Slot32, 1> = Cache::new(2);
+        let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
         cache.insert(1, 10);
         cache.insert(2, 20);
         cache.get(&1);
@@ -884,7 +917,7 @@ mod tests {
     /// the warm-up branch (`entry_id = self.len`) works correctly on the next insert.
     #[test]
     fn remove_then_insert_reuses_id() {
-        let mut c: Cache<u64, u64, Slot32, 1> = Cache::new(4);
+        let mut c: Cache<u64, u64, Slot32> = Cache::with_shards(4, 1);
         c.insert(1, 100);
         c.insert(2, 200);
         c.insert(3, 300);
@@ -910,7 +943,7 @@ mod tests {
     /// Removing the entry with the maximum id (no swap needed).
     #[test]
     fn remove_max_id_no_swap() {
-        let mut c: Cache<u64, u64, Slot32, 1> = Cache::new(4);
+        let mut c: Cache<u64, u64, Slot32> = Cache::with_shards(4, 1);
         c.insert(1, 100);
         c.insert(2, 200);
         c.insert(3, 300);
@@ -952,7 +985,7 @@ mod tests {
         use crate::sieve_orig::SieveCache as Orig;
         let cap = 64usize;
         let mut a: Orig<u64, u64> = Orig::new(cap);
-        let mut b: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
+        let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
         for k in 0..10_000u64 {
             let key = (k.wrapping_mul(2654435761)) % 256;
             let _ = a.insert(key, key);
@@ -973,9 +1006,9 @@ mod tests {
         use crate::sieve_orig::SieveCache as Orig;
         let cap = 32usize;
         let mut oracle: Orig<u64, u64> = Orig::new(cap);
-        let mut s16: Cache<u64, u64, Slot16, 1> = Cache::new(cap);
-        let mut s32: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
-        let mut s64: Cache<u64, u64, Slot64, 1> = Cache::new(cap);
+        let mut s16: Cache<u64, u64, Slot16> = Cache::with_shards(cap, 1);
+        let mut s32: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
+        let mut s64: Cache<u64, u64, Slot64> = Cache::with_shards(cap, 1);
         for k in 0..5_000u64 {
             let key = (k.wrapping_mul(2654435761)) % 128;
             oracle.insert(key, key);
@@ -997,7 +1030,7 @@ mod tests {
         use crate::sieve_orig::SieveCache as Orig;
         let cap = 32usize;
         let mut a: Orig<u64, u64> = Orig::new(cap);
-        let mut b: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
+        let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
         for k in 0..3_000u64 {
             let key = (k.wrapping_mul(2654435761)) % 128;
             a.insert(key, key);
@@ -1021,13 +1054,44 @@ mod tests {
     #[test]
     #[should_panic]
     fn capacity_below_shards_panics() {
-        let _: Cache<u64, u64> = Cache::new(TEST_SHARDS - 1);
+        // Auto-`new` would happily build a 1-shard cache here, so only the
+        // explicit `with_shards` path enforces this invariant now.
+        let _: Cache<u64, u64> = Cache::with_shards(TEST_SHARDS - 1, TEST_SHARDS);
+    }
+
+    #[test]
+    #[should_panic]
+    fn zero_capacity_panics() {
+        let _: Cache<u64, u64> = Cache::new(0);
+    }
+
+    /// `Cache::new` must pick a shard count consistent with `MAX_PER_SHARD = 64`.
+    #[test]
+    fn auto_shards_match_capacity_brackets() {
+        let cases: &[(usize, usize)] = &[
+            (1, 1),
+            (64, 1),
+            (65, 2),
+            (128, 2),
+            (129, 4),
+            (512, 8),
+            (513, 16),
+        ];
+        for &(cap, expected_shards) in cases {
+            let c: Cache<u64, u64> = Cache::new(cap);
+            assert_eq!(
+                c.shards(),
+                expected_shards,
+                "auto-shards mismatch at capacity={cap}"
+            );
+            assert_eq!(c.capacity(), cap);
+        }
     }
 
     #[test]
     #[should_panic]
     fn per_shard_above_max_panics() {
-        let _: Cache<u64, u64, Slot32, 1> = Cache::new(65);
+        let _: Cache<u64, u64, Slot32> = Cache::with_shards(65, 1);
     }
 
     /// Regression test for the `find_avx2` `limit = round_up(tail, LANE)` change.
@@ -1042,7 +1106,7 @@ mod tests {
         // bound differs sharply from the old `tags.len()` bound.
         let cap = 64usize;
         let mut a: Orig<u64, u64> = Orig::new(cap);
-        let mut b: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
+        let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
         // Keep fill ratio well below capacity throughout so `tail` stays small.
         for k in 0..8u64 {
             a.insert(k, k * 7);

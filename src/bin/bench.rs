@@ -174,6 +174,56 @@ fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
     }
 }
 
+/// senba::Cache 専用 driver。`with_shards` を呼ぶために CacheImpl 経由ではなく
+/// 具体型を直接構築する。`drive` と同じ計測ロジック。
+fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> Stats {
+    let mut c = Senba::<u64, u64, S>::with_shards(cap, shards);
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    let mut evictions = 0u64;
+    let t0 = Instant::now();
+    for &k in trace {
+        if c.get(&k).is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+            if c.insert(k, k).is_some() {
+                evictions += 1;
+            }
+        }
+    }
+    Stats {
+        elapsed_ns: t0.elapsed().as_nanos(),
+        hits,
+        misses,
+        evictions,
+    }
+}
+
+fn drive_senba_str<S: senba::SlotSize>(trace: &[String], cap: usize, shards: usize) -> Stats {
+    let mut c = Senba::<String, u64, S>::with_shards(cap, shards);
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    let mut evictions = 0u64;
+    let t0 = Instant::now();
+    for (i, k) in trace.iter().enumerate() {
+        if c.get(k).is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+            if c.insert(k.clone(), i as u64).is_some() {
+                evictions += 1;
+            }
+        }
+    }
+    Stats {
+        elapsed_ns: t0.elapsed().as_nanos(),
+        hits,
+        misses,
+        evictions,
+    }
+}
+
 /// String キー版 driver。Twitter trace の生 anonymized_key を `Cache<String, u64>` 系に
 /// 流す。value は `u64` 固定 (= ヒット行を index にした値) で、insert 時に `key.clone()` する。
 fn drive_str<C: CacheImpl<String, u64>>(trace: &[String], cap: usize) -> Stats {
@@ -344,14 +394,14 @@ fn run_string_keys(args: &Args) {
             let s = match v.as_str() {
                 "orig" => drive_str::<Orig<String, u64>>(&trace, cap),
                 "senba" => drive_str::<Senba<String, u64>>(&trace, cap),
-                "senba_n16" => drive_str::<Senba<String, u64, senba::Slot32, 16>>(&trace, cap),
-                "senba_n32" => drive_str::<Senba<String, u64, senba::Slot32, 32>>(&trace, cap),
-                "senba_n64" => drive_str::<Senba<String, u64, senba::Slot32, 64>>(&trace, cap),
-                "senba_n128" => drive_str::<Senba<String, u64, senba::Slot32, 128>>(&trace, cap),
-                "senba_n256" => drive_str::<Senba<String, u64, senba::Slot32, 256>>(&trace, cap),
-                "senba_n512" => drive_str::<Senba<String, u64, senba::Slot32, 512>>(&trace, cap),
-                "senba_n1024" => drive_str::<Senba<String, u64, senba::Slot32, 1024>>(&trace, cap),
-                "senba_n2048" => drive_str::<Senba<String, u64, senba::Slot32, 2048>>(&trace, cap),
+                "senba_n16" => drive_senba_str::<senba::Slot32>(&trace, cap, 16),
+                "senba_n32" => drive_senba_str::<senba::Slot32>(&trace, cap, 32),
+                "senba_n64" => drive_senba_str::<senba::Slot32>(&trace, cap, 64),
+                "senba_n128" => drive_senba_str::<senba::Slot32>(&trace, cap, 128),
+                "senba_n256" => drive_senba_str::<senba::Slot32>(&trace, cap, 256),
+                "senba_n512" => drive_senba_str::<senba::Slot32>(&trace, cap, 512),
+                "senba_n1024" => drive_senba_str::<senba::Slot32>(&trace, cap, 1024),
+                "senba_n2048" => drive_senba_str::<senba::Slot32>(&trace, cap, 2048),
                 other => panic!("unknown variant for twitter-string: {other}"),
             };
             println!(
@@ -449,14 +499,14 @@ fn main() {
                 "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
                 // senba::Cache<u64, u64> (Slot32 default). per-shard <= 64 制約のため
                 // cap が大きいときは SHARDS を増やす必要がある (cap=30000 → n512 等)。
-                "senba_n16" => drive::<Senba<u64, u64, senba::Slot32, 16>>(&trace, cap),
-                "senba_n32" => drive::<Senba<u64, u64, senba::Slot32, 32>>(&trace, cap),
-                "senba_n64" => drive::<Senba<u64, u64, senba::Slot32, 64>>(&trace, cap),
-                "senba_n128" => drive::<Senba<u64, u64, senba::Slot32, 128>>(&trace, cap),
-                "senba_n256" => drive::<Senba<u64, u64, senba::Slot32, 256>>(&trace, cap),
-                "senba_n512" => drive::<Senba<u64, u64, senba::Slot32, 512>>(&trace, cap),
-                "senba_n1024" => drive::<Senba<u64, u64, senba::Slot32, 1024>>(&trace, cap),
-                "senba_n2048" => drive::<Senba<u64, u64, senba::Slot32, 2048>>(&trace, cap),
+                "senba_n16" => drive_senba::<senba::Slot32>(&trace, cap, 16),
+                "senba_n32" => drive_senba::<senba::Slot32>(&trace, cap, 32),
+                "senba_n64" => drive_senba::<senba::Slot32>(&trace, cap, 64),
+                "senba_n128" => drive_senba::<senba::Slot32>(&trace, cap, 128),
+                "senba_n256" => drive_senba::<senba::Slot32>(&trace, cap, 256),
+                "senba_n512" => drive_senba::<senba::Slot32>(&trace, cap, 512),
+                "senba_n1024" => drive_senba::<senba::Slot32>(&trace, cap, 1024),
+                "senba_n2048" => drive_senba::<senba::Slot32>(&trace, cap, 2048),
                 // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
                 "mini_moka" => drive::<MiniMoka>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
