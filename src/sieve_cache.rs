@@ -31,6 +31,7 @@
 //! - I8: live ids = `0..len` (maintained during warm-up and restored after remove via swap-to-fill-gap)
 
 use crate::hash::Xxh3Build;
+use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash};
 use std::mem::{ManuallyDrop, MaybeUninit};
 
@@ -236,7 +237,11 @@ where
         LIVE | spread
     }
 
-    fn find(&self, key: &K, needle: u16, has_avx2_bmi1: bool) -> Option<usize> {
+    fn find<Q>(&self, key: &Q, needle: u16, has_avx2_bmi1: bool) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         #[cfg(target_arch = "x86_64")]
         {
             if has_avx2_bmi1 {
@@ -252,13 +257,17 @@ where
     }
 
     #[inline]
-    fn find_scalar(&self, key: &K, needle: u16) -> Option<usize> {
+    fn find_scalar<Q>(&self, key: &Q, needle: u16) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         for (i, &t) in self.tags[..self.len].iter().enumerate() {
             if (t & Self::SCAN_MASK) == needle {
                 let id = Self::id_of(t);
                 // SAFETY: a live tag implies entries[id] is initialized (I5/I6).
                 let e = unsafe { &*self.entry_ptr(id) };
-                if &e.key == key {
+                if e.key.borrow() == key {
                     return Some(i);
                 }
             }
@@ -277,7 +286,11 @@ where
     /// `Cache::new`.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
-    unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
+    unsafe fn find_avx2<Q>(&self, key: &Q, needle: u16) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         // Re-anchor layout invariants at this use site (the c-hoist arithmetic below
         // assumes `sizeof(Storage<Entry>) == S::SIZE`, which `_STORAGE_SIZE_OK` enforces).
         let _: () = Self::_SIZE_OK;
@@ -317,7 +330,7 @@ where
                 // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
                 let entry_ptr = unsafe { entries_byte_ptr.add(id_bytes) as *const Entry<K, V> };
                 let e = unsafe { &*entry_ptr };
-                if &e.key == key {
+                if e.key.borrow() == key {
                     let lane = bit >> 1;
                     return Some(i + lane);
                 }
@@ -329,12 +342,20 @@ where
         None
     }
 
-    fn contains(&self, key: &K, hash: u64, has_avx2_bmi1: bool) -> bool {
+    fn contains<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         self.find(key, Self::needle_from_hash(hash), has_avx2_bmi1)
             .is_some()
     }
 
-    fn get(&mut self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<&V> {
+    fn get<Q>(&mut self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let needle = Self::needle_from_hash(hash);
         let pos = self.find(key, needle, has_avx2_bmi1)?;
         self.tags[pos] |= VISITED;
@@ -344,9 +365,28 @@ where
         Some(&e.value)
     }
 
+    fn get_mut<Q>(&mut self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let needle = Self::needle_from_hash(hash);
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        self.tags[pos] |= VISITED;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: pos was confirmed live by find; the &mut self borrow makes the
+        // returned &mut V the only outstanding borrow into entries[id].
+        let e = unsafe { &mut *self.entry_ptr_mut(id) };
+        Some(&mut e.value)
+    }
+
     /// Non-promoting lookup. Same as `get` but does not set the VISITED bit,
     /// so peeked entries do not survive an extra SIEVE sweep.
-    fn peek(&self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<&V> {
+    fn peek<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let needle = Self::needle_from_hash(hash);
         let pos = self.find(key, needle, has_avx2_bmi1)?;
         let id = Self::id_of(self.tags[pos]);
@@ -473,7 +513,11 @@ where
     /// `self.len - 1` (the maximum live id) to restore I8 (live ids = `0..len`).
     /// This keeps the free-list-free structure intact so the warm-up branch in
     /// `insert` (`entry_id = self.len`) works correctly on the next insertion.
-    fn remove(&mut self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<V> {
+    fn remove<Q>(&mut self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         let needle = Self::needle_from_hash(hash);
         let pos = self.find(key, needle, has_avx2_bmi1)?;
         let removed_id = Self::id_of(self.tags[pos]);
@@ -531,6 +575,24 @@ where
         }
 
         Some(entry.value)
+    }
+
+    /// Drops every live entry and resets the shard to empty. Tags in `tags[0..len]`
+    /// are zeroed back to EMPTY (the slack `tags[len..]` is already EMPTY under I4').
+    fn clear(&mut self) {
+        // Mirror Drop: I4' + I5 ⟹ no skip and no double-drop.
+        for i in 0..self.len {
+            let t = self.tags[i];
+            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
+            let id = Self::id_of(t);
+            // SAFETY: live ⟹ entries[id] initialized (I6).
+            unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
+        }
+        for t in &mut self.tags[..self.len] {
+            *t = EMPTY;
+        }
+        self.hand = 0;
+        self.len = 0;
     }
 }
 
@@ -650,15 +712,36 @@ where
         self.shard_mask + 1
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let h = self.hasher.hash_one(key);
         self.shards[self.shard_of_hash(h)].contains(key, h, self.has_avx2_bmi1)
     }
 
-    pub fn get(&mut self, key: &K) -> Option<&V> {
+    pub fn get<Q>(&mut self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let h = self.hasher.hash_one(key);
         let i = self.shard_of_hash(h);
         self.shards[i].get(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Returns a mutable reference to the value for `key`. Sets the SIEVE
+    /// VISITED bit on hit (same as `get`), so in-place updates count as
+    /// access for eviction purposes.
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let h = self.hasher.hash_one(key);
+        let i = self.shard_of_hash(h);
+        self.shards[i].get_mut(key, h, self.has_avx2_bmi1)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
@@ -667,7 +750,11 @@ where
         self.shards[i].insert(key, value, h, self.has_avx2_bmi1)
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let h = self.hasher.hash_one(key);
         let i = self.shard_of_hash(h);
         self.shards[i].remove(key, h, self.has_avx2_bmi1)
@@ -676,9 +763,22 @@ where
     /// Non-promoting lookup: returns a reference to the value without setting
     /// the SIEVE VISITED bit. Use this when you want to inspect an entry
     /// without affecting its eviction priority.
-    pub fn peek(&self, key: &K) -> Option<&V> {
+    pub fn peek<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let h = self.hasher.hash_one(key);
         self.shards[self.shard_of_hash(h)].peek(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Drops every entry, leaving the cache empty. Capacity, shard layout,
+    /// and the SIEVE hand are reset; subsequent inserts behave as if on a
+    /// freshly constructed cache.
+    pub fn clear(&mut self) {
+        for sh in self.shards.iter_mut() {
+            sh.clear();
+        }
     }
 
     /// Returns an iterator over `(&K, &V)` pairs across all shards.
