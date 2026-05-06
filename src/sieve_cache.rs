@@ -397,6 +397,51 @@ where
         Some(&e.value)
     }
 
+    /// Non-promoting `&mut V` lookup. Like `get_mut` but does not set VISITED.
+    fn peek_mut<Q>(&mut self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let needle = Self::needle_from_hash(hash);
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: pos was confirmed live by find; the &mut self borrow makes the
+        // returned &mut V the only outstanding borrow into entries[id].
+        let e = unsafe { &mut *self.entry_ptr_mut(id) };
+        Some(&mut e.value)
+    }
+
+    /// Promoting lookup that returns `(&K, &V)`. Sets VISITED on hit (same
+    /// as `get`).
+    fn get_key_value<Q>(&mut self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let needle = Self::needle_from_hash(hash);
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        self.tags[pos] |= VISITED;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: pos was confirmed live by find.
+        let e = unsafe { &*self.entry_ptr(id) };
+        Some((&e.key, &e.value))
+    }
+
+    /// Non-promoting variant of `get_key_value`.
+    fn peek_key_value<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let needle = Self::needle_from_hash(hash);
+        let pos = self.find(key, needle, has_avx2_bmi1)?;
+        let id = Self::id_of(self.tags[pos]);
+        // SAFETY: pos was confirmed live by find.
+        let e = unsafe { &*self.entry_ptr(id) };
+        Some((&e.key, &e.value))
+    }
+
     /// On hit: set VISITED and return `&value`. On miss: evaluate `f`, insert,
     /// and return `&value` of the freshly inserted entry. The new entry always
     /// lives at `tags[self.len - 1]` (steady-state evict path writes there;
@@ -981,6 +1026,45 @@ where
     {
         let h = self.hasher.hash_one(key);
         self.shards[self.shard_of_hash(h)].peek(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Non-promoting `&mut V` lookup. Same as `get_mut` but does not set
+    /// VISITED, so in-place updates do not affect SIEVE eviction priority.
+    /// Useful for housekeeping writes (counters, timestamps) that should not
+    /// count as logical access.
+    pub fn peek_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let h = self.hasher.hash_one(key);
+        let i = self.shard_of_hash(h);
+        self.shards[i].peek_mut(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Like `get`, but also returns a reference to the stored key. Sets
+    /// VISITED on hit. Useful when looking up via `Borrow<Q>` and the
+    /// canonical `&K` is wanted (e.g. `Cache<String, V>` looked up with
+    /// `&str`).
+    pub fn get_key_value<Q>(&mut self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let h = self.hasher.hash_one(key);
+        let i = self.shard_of_hash(h);
+        self.shards[i].get_key_value(key, h, self.has_avx2_bmi1)
+    }
+
+    /// Non-promoting variant of `get_key_value`: returns `(&K, &V)` without
+    /// setting VISITED.
+    pub fn peek_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let h = self.hasher.hash_one(key);
+        self.shards[self.shard_of_hash(h)].peek_key_value(key, h, self.has_avx2_bmi1)
     }
 
     /// Drops every entry, leaving the cache empty. Capacity, shard layout,
