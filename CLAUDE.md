@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `senba-cache` is a sandbox for exploring **good Rust implementations of the SIEVE eviction algorithm** (NSDI'24, Zhang et al.). The aim is to develop and compare multiple variants — starting from a faithful port of the original C reference, then iterating toward Rust-idiomatic / high-performance designs — and study the trade-offs between them (correctness, allocation behavior, cache locality, ergonomics).
 
+A second, downstream aim is to **harvest the results of that experimentation into a publishable library**: the variant that wins out on the sandbox benches gets promoted to `src/sieve_cache.rs` and treated as a stable, perf-gated public surface (`benches/sieve_cache_perf.rs`). The experimental modules under `src/experimental/` stay as research artifacts; the library surface is what we intend to ship. Decisions that affect the library surface (API additions, semantics, perf contract) should be made with that downstream use in mind, not just sandbox convenience.
+
 The NSDI'24 paper is at https://yazhuozhang.com/assets/publication/nsdi24-sieve.pdf, and the authors' reference C implementation is included as a git submodule at `external/NSDI24-SIEVE/` (https://github.com/cacheMon/NSDI24-SIEVE).
 
 ## Commands
@@ -94,7 +96,7 @@ Experimental variants:
 
 ## Documenting results
 
-This is a research/investigation project, not a product. Every time a meaningful experiment concludes — a benchmark run, a profiling session, an overhead analysis, a design comparison — write a report under `docs/reports/YYYY-MM-DD-<topic>.md` before moving on.
+The sandbox half of this project is research-driven, and reports are how we keep that research from evaporating between sessions. Every time a meaningful experiment concludes — a benchmark run, a profiling session, an overhead analysis, a design comparison — write a report under `docs/reports/YYYY-MM-DD-<topic>.md` before moving on. Reports also serve as the rationale trail for what eventually lands in the library surface.
 
 A report is warranted when:
 - A benchmark produces numbers worth keeping (even if the result is "it didn't improve")
