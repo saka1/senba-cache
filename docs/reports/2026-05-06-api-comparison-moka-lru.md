@@ -1,0 +1,377 @@
+# senba::Cache vs moka / lru / quick_cache / stretto API 比較
+
+`senba::Cache`(`src/sieve_cache.rs`) の公開 API を、Rust のキャッシュ系ライブラリ
+代表格である **moka**(`moka::sync::Cache`) と **lru**(`lru::LruCache`) を主軸に、
+補助として **quick_cache**(`quick_cache::sync::Cache`)・**stretto**(`stretto::Cache`)
+と並べて、メソッド単位で機能差を整理する。本ドキュメントは「senba にどんな機能が
+欠けているか」を事実ベースで列挙することを目的とし、ロードマップ的な提案は含まない。
+
+調査対象は以下の docs.rs 最新ページ:
+
+- moka: <https://docs.rs/moka/latest/moka/sync/struct.Cache.html>
+- lru: <https://docs.rs/lru/latest/lru/struct.LruCache.html>
+- quick_cache: <https://docs.rs/quick_cache/latest/quick_cache/sync/struct.Cache.html>
+- stretto: <https://docs.rs/stretto/latest/stretto/struct.Cache.html>
+
+## サマリ表
+
+凡例: O = 提供あり, x = なし, △ = 部分的 / 制約付き
+
+| カテゴリ / 機能 | senba::Cache | moka::sync::Cache | lru::LruCache | quick_cache | stretto |
+|---|---|---|---|---|---|
+| `new(capacity)` | O | O (`new(u64)`) | O (`NonZeroUsize`) | O | O |
+| Builder パターン | x | O (`builder()`) | x | △ (`with_options`) | O (`builder()`) |
+| Unbounded | x | x | O (`unbounded()`) | x | x |
+| カスタム hasher | x (`Xxh3Build` 固定) | O (builder 経由) | O (`with_hasher`) | O | △ |
+| capacity / len / is_empty | O | O (`entry_count`, `weighted_size`) | O (`cap`, `len`, `is_empty`) | O | O |
+| TTL / TTI | x | O | x | △ (lifecycle) | O (`insert_with_ttl`) |
+| Weighted size | x | O (`weigher`) | x | O | O (`cost`) |
+| eviction listener | x | O | x | △ (lifecycle) | x |
+| `get` 受け取り | `&mut self -> Option<&V>` | `&self -> Option<V>` (clone) | `&mut self -> Option<&V>` | `&self -> Option<V>` (clone) | `&self -> Option<ValueRef<V>>` |
+| `peek` (非昇格 get) | x | x | O (`peek`, `peek_mut`) | O | x |
+| `peek_lru` / `peek_mru` | x | x | O | x | x |
+| `get_mut` | x | x | O | x | O |
+| `insert` | O `-> Option<(K,V)>` | O `()` | O (`put -> Option<V>`, `push -> Option<(K,V)>`) | O | O `-> bool` |
+| `remove` | O `-> Option<V>` | O `-> Option<V>` | O (`pop`, `pop_entry`) | O `-> Option<(K,V)>` | O |
+| `pop_lru` / `pop_mru` | x | x | O | x | x |
+| `contains_key` | O | O | O (`contains`) | O | x |
+| `clear` | x | O (`invalidate_all`) | O | O | O |
+| `iter` | x | O | O (`iter`, `iter_mut`) | O | x |
+| `keys` / `values` | x | x (iter 経由) | x (iter 経由) | x (iter 経由) | x |
+| `drain` | x | x | x | O | x |
+| `retain` / `invalidate_entries_if` | x | O | x | O | x |
+| `get_or_insert*` (entry API 含む) | x | O (多数) | O (多数) | O | x |
+| `try_get_or_insert*` | x | O | O | O | x |
+| `promote` / `demote` | x | x | O | x | x |
+| `resize` / `set_capacity` | x | x (policy 経由) | O | O | O (`update_max_cost`) |
+| 統計 (hits/misses) | x | x | x | O (feature) | O (`metrics`) |
+| 並行 (`&self` で書き換え可) | x (要 `&mut self`) | O | x | O | O |
+| `Send + Sync` | △ (`K,V: Send/Sync` 依存) | O | △ | O | O |
+| `Clone` | x | O (cheap, Arc) | O (where K,V,S: Clone) | x | O (Arc) |
+| `Debug` | x | O | O | x | x |
+| `IntoIterator` | x | O (`&Cache`) | O (3 形態) | x | x |
+| async API | x | O (`moka::future`) | x | O (`*_async`) | x |
+
+---
+
+## 1. Construction / sizing
+
+### senba
+
+```rust
+pub fn new(capacity: usize) -> Self;
+pub fn with_shards(capacity: usize, shards: usize) -> Self;
+```
+
+- `capacity > 0` 必須。`with_shards` は `shards` が 2 冪、かつ
+  `ceil(capacity / shards) <= MAX_PER_SHARD (= 64)` を満たすこと。
+- shard 数は `Cache::new` で自動選択(`next_pow2(ceil(cap/64))`)。
+- hasher は `Xxh3Build` 固定(構築時に注入する API はない)。
+- `SlotSize` ジェネリック(`Slot16` / `Slot32` (default) / `Slot64`)で
+  entries arena の stride を型レベル指定。
+
+### moka
+
+- `Cache::new(max_capacity: u64)` の他、`Cache::builder()` 経由で TTL / TTI /
+  weigher / max_capacity / initial_capacity / eviction_listener / name / hasher
+  などをまとめて設定する。
+
+### lru
+
+- `LruCache::new(NonZeroUsize)` / `unbounded()` / `with_hasher` /
+  `unbounded_with_hasher`。`NonZeroUsize` で容量 0 を型で禁止している。
+
+### quick_cache / stretto
+
+- `quick_cache::sync::Cache::with_options` / `with_weighter` で
+  weight ベースの容量指定が中心。
+- `stretto::Cache::builder(num_counters, max_cost)` で TinyLFU の
+  カウンタ数と総コスト上限を分離して指定。
+
+### ギャップ
+
+senba には builder / unbounded / カスタム hasher 注入 API がない。容量は
+`usize` 直書きのため、ゼロ容量は実行時 panic で弾く構造(lru の
+`NonZeroUsize` のような型レベル保証はない)。
+
+---
+
+## 2. 基本オペレーション
+
+### senba
+
+```rust
+pub fn contains_key(&self, key: &K) -> bool;
+pub fn get(&mut self, key: &K) -> Option<&V>;
+pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)>;
+pub fn remove(&mut self, key: &K) -> Option<V>;
+```
+
+- `get` は **`&mut self`**。SIEVE の visited bit 更新があるため不可避。
+- `insert` の戻り値はキャパ超過時に追い出された `(K, V)`。既存キー上書き時は
+  `None`(更新のみで evict なし)。
+- key 引数は `&K` 固定(`Borrow<Q>` 一般化はしていない)。
+
+### moka
+
+- `get<Q>(&self, &Q) -> Option<V>`(値クローン)。`&self` で並行アクセス可。
+- `insert(&self, K, V)` は戻り値なし。evict 通知は eviction_listener で受ける。
+- `remove<Q>(&self, &Q) -> Option<V>`。
+
+### lru
+
+- `get(&mut self, &Q) -> Option<&V>`(LRU 順を更新), `get_mut`,
+  `get_key_value`, `get_key_value_mut`。
+- 非昇格アクセスとして `peek`, `peek_mut`, `peek_lru`, `peek_mru` を持つ。
+  senba には対応 API なし。
+- `put -> Option<V>`(追い出された value のみ)と
+  `push -> Option<(K, V)>`(追い出された (K,V))の 2 種類。
+  senba の `insert` は後者と同形だが「容量超過のときだけ」値を返す。
+- `pop`, `pop_entry`, `pop_lru`, `pop_mru` で LRU / MRU 端を直接抜ける。
+
+### quick_cache / stretto
+
+- quick_cache は `&self` で `get` / `insert` / `peek` / `remove` /
+  `remove_if` / `clear` / `retain` / `drain` を提供。`replace` で
+  「既存キーがあれば更新」セマンティクスを切り出している。
+- stretto は `insert(key, val, cost) -> bool`(TinyLFU が拒否すれば false)、
+  `insert_with_ttl`、`insert_if_present`、`get_mut`、`wait()` で
+  background write スレッドの drain を待つモデル。
+
+### ギャップ
+
+senba に欠けている基本 API:
+
+- `peek`(非昇格 get)。SIEVE は visited bit を立てるか立てないかで意味が
+  変わるため、観測専用の API は一定の需要がある。
+- `get_mut`(値の in-place 変更)。
+- LRU/MRU 端を取り出す `pop_lru` 系(SIEVE には MRU/LRU の概念がそのまま
+  ない代わりに「一番古い tail = `tags[0]`」を持っているので、
+  `pop_oldest()` 相当を出すことは構造上可能)。
+- `Borrow<Q>` 一般化(`get<Q: Hash + Eq + ?Sized>(&Q)` のような)。
+  現状 `String` キャッシュで `&str` lookup ができない。
+
+---
+
+## 3. イテレーション / 内省
+
+### senba
+
+- `len()`, `is_empty()`, `capacity()`, `shards()` のみ。
+- `iter`, `keys`, `values`, `drain` 一切なし。
+- `Debug` 実装もないので `dbg!(&cache)` できない。
+
+### moka / lru / quick_cache
+
+- moka: `iter()` で `(Arc<K>, V)` を返すイテレータ。`IntoIterator for &Cache`。
+- lru: `iter`, `iter_mut`, さらに `IntoIterator` を 3 形態(`&`, `&mut`,
+  値所有)で実装。
+- quick_cache: `iter()`(`Key: Clone` 必須)、`drain()`。
+
+### ギャップ
+
+senba は **観測手段が len 系の集計値しか持たない**。具体的には次が欠けている。
+
+- `iter() / iter_mut()`
+- `keys() / values()`
+- `IntoIterator` 系
+- `Clone` / `Debug`
+
+---
+
+## 4. バルクオペレーション / entry API / get-or-insert
+
+### senba
+
+- `clear`, `extend`, `Extend`, `FromIterator` いずれも未実装。
+- entry API なし(insert + get で素朴に組み合わせるしかない)。
+- `get_or_insert_with` / `try_get_or_insert` 系なし。
+
+### moka
+
+- `entry(K)` / `entry_by_ref(&Q)` の 2 系統 entry API。
+- `get_with`, `optionally_get_with`, `try_get_with` および
+  `*_by_ref` 版を網羅。
+- `invalidate_entries_if(predicate)` で述語ベース一括削除。
+- `invalidate_all()` で論理 clear。
+
+### lru
+
+- `get_or_insert`, `get_or_insert_with_key`, `get_or_insert_ref`,
+  `get_or_insert_mut*` × 6 種、`try_*` × 6 種。
+- `clear`, `resize` を持つ。
+
+### quick_cache
+
+- `get_or_insert_with`, `get_value_or_guard`(同期 / async 版),
+  `entry()` API、`replace`, `retain`, `drain`。
+
+### ギャップ
+
+senba には **entry API も get-or-insert 系も全く存在しない**。
+ユーザは毎回
+
+```rust
+if let Some(v) = cache.get(&k) { ... } else { cache.insert(k, compute()); }
+```
+
+を書き、しかも `get` 後に `cache` を再借用しなければならず ergonomic に厳しい。
+`clear()` がないのも実用上の欠損で、再ビルドして差し替える以外にない。
+
+---
+
+## 5. 立ち退きリスナー / 通知
+
+### senba
+
+- `insert` の戻り値 `Option<(K, V)>` で「いま evict された 1 件」を伝えるのみ。
+- リスナー登録・キュー API は無し。`remove` の戻り値も `Option<V>` のみ。
+
+### moka
+
+- builder の `eviction_listener(...)` でクロージャを登録、各 evict 時に
+  `(Arc<K>, V, RemovalCause)` を受け取る。`RemovalCause` で
+  Replaced / Size / Expired / Explicit / Pending を区別。
+- `invalidate_entries_if` で述語ベース、`run_pending_tasks` で同期化。
+
+### ギャップ
+
+senba は「全 evict を観測する」手段が無い。`insert` の戻り値を見るしかない
+ため、`remove`(明示削除で `Drop` するもの)とは経路が分かれる。
+
+---
+
+## 6. 並行モデル
+
+### senba
+
+- `get`, `insert`, `remove` はいずれも `&mut self`(`contains_key` のみ
+  `&self`)。
+- shard はあるが API レイヤでは shard mutex を露出していない(現状は ST
+  ライブラリ)。並行版 `c8` は別実装で本 crate には含まれない。
+- `Cache: Send + Sync` は `K, V: Send + Sync` 依存(明示 unsafe impl はなし)。
+
+### moka
+
+- 全公開メソッドが `&self`。内部で per-shard lock + write buffer + scheduler
+  を持つ。`Clone` は cheap(Arc 参照カウント増加)。
+- `moka::future::Cache` で async 版あり。
+
+### lru
+
+- `&mut self` ベース。`Send`/`Sync` は `K, V, S` の境界に従う。
+- 並行アクセスはユーザ側で `Mutex`/`RwLock` で包む前提。
+
+### quick_cache / stretto
+
+- いずれも `&self` で並行アクセス。stretto は内部に OS thread を 2 本持つ
+  特殊な構造(eviction policy / write)。
+
+### ギャップ
+
+senba は **構造的に ST 専用 API**。並行で使うなら呼び出し側で
+`Mutex<Cache>` する必要があり、shard 並列性は外から取り出せない。
+
+---
+
+## 7. 統計
+
+### senba
+
+- なし。hit / miss / eviction counter は外部で手動カウントするしかない。
+
+### 他
+
+- moka: 公開 API レベルでは `entry_count` / `weighted_size` のみで
+  hit/miss は出さない(builder の `name` を付けて metrics 配線するのが
+  一般的)。
+- quick_cache: `hits()` / `misses()`(`stats` feature gate)。
+- stretto: `metrics` フィールドで詳細統計。
+
+### ギャップ
+
+senba は hit ratio / eviction count を **公開 API では一切観測できない**。
+本リポジトリの bench 経路は内部状態を直接読んで集計しているが、
+ライブラリ利用者には同じ手段が無い。
+
+---
+
+## 8. その他(serialize / 拡張点)
+
+| 機能 | senba | moka | lru | quick_cache | stretto |
+|---|---|---|---|---|---|
+| Serde 直接サポート | x | x | x | x | x |
+| `Default` impl | x | x | x | x | x |
+| `From<HashMap>` 等の変換 | x | x | x | x | x |
+| 名前付け(`name()`) | x | O | x | x | x |
+
+---
+
+## 9. 「senba::Cache に欠けているもの」一覧
+
+事実として欠けている機能。重要度の主観評価は付けず、列挙のみ。
+
+**Construction / sizing**
+
+- `Cache::builder()` パターン
+- カスタム `BuildHasher` の注入(`with_hasher` / builder)
+- unbounded mode
+- TTL / TTI(time-to-live / time-to-idle)
+- 重み付け容量(weight / weigher)
+
+**基本オペレーション**
+
+- `peek(&K)` / `peek_mut(&mut K)`(非昇格、visited bit を立てない get)
+- `get_mut(&mut K) -> Option<&mut V>`
+- `peek_lru` / `peek_mru` / `pop_lru` / `pop_mru` 相当
+  (SIEVE では tail/head に対応する `tags[0]` / `tags[len-1]` を露出する余地がある)
+- `Borrow<Q>` 一般化(`get<Q>` で `&str` 経由 lookup できない)
+- `get_key_value` 系
+
+**バルク / イテレーション**
+
+- `clear()`
+- `iter()` / `iter_mut()` / `keys()` / `values()`
+- `drain()`
+- `retain(predicate)` / `invalidate_entries_if`
+- `IntoIterator` 各種
+- `Extend` / `FromIterator`
+- `resize(new_cap)`
+
+**Entry API / get-or-insert**
+
+- `entry(K)` / `entry_by_ref(&Q)`
+- `get_or_insert_with` / `get_or_insert_mut` / `try_get_or_insert*`
+
+**通知 / 統計**
+
+- eviction listener(全 evict を hook する API)
+- hit / miss / eviction カウンタ
+
+**並行**
+
+- `&self` での `get` / `insert` / `remove`(SIEVE の visited 更新を
+  `AtomicU16::fetch_or` 化すれば理論上可能。本 crate では未実装で別系統 `c8` 扱い)
+- `Clone`(現在は `Arc<Mutex<Cache>>` で包むしかない)
+- `moka::future::Cache` 相当の async 版
+
+**派生 trait**
+
+- `Clone`, `Debug`, `Default`
+- 名前(`name()`)
+- Serde サポート
+
+---
+
+## 10. メモ
+
+- senba の `insert -> Option<(K, V)>` は lru の `push` と同形のシグネチャ。
+  「容量超過したときだけ Some」というセマンティクスは独自で、moka の
+  「戻り値なし + リスナー」、stretto の「`bool` で受理可否」とは設計思想が違う。
+- `&mut self` を要求する `get` は SIEVE のアルゴリズム由来であり、lru も
+  同じ理由で `get` は `&mut self`(LRU 順を更新するため)。**moka /
+  quick_cache / stretto が `&self` で済むのは内部に lock + atomic を
+  抱えているから**であり、API の差は ST/MT 構造の差にほぼ対応する。
+- 本 crate の研究目的は SIEVE 実装の比較・最適化であり、API の網羅は
+  目的ではない。本ドキュメントは現状の API 表面を他ライブラリと突き合わせて
+  事実として記録するもの。
