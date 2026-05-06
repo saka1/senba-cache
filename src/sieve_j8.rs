@@ -2,7 +2,7 @@
 //! + BLSR ×2 + sizeof(Entry)-aware bit layout。
 //!
 //! ## 動機 (`docs/improvement-ideas.md` §M1, §M2.3, §M5.3 を統合;
-//!         `docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) + §8.3(a) を反映)
+//!   `docs/reports/2026-05-06-j8-candidate-loop-analysis.md` §8.2(a) + §8.3(a) を反映)
 //!
 //! j7 (M2.3) は u16 tag に live + visited + 14-bit hash を packing して
 //! Twitter cluster018 全帯域で j5/j6 を支配したが、`order_cap = 2 × capacity`
@@ -373,9 +373,8 @@ where
                 //   ⟹ entries arena (capacity 要素 = capacity × sizeof byte) の境界内
                 // - sizeof(Entry) is power of two (id_shift_from_entry_size の assert)
                 //   ⟹ id_bytes は Entry の alignment 倍数 (実体 alignment は power of two のため)
-                let entry_ptr = unsafe {
-                    entries_byte_ptr.add(id_bytes) as *const MaybeUninit<Entry<K, V>>
-                };
+                let entry_ptr =
+                    unsafe { entries_byte_ptr.add(id_bytes) as *const MaybeUninit<Entry<K, V>> };
                 let e = unsafe { (*entry_ptr).assume_init_ref() };
                 if &e.key == key {
                     // hit パスでだけ lane / pos を組み立てる (false-match を

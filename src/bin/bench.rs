@@ -227,7 +227,11 @@ fn parse_args() -> Args {
             "--capacity" => {
                 capacities = val()
                     .split(',')
-                    .map(|s| s.trim().parse::<usize>().expect("--capacity entry is usize"))
+                    .map(|s| {
+                        s.trim()
+                            .parse::<usize>()
+                            .expect("--capacity entry is usize")
+                    })
                     .collect();
             }
             "--variant" => {
@@ -286,7 +290,10 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .collect()
         }
         "file" => {
-            let p = args.path.as_ref().expect("--path required for --source file");
+            let p = args
+                .path
+                .as_ref()
+                .expect("--path required for --source file");
             let it = file::from_path(p).expect("open trace");
             match args.len {
                 Some(n) => it.take(n).collect(),

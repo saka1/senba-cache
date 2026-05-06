@@ -39,9 +39,7 @@ pub fn from_path(path: impl AsRef<Path>) -> io::Result<impl Iterator<Item = Key>
 /// - **ストリーミング (`.lines().map`)**: `Vec` に集めず Iterator を返す。
 ///   bench 側の `take(n).collect()` (`--len N`) がそのまま効くように
 ///   既存 `from_path` と API を揃える。
-pub fn twitter_csv_from_path(
-    path: impl AsRef<Path>,
-) -> io::Result<impl Iterator<Item = Key>> {
+pub fn twitter_csv_from_path(path: impl AsRef<Path>) -> io::Result<impl Iterator<Item = Key>> {
     let file = File::open(path)?;
     Ok(BufReader::new(file).lines().map(|line| {
         let line = line.expect("io error reading trace line");
@@ -66,28 +64,24 @@ pub fn twitter_csv_from_path(
 ///   → libCacheSim 側 (cachesim) のキー扱いと対称になる
 /// - 先頭の `# ...` コメント行を skip する
 /// - `, ` の空白に対応するため `trim()` してからパースする
-pub fn libcachesim_csv_from_path(
-    path: impl AsRef<Path>,
-) -> io::Result<impl Iterator<Item = Key>> {
+pub fn libcachesim_csv_from_path(path: impl AsRef<Path>) -> io::Result<impl Iterator<Item = Key>> {
     let file = File::open(path)?;
-    Ok(BufReader::new(file)
-        .lines()
-        .filter_map(|line| {
-            let line = line.expect("io error reading trace line");
-            if line.starts_with('#') {
-                return None;
-            }
-            let key_str = line
-                .split(',')
-                .nth(1)
-                .expect("malformed libCacheSim CSV row: no object column");
-            Some(
-                key_str
-                    .trim()
-                    .parse::<Key>()
-                    .expect("libCacheSim CSV object column is not a u64"),
-            )
-        }))
+    Ok(BufReader::new(file).lines().filter_map(|line| {
+        let line = line.expect("io error reading trace line");
+        if line.starts_with('#') {
+            return None;
+        }
+        let key_str = line
+            .split(',')
+            .nth(1)
+            .expect("malformed libCacheSim CSV row: no object column");
+        Some(
+            key_str
+                .trim()
+                .parse::<Key>()
+                .expect("libCacheSim CSV object column is not a u64"),
+        )
+    }))
 }
 
 /// Twitter cache trace の CSV から **生 String キー**を `Iterator<Item = String>` で返す。

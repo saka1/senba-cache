@@ -1,5 +1,5 @@
-use rand::{RngExt, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 
 use super::Key;
 
@@ -21,7 +21,10 @@ impl ZipfGen {
     /// `skew` は > 0。
     pub fn new(skew: f64, n_keys: u64, seed: u64) -> Self {
         debug_assert!(n_keys > 0, "n_keys must be > 0");
-        debug_assert!(skew > 0.0 && skew.is_finite(), "skew must be finite and > 0");
+        debug_assert!(
+            skew > 0.0 && skew.is_finite(),
+            "skew must be finite and > 0"
+        );
 
         let n = n_keys as usize;
         let mut cdf = Vec::with_capacity(n);
@@ -102,9 +105,12 @@ mod tests {
         let take = 5_000;
         let u_low: HashSet<_> = ZipfGen::new(0.6, n, 42).take(take).collect();
         let u_high: HashSet<_> = ZipfGen::new(1.4, n, 42).take(take).collect();
-        assert!(u_low.len() > u_high.len(),
+        assert!(
+            u_low.len() > u_high.len(),
             "expected α=0.6 to produce more uniques than α=1.4 ({} vs {})",
-            u_low.len(), u_high.len());
+            u_low.len(),
+            u_high.len()
+        );
     }
 
     // CDF の最頻キーは 0 (= 一番人気) であるべき
@@ -115,7 +121,12 @@ mod tests {
         for k in ZipfGen::new(1.2, n, 42).take(50_000) {
             counts[k as usize] += 1;
         }
-        let mode = counts.iter().enumerate().max_by_key(|&(_, &c)| c).unwrap().0;
+        let mode = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &c)| c)
+            .unwrap()
+            .0;
         assert_eq!(mode, 0);
     }
 }

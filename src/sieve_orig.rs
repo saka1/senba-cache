@@ -209,7 +209,11 @@ where
     /// 原典 Sieve_evict (Sieve.c L218-232) を忠実に移植。
     fn evict_one(&mut self) -> Option<(K, V)> {
         // 初回 or 1周完了後は tail から開始
-        let mut cur = if self.hand != NIL { self.hand } else { self.tail };
+        let mut cur = if self.hand != NIL {
+            self.hand
+        } else {
+            self.tail
+        };
         if cur == NIL {
             return None;
         }

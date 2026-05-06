@@ -144,7 +144,7 @@ where
         self.tombstone.clear(qpos);
         self.index.insert(key, eid);
         self.len += 1;
-        
+
         evicted
     }
 
@@ -233,7 +233,9 @@ where
             if self.visited.get(old_pos) {
                 new_visited.set(write);
             }
-            let ent = self.entries[eid].as_mut().expect("live slot must have entry");
+            let ent = self.entries[eid]
+                .as_mut()
+                .expect("live slot must have entry");
             ent.qpos = write;
             write += 1;
         }
@@ -250,7 +252,7 @@ where
             new_hand.unwrap_or(0)
         };
         debug_assert_eq!(self.len, write);
-    }   
+    }
 }
 
 impl<K, V> crate::CacheImpl<K, V> for SieveCache<K, V>

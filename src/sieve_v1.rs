@@ -283,7 +283,9 @@ where
             if self.visited.get(old_pos) {
                 new_visited.set(write);
             }
-            let ent = self.entries[eid].as_mut().expect("live slot must have entry");
+            let ent = self.entries[eid]
+                .as_mut()
+                .expect("live slot must have entry");
             ent.qpos = write;
             write += 1;
         }

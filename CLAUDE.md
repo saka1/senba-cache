@@ -18,6 +18,16 @@ cargo test <name>    # run a single test by name
 cargo clippy         # lint
 ```
 
+## Quality Gates
+
+After any code change, ensure all pass:
+
+```bash
+cargo fmt                    # auto-format
+cargo clippy --all-targets   # zero warnings (must include tests — CI runs --all-targets)
+cargo test                   # all tests pass
+```
+
 ## Conventions
 
 - Write all source code (identifiers, comments, doc comments) in **English**. Reports and other documentation do not need to be in English.

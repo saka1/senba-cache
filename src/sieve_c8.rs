@@ -159,6 +159,8 @@ struct Entry<K, V> {
     value: V,
 }
 
+type EntriesArena<K, V> = UnsafeCell<Box<[MaybeUninit<Entry<K, V>>]>>;
+
 /// 1 shard 分の並行 SIEVE。
 pub(crate) struct Shard<K, V> {
     capacity: usize,
@@ -167,7 +169,7 @@ pub(crate) struct Shard<K, V> {
     tags: Box<[AtomicU16]>,
     /// entries arena。`writer.lock()` を取った間のみ書き込んでよい。
     /// reader は **raw pointer 経由で copy 読み + tag re-validate** で seqlock を成立させる。
-    entries: UnsafeCell<Box<[MaybeUninit<Entry<K, V>>]>>,
+    entries: EntriesArena<K, V>,
     /// reader からも見える書き込み境界。`0..tail` が scan 範囲。
     tail: AtomicUsize,
     /// live entry 数。
@@ -273,9 +275,8 @@ where
             // SAFETY: id < MAX_PER_SHARD <= capacity = entries.len()。
             // writer は同 slot を mutate し得るが、後続の re-validate で torn read を弾く。
             // K, V: Copy のため torn ビット列の使い回し / drop は発生しない。
-            let entry = unsafe {
-                std::ptr::read_volatile(entries_base.add(id) as *const Entry<K, V>)
-            };
+            let entry =
+                unsafe { std::ptr::read_volatile(entries_base.add(id) as *const Entry<K, V>) };
             let t2 = self.tags[i].load(Ordering::Acquire);
             if t2 != t1 || (t2 & LIVE) == 0 {
                 continue;
@@ -327,10 +328,10 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let lane = bit >> 1;
                 let pos = i + lane;
-                if pos < tail {
-                    if let Some(val) = self.try_candidate(pos, key, needle) {
-                        return Some(val);
-                    }
+                if pos < tail
+                    && let Some(val) = self.try_candidate(pos, key, needle)
+                {
+                    return Some(val);
                 }
                 // BLSR ×2 で 1 候補ペアを落とす (tzcnt 結果に独立)。
                 mask = _blsr_u32(mask);
@@ -351,9 +352,7 @@ where
         let id = Self::id_of(t1);
         let entries_base = self.entries_ptr();
         // SAFETY: 上記 find_get_scalar と同じ。Copy 制約でtorn read 非伝播。
-        let entry = unsafe {
-            std::ptr::read_volatile(entries_base.add(id) as *const Entry<K, V>)
-        };
+        let entry = unsafe { std::ptr::read_volatile(entries_base.add(id) as *const Entry<K, V>) };
         let t2 = self.tags[pos].load(Ordering::Acquire);
         if t2 != t1 || (t2 & LIVE) == 0 {
             return None;
@@ -531,12 +530,7 @@ where
         None
     }
 
-    fn writer_do_evict(
-        &self,
-        state: &mut WriterState,
-        pos: usize,
-        tail: usize,
-    ) -> ((K, V), u16) {
+    fn writer_do_evict(&self, state: &mut WriterState, pos: usize, tail: usize) -> ((K, V), u16) {
         let t = self.tags[pos].load(Ordering::Relaxed);
         debug_assert!(t != EMPTY);
         let id = Self::id_of(t) as u16;
@@ -592,11 +586,7 @@ where
 
         let len = self.len.load(Ordering::Relaxed);
         self.tail.store(write, Ordering::Release);
-        state.hand = if len == 0 {
-            0
-        } else {
-            new_hand.unwrap_or(0)
-        };
+        state.hand = if len == 0 { 0 } else { new_hand.unwrap_or(0) };
         debug_assert_eq!(len, write);
     }
 
@@ -719,7 +709,7 @@ where
     }
 
     pub fn insert(&self, key: K, value: V) -> Option<(K, V)> {
-        let h = self.hasher.hash_one(&key);
+        let h = self.hasher.hash_one(key);
         let i = Self::shard_of_hash(h);
         self.shards[i].insert(key, value, h)
     }
@@ -1047,7 +1037,11 @@ mod tests {
         let cache: ConcurrentSieveCache<u64, u64, 8> = ConcurrentSieveCache::new(256);
         for k in 0..200u64 {
             cache.insert(k, k * 17);
-            assert_eq!(cache.get(&k), Some(k * 17), "直後の self-get で miss: k={k}");
+            assert_eq!(
+                cache.get(&k),
+                Some(k * 17),
+                "直後の self-get で miss: k={k}"
+            );
         }
     }
 }

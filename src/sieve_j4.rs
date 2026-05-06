@@ -200,7 +200,12 @@ mod tests {
 
     #[test]
     fn capacity_with_remainder_sums_correctly() {
-        for cap in [TEST_SHARDS, TEST_SHARDS + 1, TEST_SHARDS + 3, TEST_SHARDS * 7 + 5] {
+        for cap in [
+            TEST_SHARDS,
+            TEST_SHARDS + 1,
+            TEST_SHARDS + 3,
+            TEST_SHARDS * 7 + 5,
+        ] {
             let cache: SieveCache<u64, u64> = SieveCache::new(cap);
             assert_eq!(
                 cache.capacity(),

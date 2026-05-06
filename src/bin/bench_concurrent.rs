@@ -34,8 +34,9 @@
 //!   per-op 同期する利用法は存在しない。
 //! - 結果として HR は本来より少し薄まる (admission 判定の遅延ぶん) が、これは
 //!   並列利用そのままの挙動。HR oracle が欲しければ bench.rs 側を見る。
-//! 計測終了直前に一度だけ `run_pending_tasks` / `sync` を呼ぶこともしない
-//! (= 計測 window 外で flush しても意味がないし、window 中の挙動こそが評価対象)。
+//!
+//! 計測終了直前に一度だけ `run_pending_tasks` / `sync` を呼ぶこともしない。
+//! (= 計測 window 外で flush しても意味がないし、window 中の挙動こそが評価対象)
 
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -163,9 +164,18 @@ fn parse_args() -> Args {
         }
     }
 
-    assert!(threads > 0 && threads.is_power_of_two(), "--threads must be power of two");
-    assert!(ops % threads == 0, "--ops must be divisible by --threads");
-    assert!(warmup % threads == 0, "--warmup must be divisible by --threads");
+    assert!(
+        threads > 0 && threads.is_power_of_two(),
+        "--threads must be power of two"
+    );
+    assert!(
+        ops.is_multiple_of(threads),
+        "--ops must be divisible by --threads"
+    );
+    assert!(
+        warmup.is_multiple_of(threads),
+        "--warmup must be divisible by --threads"
+    );
     assert!(
         shards.is_power_of_two() && (8..=512).contains(&shards),
         "--shards must be a power of two in [8, 512]"

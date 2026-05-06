@@ -58,12 +58,7 @@ fn v0_diverges_when_victim_is_newest_entry() {
 
 #[test]
 fn v0_matches_orig_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
@@ -96,12 +91,7 @@ fn v1_diverges_when_victim_is_newest_entry() {
 
 #[test]
 fn v1_matches_v0_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace_a, cap);
@@ -112,17 +102,16 @@ fn v1_matches_v0_on_synthetic_zipf() {
 
 #[test]
 fn v1_matches_orig_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace_b, cap);
-        assert_eviction_streams_eq(&orig, &v1, &format!("v1 vs orig zipf skew={skew} cap={cap}"));
+        assert_eviction_streams_eq(
+            &orig,
+            &v1,
+            &format!("v1 vs orig zipf skew={skew} cap={cap}"),
+        );
     }
 }
 
@@ -149,12 +138,7 @@ fn v2_diverges_when_victim_is_newest_entry() {
 
 #[test]
 fn v2_matches_v0_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let v0 = run::<sieve_v0::SieveCache<u64, u64>>(trace_a, cap);
@@ -165,17 +149,16 @@ fn v2_matches_v0_on_synthetic_zipf() {
 
 #[test]
 fn v2_matches_orig_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let v2 = run::<sieve_v2::SieveCache<u64, u64>>(trace_b, cap);
-        assert_eviction_streams_eq(&orig, &v2, &format!("v2 vs orig zipf skew={skew} cap={cap}"));
+        assert_eviction_streams_eq(
+            &orig,
+            &v2,
+            &format!("v2 vs orig zipf skew={skew} cap={cap}"),
+        );
     }
 }
 
@@ -203,12 +186,7 @@ fn v3_diverges_when_victim_is_newest_entry() {
 
 #[test]
 fn v3_matches_v1_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let v1 = run::<sieve_v1::SieveCache<u64, u64>>(trace_a, cap);
@@ -219,17 +197,16 @@ fn v3_matches_v1_on_synthetic_zipf() {
 
 #[test]
 fn v3_matches_orig_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let v3 = run::<sieve_v3::SieveCache<u64, u64>>(trace_b, cap);
-        assert_eviction_streams_eq(&orig, &v3, &format!("v3 vs orig zipf skew={skew} cap={cap}"));
+        assert_eviction_streams_eq(
+            &orig,
+            &v3,
+            &format!("v3 vs orig zipf skew={skew} cap={cap}"),
+        );
     }
 }
 
@@ -259,17 +236,16 @@ fn j3_matches_orig_on_minimal_repro() {
 
 #[test]
 fn j3_matches_orig_on_synthetic_zipf() {
-    for &(skew, cap) in &[
-        (1.05_f64, 64usize),
-        (1.1, 128),
-        (1.2, 256),
-        (1.5, 1024),
-    ] {
+    for &(skew, cap) in &[(1.05_f64, 64usize), (1.1, 128), (1.2, 256), (1.5, 1024)] {
         let trace_a = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let trace_b = ZipfGen::new(skew, 10_000, 42).take(200_000);
         let orig = run::<sieve_orig::SieveCache<u64, u64>>(trace_a, cap);
         let j3 = run::<sieve_j3::SieveCache<u64, u64>>(trace_b, cap);
-        assert_eviction_streams_eq(&orig, &j3, &format!("j3 vs orig zipf skew={skew} cap={cap}"));
+        assert_eviction_streams_eq(
+            &orig,
+            &j3,
+            &format!("j3 vs orig zipf skew={skew} cap={cap}"),
+        );
     }
 }
 
