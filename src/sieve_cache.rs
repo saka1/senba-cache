@@ -11,12 +11,20 @@
 //!   `sizeof(Entry<K, V>) <= S::SIZE` is enforced by const-eval with a friendly error message.
 //! - The j8 c-hoist trick (`tag & ID_MASK = id × S::SIZE`) holds identically at slot granularity;
 //!   the inner SIMD loop shortcut is reused as-is.
-//! - `remove` rebuilds the per-shard state via swap-to-fill-gap to restore warm-up invariant I8,
-//!   keeping the free-list-free structure intact.
+//! - **Shift-on-evict** (the key simplification vs the j-series): each steady-state
+//!   `insert` evicts at the SIEVE-chosen position, shifts `tags[pos+1..len]` down by
+//!   one, and writes the new tag at `tags[len-1]` (the head end). This keeps
+//!   `tags[0..len]` contiguously LIVE *and* preserves the array's correspondence
+//!   to `sieve_orig`'s tail→head linked-list order — `tags[0]` is always the oldest
+//!   entry, `tags[len-1]` always the newest. No `compact` step is ever needed, the
+//!   SIMD `find` window is always exactly `len` wide, and the eviction sequence
+//!   matches `sieve_orig` byte-for-byte (oracle equivalence under any trace).
+//! - `remove` does the same shift (mirroring `sieve_orig`'s linked-list unlink), and
+//!   keeps the id-level swap-to-fill-gap so I8 (live ids = `0..len`) holds.
 //!
-//! ## Invariants (same as j8: I1–I8)
+//! ## Invariants (j8: I1–I8 plus the new in-place I4')
 //!
-//! - I4: set of live tags = `{ tags[i] : i < tail, tags[i] & LIVE != 0 }`, count = `len`
+//! - I4': `tags[0..len]` are all LIVE (no holes); `tags[len..]` are all EMPTY
 //! - I5: entry_ids referenced by live tags are unique, count = `len`
 //! - I6: only for ids in the I5 set is the **`entry` field** of `entries[id]` initialized
 //! - I7: I5 set ⊆ `0..capacity`
@@ -108,17 +116,18 @@ struct Entry<K, V> {
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
 struct Inner<K, V, S: SlotSize> {
     capacity: usize,
-    /// Parallel array #1: tag array. `order_cap = 2 × capacity`, LANE-aligned (with slack).
+    /// Parallel array #1: tag array. Size = `round_up(capacity, LANE).max(LANE)`.
+    /// Under I4' there are never holes in `tags[0..len]`, so no slack past `capacity`
+    /// is needed — the LANE-aligned remainder beyond `len` is permanent EMPTY pad.
     tags: Vec<u16>,
     /// Parallel array #2: entries arena. Size = `capacity` (no slack).
     /// Indexed by the 6-bit id embedded in each tag.
     /// `sizeof(S::Storage<Entry<K, V>>) == S::SIZE` is guaranteed by `_STORAGE_SIZE_OK`.
     entries: Vec<MaybeUninit<S::Storage<Entry<K, V>>>>,
-    /// Next insertion position into tags (`0..=order_cap`).
-    tail: usize,
-    /// SIEVE hand cursor (`0..=tail`), sweeping over tags.
+    /// SIEVE hand cursor (`0..=len`), sweeping over `tags[0..len]`.
     hand: usize,
-    /// Number of currently live entries (= number of live tags).
+    /// Number of currently live entries (= number of live tags = first index past
+    /// the live region in `tags`).
     len: usize,
 }
 
@@ -196,15 +205,16 @@ where
             capacity <= MAX_PER_SHARD,
             "per-shard capacity ({capacity}) must be <= {MAX_PER_SHARD} (6-bit ID limit)"
         );
-        let raw = capacity.checked_mul(2).expect("capacity * 2 overflow");
-        let order_cap = ((raw + LANE - 1) & !(LANE - 1)).max(LANE);
+        // Under I4' the live region is exactly `tags[0..len]` (no scattered holes), so
+        // `len <= capacity` and a tags array of `round_up(capacity, LANE).max(LANE)` is
+        // both a sufficient upper bound and the SIMD-aligned scan window.
+        let order_cap = ((capacity + LANE - 1) & !(LANE - 1)).max(LANE);
         let mut entries = Vec::with_capacity(capacity);
         entries.resize_with(capacity, MaybeUninit::uninit);
         Self {
             capacity,
             tags: vec![EMPTY; order_cap],
             entries,
-            tail: 0,
             hand: 0,
             len: 0,
         }
@@ -243,7 +253,7 @@ where
 
     #[inline]
     fn find_scalar(&self, key: &K, needle: u16) -> Option<usize> {
-        for (i, &t) in self.tags[..self.tail].iter().enumerate() {
+        for (i, &t) in self.tags[..self.len].iter().enumerate() {
             if (t & Self::SCAN_MASK) == needle {
                 let id = Self::id_of(t);
                 // SAFETY: a live tag implies entries[id] is initialized (I5/I6).
@@ -273,12 +283,11 @@ where
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
         use std::arch::x86_64::*;
-        // Round `tail` up to LANE. Tags beyond `tail` are EMPTY (= 0) and would be
-        // skipped by the LIVE-bit check anyway, but on a partially-filled cache they
-        // can dominate cost; bounding the scan at the rounded-up tail keeps the SIMD
-        // path competitive at low fill ratios.
-        // `tags.len() == order_cap` is itself LANE-aligned, so this never exceeds it.
-        let limit = (self.tail + LANE - 1) & !(LANE - 1);
+        // Round `len` up to LANE. Tags beyond `len` are EMPTY (= 0) and the LIVE-bit
+        // check would skip them anyway, but bounding the scan at the rounded-up live
+        // region keeps the SIMD path competitive at low fill ratios.
+        // `tags.len()` is itself LANE-aligned at construction, so this never exceeds it.
+        let limit = (self.len + LANE - 1) & !(LANE - 1);
         debug_assert!(limit <= self.tags.len());
         let tags_ptr = self.tags.as_ptr();
         let tags_byte_ptr = tags_ptr as *const u8;
@@ -346,53 +355,66 @@ where
             return None;
         }
 
-        let (evicted, entry_id): (Option<(K, V)>, u16) = if self.len < self.capacity {
-            (None, self.len as u16)
+        // New entry. Warm-up extends the live region by one (`pos = self.len`);
+        // steady state evicts at the SIEVE-chosen position, shifts the tail down,
+        // and writes the new tag at `tags[len-1]` (the head end). Both paths end
+        // with `tags[0..len]` contiguously LIVE, so no compaction is ever needed.
+        let (evicted, write_pos, entry_id) = if self.len < self.capacity {
+            let pos = self.len;
+            let id = self.len as u16;
+            self.len += 1;
+            (None, pos, id)
         } else {
-            let (kv, freed_id) = self.evict_one_returning_id();
-            (Some(kv), freed_id)
+            let pos = self.find_evict_pos();
+            let id = Self::id_of(self.tags[pos]) as u16;
+            // SAFETY: live ⟹ entries[id] initialized (I6). After read, entries[id] is
+            // uninit; we re-initialize it via ptr::write below before any other access.
+            let entry = unsafe { std::ptr::read(self.entry_ptr(id as usize)) };
+
+            // Shift tags[pos+1..len] down to tags[pos..len-1] so the live region
+            // stays "tail (= 0) → head (= len-1)" ordered, mirroring sieve_orig's
+            // linked-list unlink. The freed entry id is reused for the new tag.
+            let last = self.len - 1;
+            self.tags.copy_within(pos + 1..self.len, pos);
+
+            // Hand mirrors sieve_orig's `hand = victim.prev` — the SIEVE successor,
+            // which is now at `pos` after the shift (or wraps to 0 if victim was
+            // the head, since head has no .prev in sieve_orig).
+            self.hand = if pos < last { pos } else { 0 };
+
+            (Some((entry.key, entry.value)), last, id)
         };
 
-        if self.tail == self.tags.len() {
-            self.compact();
-        }
-
-        let pos = self.tail;
-        self.tail += 1;
-        self.tags[pos] = LIVE | (entry_id << Self::ID_SHIFT) | (needle & Self::HASH_MASK);
-        // SAFETY: entry_id is either an unused slot (warm-up) or one just freed by evict.
+        self.tags[write_pos] = LIVE | (entry_id << Self::ID_SHIFT) | (needle & Self::HASH_MASK);
+        // SAFETY: entry_id is either an unused warm-up slot or one just freed by evict.
         // Storage's entry field is at offset 0, so raw write reaches Entry directly.
         unsafe {
             std::ptr::write(self.entry_ptr_mut(entry_id as usize), Entry { key, value });
         }
-        self.len += 1;
 
         evicted
     }
 
-    /// SIEVE victim search; returns the freed entry_id.
-    fn evict_one_returning_id(&mut self) -> ((K, V), u16) {
-        debug_assert!(self.len > 0);
-        if self.hand >= self.tail {
+    /// SIEVE victim search over `tags[0..len]`. Two clearing passes (hand→len then
+    /// 0→hand) cover the whole live region; if every tag was VISITED, both passes
+    /// return None but every VISITED bit is now cleared, so any position is a
+    /// valid victim — we pick `self.hand`.
+    fn find_evict_pos(&mut self) -> usize {
+        debug_assert!(self.len > 0 && self.len == self.capacity);
+        if self.hand >= self.len {
             self.hand = 0;
         }
-
-        let pos = self
-            .scan_evict(self.hand, self.tail)
+        self.scan_evict(self.hand, self.len)
             .or_else(|| self.scan_evict(0, self.hand))
-            .or_else(|| self.first_live(self.hand, self.tail))
-            .or_else(|| self.first_live(0, self.hand))
-            .expect("len > 0 implies at least one live slot");
-        self.do_evict_returning_id(pos)
+            .unwrap_or(self.hand)
     }
 
     fn scan_evict(&mut self, lo: usize, hi: usize) -> Option<usize> {
-        debug_assert!(lo <= hi && hi <= self.tail);
+        debug_assert!(lo <= hi && hi <= self.len);
         for i in lo..hi {
             let t = self.tags[i];
-            if t == EMPTY {
-                continue;
-            }
+            // I4': tags[0..len] are all LIVE, so no EMPTY-skip branch needed.
+            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
             if t & VISITED != 0 {
                 self.tags[i] = t & !VISITED;
             } else {
@@ -402,84 +424,58 @@ where
         None
     }
 
-    fn first_live(&self, lo: usize, hi: usize) -> Option<usize> {
-        debug_assert!(lo <= hi && hi <= self.tail);
-        (lo..hi).find(|&i| self.tags[i] != EMPTY)
-    }
-
-    fn do_evict_returning_id(&mut self, pos: usize) -> ((K, V), u16) {
-        debug_assert!(self.tags[pos] != EMPTY);
-        let id = Self::id_of(self.tags[pos]) as u16;
-        // SAFETY: live ⟹ entries[id] initialized (I6). After read, entries[id] is uninit.
-        let entry = unsafe { std::ptr::read(self.entry_ptr(id as usize)) };
-        self.tags[pos] = EMPTY;
-        self.len -= 1;
-        self.hand = pos + 1;
-        if self.hand >= self.tail {
-            self.hand = 0;
-        }
-        ((entry.key, entry.value), id)
-    }
-
-    /// Compacts the tag array in place. The entries arena is untouched (id-based indexing).
-    fn compact(&mut self) {
-        let old_tail = self.tail;
-        let old_hand = self.hand.min(old_tail);
-        let mut new_hand: Option<usize> = None;
-        let mut write = 0usize;
-
-        for old_pos in 0..old_tail {
-            if self.tags[old_pos] == EMPTY {
-                continue;
-            }
-            if new_hand.is_none() && old_pos >= old_hand {
-                new_hand = Some(write);
-            }
-            if write != old_pos {
-                self.tags[write] = self.tags[old_pos];
-            }
-            write += 1;
-        }
-        for t in &mut self.tags[write..old_tail] {
-            *t = EMPTY;
-        }
-
-        self.tail = write;
-        self.hand = if self.len == 0 {
-            0
-        } else {
-            new_hand.unwrap_or(0)
-        };
-        debug_assert_eq!(self.len, write);
-    }
-
-    /// Removes `key` and returns its value. Slow path: O(per_shard) linear scan + swap.
+    /// Removes `key` and returns its value. Slow path: O(per_shard) shift + linear
+    /// scan for id swap.
     ///
-    /// **swap-to-fill-gap**: after removing `removed_id`, swaps it with `self.len - 1`
-    /// (the maximum live id) to restore I8 (live ids = `0..len`). This keeps the
-    /// free-list-free structure intact so the warm-up branch works correctly on next insert.
+    /// **Tag-level shift** (mirrors `sieve_orig`'s linked-list unlink): shifts
+    /// `tags[pos+1..len]` down by one and marks the freed end EMPTY. This preserves
+    /// the relative SIEVE order of all unaffected entries (= I4' is restored: no
+    /// holes in the live region).
+    ///
+    /// **Id-level swap-to-fill-gap**: after the shift, also swaps `removed_id` with
+    /// `self.len - 1` (the maximum live id) to restore I8 (live ids = `0..len`).
+    /// This keeps the free-list-free structure intact so the warm-up branch in
+    /// `insert` (`entry_id = self.len`) works correctly on the next insertion.
     fn remove(&mut self, key: &K, hash: u64, has_avx2_bmi1: bool) -> Option<V> {
         let needle = Self::needle_from_hash(hash);
         let pos = self.find(key, needle, has_avx2_bmi1)?;
         let removed_id = Self::id_of(self.tags[pos]);
 
-        // (1) Read Entry out of entries[removed_id], mark its tag EMPTY.
-        // SAFETY: live ⟹ entries[removed_id] initialized (I6). After read, slot is uninit.
+        // (1) Read Entry out of entries[removed_id]. After this, entries[removed_id]
+        // is logically uninitialized.
+        // SAFETY: live ⟹ entries[removed_id] initialized (I6).
         let entry = unsafe { std::ptr::read(self.entry_ptr(removed_id)) };
-        self.tags[pos] = EMPTY;
-        self.len -= 1;
 
-        // (2) Restore I8: move max_id (= self.len after decrement) into removed_id via swap.
+        // (2) Shift tags down, marking the new tail as EMPTY (preserves I4').
+        // After this, the live region is `tags[0..self.len - 1]`.
+        let last = self.len - 1;
+        self.tags.copy_within(pos + 1..self.len, pos);
+        self.tags[last] = EMPTY;
+        self.len = last;
+
+        // (3) Adjust hand for the shift. Tags at positions > pos shifted one
+        // slot down, so if hand was past pos it moves with its tag. When
+        // hand == pos, the shift brought the successor (pos+1) down to pos,
+        // so hand already points at the SIEVE successor — no adjustment
+        // needed (mirrors sieve_orig's `hand = node.prev`). Wrap at len.
+        if self.hand > pos {
+            self.hand -= 1;
+        }
+        if self.hand >= self.len {
+            self.hand = 0;
+        }
+
+        // (4) Restore I8: move entries[max_id] → entries[removed_id] via id swap.
+        // The owning tag (somewhere in tags[0..len]) gets its id field rewritten
+        // to point at the new slot.
         let max_id = self.len;
         if removed_id < max_id {
-            // Linear search for the live tag pointing to max_id (O(tail) ≤ O(2 × capacity) ≤ O(128)).
             let mut found = false;
-            for i in 0..self.tail {
+            for i in 0..self.len {
                 let t = self.tags[i];
                 if t & LIVE != 0 && Self::id_of(t) == max_id {
-                    // Move entries[max_id] → entries[removed_id].
                     // SAFETY: removed_id != max_id (guarded by the outer if), both initialized.
-                    // After read, max_id becomes uninit; its tag is rewritten to point to removed_id.
+                    // After read, entries[max_id] becomes uninit; its tag is rewritten.
                     unsafe {
                         let v = std::ptr::read(self.entry_ptr(max_id));
                         std::ptr::write(self.entry_ptr_mut(removed_id), v);
@@ -496,7 +492,6 @@ where
                 "live id {max_id} should be referenced by some live tag"
             );
         }
-        // The hand cursor needs no adjustment; existing EMPTY-skip logic handles it.
 
         Some(entry.value)
     }
@@ -505,14 +500,13 @@ where
 impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
     fn drop(&mut self) {
         // Enumerate live tags, extract their ids, and drop entries[id].
-        // I5 (unique ids) ensures no double-drop.
-        for i in 0..self.tail {
+        // I4' (no holes) + I5 (unique ids) ⟹ no skip and no double-drop.
+        for i in 0..self.len {
             let t = self.tags[i];
-            if t != EMPTY {
-                let id = Self::id_of(t);
-                // SAFETY: live ⟹ entries[id] initialized (I6).
-                unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
-            }
+            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
+            let id = Self::id_of(t);
+            // SAFETY: live ⟹ entries[id] initialized (I6).
+            unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
         }
     }
 }
@@ -1033,8 +1027,9 @@ mod tests {
         let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
         for k in 0..3_000u64 {
             let key = (k.wrapping_mul(2654435761)) % 128;
-            a.insert(key, key);
-            b.insert(key, key);
+            let ai = a.insert(key, key);
+            let bi = b.insert(key, key);
+            assert_eq!(ai, bi, "insert eviction mismatch step={k} key={key}");
             if k % 5 == 0 {
                 let rk = (k.wrapping_mul(11400714819323198485)) % 128;
                 let ar = a.remove(&rk);
