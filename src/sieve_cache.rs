@@ -1,24 +1,24 @@
-//! `senba::Cache` — j8 系列を SlotSize 抽象で padding 自動化したライブラリ向け
-//! SIEVE 実装。
+//! `senba::Cache` — library-grade SIEVE implementation built on the j8 series,
+//! with automatic padding via the `SlotSize` abstraction.
 //!
-//! 設計詳細は `docs/reports/2026-05-06-senba-sievecache-design.md`。
+//! Design details: `docs/reports/2026-05-06-senba-sievecache-design.md`.
 //!
-//! - 公開型: [`Cache`]`<K, V, S = Slot32, const SHARDS = 8>`
-//! - [`SlotSize`] は sealed trait、impl は [`Slot16`] / [`Slot32`] (default) / [`Slot64`]
-//! - entries arena の **stride を `S::SIZE` 固定** (= 自動 padding)。
-//!   `sizeof(Entry<K, V>) <= S::SIZE` を const-eval で要求し、違反は friendly error
-//! - j8 の c-hoist trick (`tag & ID_MASK = id × S::SIZE`) は SLOT 単位で同型に成立、
-//!   inner SIMD ループ短縮はそのまま流用
-//! - `remove` は per-shard rebuild (swap-to-fill-gap) で warm-up 不変条件 I8 を回復、
-//!   free_list を持たない構造を維持
+//! - Public type: [`Cache`]`<K, V, S = Slot32, const SHARDS = 8>`
+//! - [`SlotSize`] is a sealed trait; impls are [`Slot16`] / [`Slot32`] (default) / [`Slot64`]
+//! - The entries arena uses a **fixed stride of `S::SIZE`** (= automatic padding).
+//!   `sizeof(Entry<K, V>) <= S::SIZE` is enforced by const-eval with a friendly error message.
+//! - The j8 c-hoist trick (`tag & ID_MASK = id × S::SIZE`) holds identically at slot granularity;
+//!   the inner SIMD loop shortcut is reused as-is.
+//! - `remove` rebuilds the per-shard state via swap-to-fill-gap to restore warm-up invariant I8,
+//!   keeping the free-list-free structure intact.
 //!
-//! ## 不変条件 (j8 と同じ I1〜I8)
+//! ## Invariants (same as j8: I1–I8)
 //!
-//! - I4: live tag の集合 = `{ tags[i] : i < tail, tags[i] & LIVE != 0 }`、個数 = `len`
-//! - I5: live tag が指す entry_id の集合は重複なく、サイズ = `len`
-//! - I6: I5 集合の id についてのみ `entries[id]` の **`entry` フィールド** が init 済み
-//! - I7: I5 集合 ⊆ `0..capacity`
-//! - I8: live ids = `0..len` (warm-up 中、および remove 後に swap-to-fill-gap で回復)
+//! - I4: set of live tags = `{ tags[i] : i < tail, tags[i] & LIVE != 0 }`, count = `len`
+//! - I5: entry_ids referenced by live tags are unique, count = `len`
+//! - I6: only for ids in the I5 set is the **`entry` field** of `entries[id]` initialized
+//! - I7: I5 set ⊆ `0..capacity`
+//! - I8: live ids = `0..len` (maintained during warm-up and restored after remove via swap-to-fill-gap)
 
 use crate::hash::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
@@ -27,38 +27,38 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 const EMPTY: u16 = 0;
 const LIVE: u16 = 0x8000;
 const VISITED: u16 = 0x4000;
-/// AVX2 1 chunk = 32 byte = 16 u16 lane。
+/// AVX2 one chunk = 32 bytes = 16 u16 lanes.
 const LANE: usize = 16;
-/// 6-bit entry_id の構造的上限。per_shard はこの値以下でなければならない。
+/// Structural upper bound for 6-bit entry_id. per_shard must not exceed this.
 pub const MAX_PER_SHARD: usize = 64;
 
-// ---------------- SlotSize sealed trait + ZST 札 ----------------
+// ---------------- SlotSize sealed trait + ZST markers ----------------
 
 mod sealed {
     pub trait Sealed {}
 }
 
-/// entries arena 1 slot 分の stride (byte) を型レベルで指定する sealed trait。
+/// Sealed trait that specifies the stride (in bytes) of one slot in the entries arena at the type level.
 ///
-/// `S::SIZE` は常に 2 の冪。`Storage<E>` は内部で `#[repr(C)] union` を使い、
-/// `entry` フィールドを **オフセット 0** に置くことで、`*const Storage<E>` を
-/// `*const E` に reinterpret するだけで `E` に到達できることを保証する。
+/// `S::SIZE` is always a power of two. `Storage<E>` uses a `#[repr(C)] union` internally,
+/// placing the `entry` field at **offset 0**, so that reinterpreting `*const Storage<E>` as
+/// `*const E` reaches `E` directly.
 pub trait SlotSize: sealed::Sealed + 'static {
-    /// このブラケットの slot stride (byte)。常に 2 の冪。
+    /// Slot stride in bytes for this bracket. Always a power of two.
     const SIZE: usize;
-    /// ブラケットごとの記憶セル型。`size_of::<Storage<E>>() == SIZE` を保つように
-    /// 各 impl で union を使って定義する。
+    /// Per-bracket storage cell type. Each impl defines a union to ensure
+    /// `size_of::<Storage<E>>() == SIZE`.
     type Storage<E>: Sized;
 }
 
-/// `Slot16` ブラケット: stride = 16 byte。
-/// `(u32, u32)` `(u64, u64)` 等の小型 primitive 主流ケース。
+/// `Slot16` bracket: stride = 16 bytes.
+/// Typical for small primitive pairs such as `(u32, u32)` or `(u64, u64)`.
 pub struct Slot16;
-/// `Slot32` (default) ブラケット: stride = 32 byte。
-/// `(String, V_small)` `(Arc<str>, Arc<str>)` 等の string-cache 主流ケース。
+/// `Slot32` (default) bracket: stride = 32 bytes.
+/// Typical for string-cache use cases such as `(String, V_small)` or `(Arc<str>, Arc<str>)`.
 pub struct Slot32;
-/// `Slot64` ブラケット: stride = 64 byte。
-/// `(String, String)` `(K, V_struct_up_to_56B)` の重量ケース。
+/// `Slot64` bracket: stride = 64 bytes.
+/// For heavier entries such as `(String, String)` or `(K, V_struct_up_to_56B)`.
 pub struct Slot64;
 
 impl sealed::Sealed for Slot16 {}
@@ -103,62 +103,62 @@ struct Entry<K, V> {
     value: V,
 }
 
-/// 1 shard 分の SIEVE。j8 の `Inner<K, V>` を `S` で parametrize しただけ。
+/// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
 struct Inner<K, V, S: SlotSize> {
     capacity: usize,
-    /// 並列配列 #1: tag 列。`order_cap = 2 × capacity` の LANE 揃え (slack 持ち)。
+    /// Parallel array #1: tag array. `order_cap = 2 × capacity`, LANE-aligned (with slack).
     tags: Vec<u16>,
-    /// 並列配列 #2: entries arena。`capacity` (slack なし)。
-    /// id (= tag に埋め込んだ 6 bit) で indexing する。
-    /// `S::Storage<Entry<K, V>>` の sizeof は `S::SIZE` 固定 (`_STORAGE_SIZE_OK` で保証)。
+    /// Parallel array #2: entries arena. Size = `capacity` (no slack).
+    /// Indexed by the 6-bit id embedded in each tag.
+    /// `sizeof(S::Storage<Entry<K, V>>) == S::SIZE` is guaranteed by `_STORAGE_SIZE_OK`.
     entries: Vec<MaybeUninit<S::Storage<Entry<K, V>>>>,
-    /// tags への次挿入位置 (`0..=order_cap`)。
+    /// Next insertion position into tags (`0..=order_cap`).
     tail: usize,
-    /// SIEVE hand cursor (`0..=tail`)、tags 上を巡回。
+    /// SIEVE hand cursor (`0..=tail`), sweeping over tags.
     hand: usize,
-    /// 現在 live な entry 数 (= live tag 数)。
+    /// Number of currently live entries (= number of live tags).
     len: usize,
 }
 
 impl<K, V, S: SlotSize> Inner<K, V, S> {
-    /// const-eval: `sizeof(Entry<K, V>) <= S::SIZE`。
+    /// Const-eval: `sizeof(Entry<K, V>) <= S::SIZE`.
     const _SIZE_OK: () = assert!(
         std::mem::size_of::<Entry<K, V>>() <= S::SIZE,
         "senba::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
          Try a larger SlotSize (e.g. Slot64)."
     );
 
-    /// const-eval: `Storage<Entry>` の sizeof が `S::SIZE` ピッタリであること。
-    /// `Entry` の alignment が 8 を超える (= `repr(align(16))` 等) と union sizeof が
-    /// SLOT::SIZE を超えて切り上げられ、c-hoist 不変条件
-    /// (`tag & ID_MASK = id × S::SIZE`) が破綻する。これを compile-fail で防ぐ。
+    /// Const-eval: `sizeof(Storage<Entry>)` must equal `S::SIZE` exactly.
+    /// If `Entry`'s alignment exceeds 8 (e.g. `repr(align(16))`), the union sizeof
+    /// rounds up past `SLOT::SIZE`, breaking the c-hoist invariant
+    /// (`tag & ID_MASK = id × S::SIZE`). This catches that at compile time.
     const _STORAGE_SIZE_OK: () = assert!(
         std::mem::size_of::<<S as SlotSize>::Storage<Entry<K, V>>>() == S::SIZE,
         "senba::Cache: SlotStorage size differs from SlotSize::SIZE. \
          (likely caused by Entry alignment > 8 byte)"
     );
 
-    /// id (6 bit) を tag のどの bit 位置に置くか。bit pattern が
-    /// **`id × S::SIZE` の値と一致する** ように `log2(S::SIZE)` を取る。
+    /// Bit position of the id field (6 bits) within a tag.
+    /// Chosen as `log2(S::SIZE)` so that `id << ID_SHIFT == id × S::SIZE`.
     const ID_SHIFT: u32 = (S::SIZE as u32).trailing_zeros();
-    /// id 領域を覆う mask。`tag & ID_MASK = id × S::SIZE`
-    /// (= entries 内の byte offset) の関係が成立する。
+    /// Mask covering the id field. Invariant: `tag & ID_MASK == id × S::SIZE`
+    /// (= byte offset into the entries arena).
     const ID_MASK: u16 = ((MAX_PER_SHARD - 1) as u16) << Self::ID_SHIFT;
-    /// hash 領域を覆う mask (常にちょうど 8 bit 分散)。
+    /// Mask covering the hash field (always exactly 8 bits scattered).
     const HASH_MASK: u16 = 0x3FFF & !Self::ID_MASK;
-    /// SIMD scan の比較対象。visited と id を mask out して live + hash のみで突合。
+    /// Comparison target for SIMD scans: LIVE | HASH_MASK (visited and id are masked out).
     const SCAN_MASK: u16 = LIVE | Self::HASH_MASK;
 
-    /// tag から id (0..MAX_PER_SHARD) を抽出する。スカラー path / drop / evict 用。
+    /// Extracts the id (0..MAX_PER_SHARD) from a tag. Used by scalar path, drop, and evict.
     #[inline]
     fn id_of(tag: u16) -> usize {
         ((tag & Self::ID_MASK) >> Self::ID_SHIFT) as usize
     }
 
-    /// `entries[id]` の **`entry` フィールド** への raw pointer。
-    /// `#[repr(C)] union { entry: ManuallyDrop<E>, _pad: [u64; N] }` の
-    /// 第一フィールドはオフセット 0 なので `Storage<E>` の先頭 = `E` の先頭。
-    /// `MaybeUninit<T>` も同 layout を保つ。
+    /// Raw pointer to the **`entry` field** of `entries[id]`.
+    /// Because `#[repr(C)] union { entry: ManuallyDrop<E>, _pad: [u64; N] }` places
+    /// the first field at offset 0, the `Storage<E>` pointer is the same as `*const E`.
+    /// `MaybeUninit<T>` preserves this layout.
     #[inline]
     fn entry_ptr(&self, id: usize) -> *const Entry<K, V> {
         self.entries[id].as_ptr() as *const Entry<K, V>
@@ -175,7 +175,7 @@ where
     K: Hash + Eq,
 {
     fn new(capacity: usize) -> Self {
-        // const assert を実体化させる (参照しないと const eval が走らないため)。
+        // Materialize const asserts (they are not evaluated unless referenced).
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
 
@@ -198,7 +198,7 @@ where
         }
     }
 
-    /// 64-bit hash の上位 8 bit を tag の hash 部に流し込む (j8 と同型)。
+    /// Folds the top 8 bits of a 64-bit hash into the tag's hash field (same shape as j8).
     #[inline]
     fn needle_from_hash(hash: u64) -> u16 {
         let h = (hash >> 56) as u8;
@@ -229,7 +229,7 @@ where
         for (i, &t) in self.tags[..self.tail].iter().enumerate() {
             if (t & Self::SCAN_MASK) == needle {
                 let id = Self::id_of(t);
-                // SAFETY: live tag が指す id は I5/I6 より init 済み。
+                // SAFETY: a live tag implies entries[id] is initialized (I5/I6).
                 let e = unsafe { &*self.entry_ptr(id) };
                 if &e.key == key {
                     return Some(i);
@@ -239,8 +239,8 @@ where
         None
     }
 
-    /// AVX2 + BMI1 で `tags[..]` を SCAN_MASK 一致探索。j8 と同型、
-    /// c-hoist trick (`tag & ID_MASK = id × S::SIZE`) は SLOT 単位で成立。
+    /// AVX2 + BMI1 scan of `tags[..]` against SCAN_MASK. Same shape as j8;
+    /// the c-hoist trick (`tag & ID_MASK = id × S::SIZE`) holds at slot granularity.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_avx2(&self, key: &K, needle: u16) -> Option<usize> {
@@ -248,9 +248,9 @@ where
         let limit = self.tags.len();
         let tags_ptr = self.tags.as_ptr();
         let tags_byte_ptr = tags_ptr as *const u8;
-        // entries も byte ポインタで持つ。Storage<Entry> の sizeof = S::SIZE 固定なので
-        // `tag & ID_MASK = id × S::SIZE` がそのまま byte offset。
-        // Storage の第一フィールドは entry (offset 0) なので Entry に直接到達。
+        // Hold entries as a byte pointer. sizeof(Storage<Entry>) == S::SIZE (fixed),
+        // so `tag & ID_MASK` is directly the byte offset into the arena.
+        // Storage's first field is entry at offset 0, so we reach Entry directly.
         let entries_byte_ptr = self.entries.as_ptr() as *const u8;
         let needle_v = _mm256_set1_epi16(needle as i16);
         let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
@@ -269,9 +269,9 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let tag = unsafe { *(chunk_byte_ptr.add(bit) as *const u16) } as u32;
                 let id_bytes = (tag & id_mask_u32) as usize;
-                // SAFETY: live needle ⟹ tag live ⟹ entries[id] init (I6)、
-                // id_bytes = id × S::SIZE で id < capacity ⟹ 境界内。
-                // Storage は `#[repr(C)]` で entry がオフセット 0 → Entry へ直接到達可。
+                // SAFETY: live needle ⟹ tag live ⟹ entries[id] initialized (I6).
+                // id_bytes = id × S::SIZE and id < capacity ⟹ in bounds.
+                // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
                 let entry_ptr = unsafe {
                     entries_byte_ptr.add(id_bytes) as *const Entry<K, V>
                 };
@@ -297,7 +297,7 @@ where
         let pos = self.find(key, needle)?;
         self.tags[pos] |= VISITED;
         let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos は find が tag マッチを確認した位置 (= live)。
+        // SAFETY: pos was confirmed live by find.
         let e = unsafe { &*self.entry_ptr(id) };
         Some(&e.value)
     }
@@ -306,7 +306,7 @@ where
         let needle = Self::needle_from_hash(hash);
         if let Some(pos) = self.find(&key, needle) {
             let id = Self::id_of(self.tags[pos]);
-            // SAFETY: find が live を確認した。
+            // SAFETY: find confirmed the tag is live.
             let e = unsafe { &mut *self.entry_ptr_mut(id) };
             e.value = value;
             self.tags[pos] |= VISITED;
@@ -327,8 +327,8 @@ where
         let pos = self.tail;
         self.tail += 1;
         self.tags[pos] = LIVE | (entry_id << Self::ID_SHIFT) | (needle & Self::HASH_MASK);
-        // SAFETY: entry_id は warm-up なら未使用、steady なら直前 evict で uninit に
-        // 戻った slot。Storage の entry フィールドはオフセット 0 なので raw write。
+        // SAFETY: entry_id is either an unused slot (warm-up) or one just freed by evict.
+        // Storage's entry field is at offset 0, so raw write reaches Entry directly.
         unsafe {
             std::ptr::write(self.entry_ptr_mut(entry_id as usize), Entry { key, value });
         }
@@ -337,7 +337,7 @@ where
         evicted
     }
 
-    /// SIEVE の victim 探索 + freed entry_id を返す。
+    /// SIEVE victim search; returns the freed entry_id.
     fn evict_one_returning_id(&mut self) -> ((K, V), u16) {
         debug_assert!(self.len > 0);
         if self.hand >= self.tail {
@@ -377,7 +377,7 @@ where
     fn do_evict_returning_id(&mut self, pos: usize) -> ((K, V), u16) {
         debug_assert!(self.tags[pos] != EMPTY);
         let id = Self::id_of(self.tags[pos]) as u16;
-        // SAFETY: live ⟹ entries[id] init (I6)。read 後 entries[id] は uninit。
+        // SAFETY: live ⟹ entries[id] initialized (I6). After read, entries[id] is uninit.
         let entry = unsafe { std::ptr::read(self.entry_ptr(id as usize)) };
         self.tags[pos] = EMPTY;
         self.len -= 1;
@@ -388,7 +388,7 @@ where
         ((entry.key, entry.value), id)
     }
 
-    /// tags のみ前詰め。entries arena は不変 (= id-based indexing)。
+    /// Compacts the tag array in place. The entries arena is untouched (id-based indexing).
     fn compact(&mut self) {
         let old_tail = self.tail;
         let old_hand = self.hand.min(old_tail);
@@ -420,35 +420,33 @@ where
         debug_assert_eq!(self.len, write);
     }
 
-    /// `key` を削除して値を返す。slow-path: O(per_shard) 線形 scan + swap。
+    /// Removes `key` and returns its value. Slow path: O(per_shard) linear scan + swap.
     ///
-    /// **swap-to-fill-gap**: removed_id を `self.len - 1` (= 最大 live id) と
-    /// 物理 swap して I8 (live ids = `0..len`) を回復する。これにより free_list を
-    /// 持たない構造を維持し、次回 insert で warm-up branch がそのまま機能する。
+    /// **swap-to-fill-gap**: after removing `removed_id`, swaps it with `self.len - 1`
+    /// (the maximum live id) to restore I8 (live ids = `0..len`). This keeps the
+    /// free-list-free structure intact so the warm-up branch works correctly on next insert.
     fn remove(&mut self, key: &K, hash: u64) -> Option<V> {
         let needle = Self::needle_from_hash(hash);
         let pos = self.find(key, needle)?;
         let removed_id = Self::id_of(self.tags[pos]);
 
-        // (1) entries[removed_id] から Entry を取り出して破壊、tag を EMPTY に。
-        // SAFETY: live ⟹ entries[removed_id] init (I6)。read 後 uninit。
+        // (1) Read Entry out of entries[removed_id], mark its tag EMPTY.
+        // SAFETY: live ⟹ entries[removed_id] initialized (I6). After read, slot is uninit.
         let entry = unsafe { std::ptr::read(self.entry_ptr(removed_id)) };
         self.tags[pos] = EMPTY;
         self.len -= 1;
 
-        // (2) I8 を回復: max_id (= self.len、self.len-=1 後の最大 live id) を
-        //     removed_id に swap で詰める。
+        // (2) Restore I8: move max_id (= self.len after decrement) into removed_id via swap.
         let max_id = self.len;
         if removed_id < max_id {
-            // max_id を指す live tag を線形探索 (O(tail) ≤ O(2 × capacity) ≤ O(128))。
+            // Linear search for the live tag pointing to max_id (O(tail) ≤ O(2 × capacity) ≤ O(128)).
             let mut found = false;
             for i in 0..self.tail {
                 let t = self.tags[i];
                 if t & LIVE != 0 && Self::id_of(t) == max_id {
-                    // entries[max_id] → entries[removed_id] へ物理 move。
-                    // SAFETY: removed_id != max_id (上の if で保証)、両方 init 済。
-                    // read 後 max_id は uninit になり、対応 tag を EMPTY ではなく
-                    // id field 更新で「max_id を指していた tag が removed_id を指す」へ書き換え。
+                    // Move entries[max_id] → entries[removed_id].
+                    // SAFETY: removed_id != max_id (guarded by the outer if), both initialized.
+                    // After read, max_id becomes uninit; its tag is rewritten to point to removed_id.
                     unsafe {
                         let v = std::ptr::read(self.entry_ptr(max_id));
                         std::ptr::write(self.entry_ptr_mut(removed_id), v);
@@ -462,7 +460,7 @@ where
             }
             debug_assert!(found, "live id {max_id} should be referenced by some live tag");
         }
-        // hand カーソルは既存の EMPTY skip ロジックで処理されるので追加処理不要。
+        // The hand cursor needs no adjustment; existing EMPTY-skip logic handles it.
 
         Some(entry.value)
     }
@@ -470,29 +468,29 @@ where
 
 impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
     fn drop(&mut self) {
-        // tags scan で live tag を列挙し、id 抽出して entries[id] を drop。
-        // I5 (id 重複なし) より同じ entries[id] の二重 drop は起きない。
+        // Enumerate live tags, extract their ids, and drop entries[id].
+        // I5 (unique ids) ensures no double-drop.
         for i in 0..self.tail {
             let t = self.tags[i];
             if t != EMPTY {
                 let id = Self::id_of(t);
-                // SAFETY: live ⟹ entries[id] init (I6)。
+                // SAFETY: live ⟹ entries[id] initialized (I6).
                 unsafe { std::ptr::drop_in_place(self.entry_ptr_mut(id)) };
             }
         }
     }
 }
 
-// ---------------- 公開型 Cache ----------------
+// ---------------- Public type Cache ----------------
 
 pub const DEFAULT_SHARDS: usize = 8;
 
-/// publishable な SIEVE cache。`SlotSize` で entry stride を型レベル指定する。
+/// Publishable SIEVE cache. The entry stride is specified at the type level via `SlotSize`.
 ///
 /// ```
 /// use senba::Cache;
 ///
-/// // default Slot32: Entry<u64, String> (sizeof=32) で exact fit
+/// // default Slot32: Entry<u64, String> (sizeof=32) fits exactly
 /// let mut c: Cache<u64, String> = Cache::new(8);
 /// c.insert(1, "hello".into());
 /// assert_eq!(c.get(&1), Some(&"hello".to_string()));
@@ -580,8 +578,8 @@ mod tests {
 
     const TEST_SHARDS: usize = DEFAULT_SHARDS;
 
-    // sizeof(Entry<u64, u64>) = 16 → Slot16 / Slot32 / Slot64 全部適合。
-    // sizeof(Entry<i32, i32>) = 8  → Slot16 / Slot32 / Slot64 全部適合 (slack あり)。
+    // sizeof(Entry<u64, u64>) = 16 → fits Slot16 / Slot32 / Slot64.
+    // sizeof(Entry<i32, i32>) = 8  → fits all three (with slack).
 
     #[test]
     fn cache_initially_empty() {
@@ -686,8 +684,8 @@ mod tests {
         assert_eq!(alive, cap);
     }
 
-    /// bit layout の排他性 — Slot32 (default、Entry<u64,u64>=16) で確認。
-    /// Inner<u64, u64, Slot32> の ID_SHIFT = 5、ID_MASK = 0x07e0、HASH_MASK = 0x381f。
+    /// Verifies bit-field exclusivity for Slot32 (default, Entry<u64,u64>=16).
+    /// Inner<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x381f.
     #[test]
     fn bit_layout_exclusivity_slot32() {
         type I = Inner<u64, u64, Slot32>;
@@ -705,7 +703,7 @@ mod tests {
         assert_eq!(VISITED & I::HASH_MASK, 0);
         assert_eq!(I::ID_MASK & I::HASH_MASK, 0);
 
-        // c-hoist 不変条件: tag に id を埋めると `tag & ID_MASK = id × S::SIZE`。
+        // c-hoist invariant: embedding id into a tag gives `tag & ID_MASK = id × S::SIZE`.
         for id in 0..MAX_PER_SHARD {
             let tag_id_field = (id as u16) << I::ID_SHIFT;
             assert_eq!((tag_id_field & I::ID_MASK) as usize, id * Slot32::SIZE);
@@ -728,7 +726,7 @@ mod tests {
         assert_eq!(I::HASH_MASK, 0x303f);
     }
 
-    /// hash spread injectivity for 3 brackets。
+    /// Hash spread injectivity across all three brackets.
     #[test]
     fn needle_spread_is_injective_all_slots() {
         for slot_id in 0..3 {
@@ -775,7 +773,7 @@ mod tests {
             c.insert(format!("k{k}"), format!("v{k}"));
         }
         assert_eq!(c.len(), cap);
-        // 直近に挿入した key は残っているはず (per-shard 内で SIEVE が選別)。
+        // Recently inserted keys should survive (SIEVE selects within each shard).
         let alive = (0..200u64)
             .filter(|k| c.get(&format!("k{k}")) == Some(&format!("v{k}")))
             .count();
@@ -803,8 +801,8 @@ mod tests {
         assert_eq!(c.len(), 1);
     }
 
-    /// remove 後に I8 (live ids = 0..len) が回復していて次回 insert で
-    /// warm-up branch (`entry_id = self.len`) が機能することを確認。
+    /// After remove, I8 (live ids = 0..len) must be restored so that
+    /// the warm-up branch (`entry_id = self.len`) works correctly on the next insert.
     #[test]
     fn remove_then_insert_reuses_id() {
         let mut c: Cache<u64, u64, Slot32, 1> = Cache::new(4);
@@ -814,15 +812,15 @@ mod tests {
         c.insert(4, 400);
         assert_eq!(c.len(), 4);
 
-        // remove で len=3 に。I8 は swap-to-fill-gap で回復。
+        // remove reduces len to 3; swap-to-fill-gap restores I8.
         assert_eq!(c.remove(&2), Some(200));
         assert_eq!(c.len(), 3);
 
-        // 続けて 5 個目を insert (warm-up branch、evict なしのはず)。
+        // Insert a 5th entry via the warm-up branch (no eviction expected).
         assert_eq!(c.insert(5, 500), None);
         assert_eq!(c.len(), 4);
 
-        // 1, 3, 4, 5 が live、2 だけ消えている。
+        // 1, 3, 4, 5 are live; 2 is gone.
         assert_eq!(c.get(&1), Some(&100));
         assert_eq!(c.get(&2), None);
         assert_eq!(c.get(&3), Some(&300));
@@ -830,14 +828,14 @@ mod tests {
         assert_eq!(c.get(&5), Some(&500));
     }
 
-    /// 末尾 id を remove するケース (swap 不要 path)。
+    /// Removing the entry with the maximum id (no swap needed).
     #[test]
     fn remove_max_id_no_swap() {
         let mut c: Cache<u64, u64, Slot32, 1> = Cache::new(4);
         c.insert(1, 100);
         c.insert(2, 200);
         c.insert(3, 300);
-        // 最後に入った key 3 は (warm-up なら) id=2。
+        // With warm-up ordering, key 3 gets id=2 (the max).
         assert_eq!(c.remove(&3), Some(300));
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(&1), Some(&100));
@@ -845,31 +843,31 @@ mod tests {
         assert_eq!(c.get(&3), None);
     }
 
-    /// remove → insert を繰り返しても破綻しない。
+    /// Repeated remove → insert cycles must not corrupt state.
     #[test]
     fn remove_insert_churn() {
         let mut c: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
         for k in 0..100u64 {
             c.insert(k, k * 11);
         }
-        // 偶数 key を全部 remove。
+        // Remove all even keys.
         for k in (0..100u64).step_by(2) {
             let _ = c.remove(&k);
         }
-        // 奇数 key だけ残っているはず (cap 内に入る数だけ)。
+        // Only odd keys may remain (up to capacity).
         let alive: usize = (1..100u64)
             .step_by(2)
             .filter(|k| c.get(k) == Some(&(k * 11)))
             .count();
         assert!(alive > 0);
-        // 新規 insert もできる。
+        // New inserts must succeed.
         for k in 200..220u64 {
             c.insert(k, k);
         }
         assert!(c.len() <= TEST_SHARDS * 4);
     }
 
-    /// sieve_orig (oracle) と insert/get 列が一致 — 1 shard で SIEVE 意味論検証。
+    /// Cross-checks insert/get behavior against sieve_orig (oracle) with a single shard.
     #[test]
     fn matches_sieve_orig_externally_1shard() {
         use crate::sieve_orig::SieveCache as Orig;
@@ -885,12 +883,12 @@ mod tests {
             assert_eq!(
                 a.get(&k).copied(),
                 b.get(&k).copied(),
-                "1-shard で sieve_orig と senba::Cache が key {k} で食い違う"
+                "1-shard mismatch with sieve_orig at key {k}"
             );
         }
     }
 
-    /// 3 ブラケット (Slot16/32/64) で sieve_orig と意味論一致 (`Entry<u64,u64>` は全部適合)。
+    /// All three brackets (Slot16/32/64) must match sieve_orig semantics for Entry<u64,u64>.
     #[test]
     fn matches_sieve_orig_per_slot() {
         use crate::sieve_orig::SieveCache as Orig;
@@ -914,7 +912,7 @@ mod tests {
         }
     }
 
-    /// remove を含めた sieve_orig との外部一致 (orig は remove API を持つ)。
+    /// Cross-checks remove behavior against sieve_orig with interleaved operations.
     #[test]
     fn remove_during_churn_oracle_match() {
         use crate::sieve_orig::SieveCache as Orig;
@@ -923,11 +921,8 @@ mod tests {
         let mut b: Cache<u64, u64, Slot32, 1> = Cache::new(cap);
         for k in 0..3_000u64 {
             let key = (k.wrapping_mul(2654435761)) % 128;
-            // sieve_orig.insert は (K,V) を返す API か LRU 半順序があるか実装依存。
-            // ここでは get/remove を厳密一致確認、insert は両側に流す。
             a.insert(key, key);
             b.insert(key, key);
-            // 5 step ごとに remove を混ぜる。
             if k % 5 == 0 {
                 let rk = (k.wrapping_mul(11400714819323198485)) % 128;
                 let ar = a.remove(&rk);
@@ -958,16 +953,16 @@ mod tests {
 
     #[test]
     fn drop_runs_for_live_entries_only() {
-        // String value で drop の正当性 (二重 drop / leak の不在) を確認。
+        // String values exercise drop correctness (no double-drop, no leak).
         let mut cache: Cache<u64, String> = Cache::new(TEST_SHARDS * 2);
         for k in 0..64u64 {
             cache.insert(k, format!("value-{k}"));
         }
         assert_eq!(cache.len(), TEST_SHARDS * 2);
-        // remove も drop の経路。
+        // remove also exercises the drop path.
         for k in 0..16u64 {
             let _ = cache.remove(&k);
         }
-        // Cache drop で残りも回収される。
+        // Remaining entries are dropped when Cache goes out of scope.
     }
 }

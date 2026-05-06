@@ -20,6 +20,7 @@ cargo clippy         # lint
 
 ## Conventions
 
+- Write all source code (identifiers, comments, doc comments) in **English**. Reports and other documentation do not need to be in English.
 - When including assembly in code, comments, or reports, use **Intel syntax** (e.g. `mov rax, [rdi]`), not AT&T.
 
 ## Architecture
