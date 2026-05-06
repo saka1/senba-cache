@@ -1150,6 +1150,36 @@ where
     }
 }
 
+impl<K, V, S, H> Extend<(K, V)> for Cache<K, V, S, H>
+where
+    K: Hash + Eq,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    /// Inserts every `(K, V)` from `iter` via [`Cache::insert`]. Pairs evicted
+    /// by capacity pressure during the loop are dropped silently; if you need
+    /// to observe them, call `insert` yourself in a loop.
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+impl<'a, K, V, S, H> Extend<(&'a K, &'a V)> for Cache<K, V, S, H>
+where
+    K: Hash + Eq + Copy,
+    V: Copy,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    fn extend<I: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(*k, *v);
+        }
+    }
+}
+
 /// Iterator over a [`Cache`] yielding `(&K, &V)` pairs. Created by [`Cache::iter`].
 pub struct Iter<'a, K, V, S: SlotSize> {
     shards: &'a [Inner<K, V, S>],
