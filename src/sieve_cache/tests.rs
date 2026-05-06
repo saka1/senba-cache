@@ -576,6 +576,58 @@ fn iter_does_not_promote() {
     assert_eq!(evicted, Some((1, 10)));
 }
 
+// ---------------- iter_mut / keys / values ----------------
+
+#[test]
+fn iter_mut_yields_all_live_entries_and_allows_mutation() {
+    use std::collections::HashSet;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    for k in 0..16u64 {
+        cache.insert(k, k * 10);
+    }
+    for (_, v) in cache.iter_mut() {
+        *v += 1;
+    }
+    let collected: HashSet<(u64, u64)> = cache.iter().map(|(&k, &v)| (k, v)).collect();
+    let expected: HashSet<(u64, u64)> = (0..16u64).map(|k| (k, k * 10 + 1)).collect();
+    assert_eq!(collected, expected);
+}
+
+#[test]
+fn iter_mut_does_not_promote() {
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    for (_, v) in cache.iter_mut() {
+        *v += 100;
+    }
+    // SIEVE-oldest unvisited entry is still 1 — mutation through iter_mut
+    // must not have set VISITED.
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((1, 110)));
+}
+
+#[test]
+fn iter_mut_empty_yields_nothing() {
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    assert_eq!(cache.iter_mut().count(), 0);
+}
+
+#[test]
+fn keys_and_values_match_iter() {
+    use std::collections::HashSet;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    for k in 0..10u64 {
+        cache.insert(k, k * 7);
+    }
+    let ks: HashSet<u64> = cache.keys().copied().collect();
+    let vs: HashSet<u64> = cache.values().copied().collect();
+    let expected_k: HashSet<u64> = (0..10u64).collect();
+    let expected_v: HashSet<u64> = (0..10u64).map(|k| k * 7).collect();
+    assert_eq!(ks, expected_k);
+    assert_eq!(vs, expected_v);
+}
+
 // ---------------- get_or_insert_with ----------------
 
 #[test]

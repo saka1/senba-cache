@@ -34,6 +34,7 @@ use crate::hash::Xxh3Build;
 use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
 use std::mem::{ManuallyDrop, MaybeUninit};
 
 const EMPTY: u16 = 0;
@@ -1022,6 +1023,33 @@ where
         }
     }
 
+    /// Returns an iterator over `(&K, &mut V)` pairs across all shards.
+    /// Iteration order matches [`Cache::iter`] and is non-promoting (no
+    /// VISITED bit is set on visited entries). Mutating values through this
+    /// iterator does not change SIEVE eviction priority.
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
+        let n = self.shards.len();
+        IterMut {
+            shards: self.shards.as_mut_ptr(),
+            n_shards: n,
+            shard_idx: 0,
+            slot_idx: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns an iterator over `&K` for every live entry. Same order and
+    /// non-promoting semantics as [`Cache::iter`].
+    pub fn keys(&self) -> Keys<'_, K, V, S> {
+        Keys { iter: self.iter() }
+    }
+
+    /// Returns an iterator over `&V` for every live entry. Same order and
+    /// non-promoting semantics as [`Cache::iter`].
+    pub fn values(&self) -> Values<'_, K, V, S> {
+        Values { iter: self.iter() }
+    }
+
     /// Returns a reference to the value for `key`, or inserts the result of
     /// `f()` and returns a reference to it. The closure is only evaluated on
     /// a miss. On a hit, the entry's VISITED bit is set (same as `get`).
@@ -1121,6 +1149,103 @@ impl<'a, K, V, S: SlotSize> Iterator for Iter<'a, K, V, S> {
             let e = unsafe { &*sh.entry_ptr(id) };
             return Some((&e.key, &e.value));
         }
+    }
+}
+
+/// Mutable iterator over a [`Cache`] yielding `(&K, &mut V)` pairs. Created by [`Cache::iter_mut`].
+///
+/// Holds a raw pointer to the cache's shard array plus a `PhantomData<&'a mut [Inner]>`
+/// to encode the exclusive borrow at the type level. The implementation walks
+/// shards via raw pointer arithmetic and reads `len` / `tags[i]` through
+/// `addr_of!` projections so that no intermediate `&mut Inner` ever exists
+/// while a previously-yielded `&'a mut V` is alive — `&mut Inner` would
+/// otherwise claim unique access to bytes the caller still holds a borrow into.
+pub struct IterMut<'a, K, V, S: SlotSize> {
+    shards: *mut Inner<K, V, S>,
+    n_shards: usize,
+    shard_idx: usize,
+    slot_idx: usize,
+    _marker: PhantomData<&'a mut [Inner<K, V, S>]>,
+}
+
+// SAFETY: IterMut is morally `&'a mut [Inner<K, V, S>]` — same Send/Sync
+// bounds as the underlying mutable slice reference.
+unsafe impl<K: Send, V: Send, S: SlotSize> Send for IterMut<'_, K, V, S> {}
+unsafe impl<K: Sync, V: Sync, S: SlotSize> Sync for IterMut<'_, K, V, S> {}
+
+impl<'a, K, V, S: SlotSize> Iterator for IterMut<'a, K, V, S> {
+    type Item = (&'a K, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.shard_idx >= self.n_shards {
+                return None;
+            }
+            // SAFETY: shards points into the cache's Box<[Inner]> for which we
+            // hold an exclusive borrow (encoded in `_marker`). shard_idx is
+            // bounded by n_shards.
+            let sh: *mut Inner<K, V, S> = unsafe { self.shards.add(self.shard_idx) };
+            // SAFETY: addr_of! produces a raw pointer to the field without
+            // forming any intermediate reference, so the read does not alias
+            // previously yielded `&mut V` borrows into entries[id].
+            let len = unsafe { std::ptr::addr_of!((*sh).len).read() };
+            if self.slot_idx >= len {
+                self.shard_idx += 1;
+                self.slot_idx = 0;
+                continue;
+            }
+            let i = self.slot_idx;
+            self.slot_idx += 1;
+            // SAFETY: tags[0..len] are LIVE (I4'). We read the u16 through the
+            // Vec's data pointer; the brief shared reborrow of `Vec<u16>` to
+            // call `as_ptr` covers the Vec metadata bytes inside Inner, which
+            // are disjoint from the entries arena's heap allocation where any
+            // outstanding `&mut V` lives.
+            let tag = unsafe {
+                let tags_field = std::ptr::addr_of!((*sh).tags);
+                let data = (*tags_field).as_ptr();
+                *data.add(i)
+            };
+            let id = Inner::<K, V, S>::id_of(tag);
+            // SAFETY: same disjoint-fields argument for the entries Vec
+            // metadata. `entries[id]` is initialized (I6) because the tag is
+            // LIVE. Distinct (shard_idx, id) pairs across iterations means
+            // yielded `&mut V`s do not alias each other.
+            let entry_ptr: *mut Entry<K, V> = unsafe {
+                let entries_field = std::ptr::addr_of_mut!((*sh).entries);
+                (*entries_field).as_mut_ptr().add(id) as *mut Entry<K, V>
+            };
+            // SAFETY: entry_ptr is a unique, valid pointer to an initialized
+            // Entry; reborrowing as &'a (key) and &'a mut (value) is sound for
+            // the rest of the iterator's lifetime.
+            let key: &'a K = unsafe { &*std::ptr::addr_of!((*entry_ptr).key) };
+            let value: &'a mut V = unsafe { &mut *std::ptr::addr_of_mut!((*entry_ptr).value) };
+            return Some((key, value));
+        }
+    }
+}
+
+/// Iterator over a [`Cache`]'s keys. Created by [`Cache::keys`].
+pub struct Keys<'a, K, V, S: SlotSize> {
+    iter: Iter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S: SlotSize> Iterator for Keys<'a, K, V, S> {
+    type Item = &'a K;
+    fn next(&mut self) -> Option<&'a K> {
+        self.iter.next().map(|(k, _)| k)
+    }
+}
+
+/// Iterator over a [`Cache`]'s values. Created by [`Cache::values`].
+pub struct Values<'a, K, V, S: SlotSize> {
+    iter: Iter<'a, K, V, S>,
+}
+
+impl<'a, K, V, S: SlotSize> Iterator for Values<'a, K, V, S> {
+    type Item = &'a V;
+    fn next(&mut self) -> Option<&'a V> {
+        self.iter.next().map(|(_, v)| v)
     }
 }
 
