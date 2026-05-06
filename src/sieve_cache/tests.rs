@@ -628,6 +628,33 @@ fn keys_and_values_match_iter() {
     assert_eq!(vs, expected_v);
 }
 
+// ---------------- IntoIterator ----------------
+
+#[test]
+fn into_iter_ref_matches_iter() {
+    use std::collections::HashSet;
+    let mut cache: Cache<u64, u64> = Cache::new(TEST_SHARDS * 4);
+    for k in 0..12u64 {
+        cache.insert(k, k * 3);
+    }
+    let via_for: HashSet<(u64, u64)> = (&cache).into_iter().map(|(&k, &v)| (k, v)).collect();
+    let via_iter: HashSet<(u64, u64)> = cache.iter().map(|(&k, &v)| (k, v)).collect();
+    assert_eq!(via_for, via_iter);
+}
+
+#[test]
+fn into_iter_mut_allows_mutation_and_does_not_promote() {
+    let mut cache: Cache<u64, u64, Slot32> = Cache::with_shards(2, 1);
+    cache.insert(1, 10);
+    cache.insert(2, 20);
+    for (_, v) in &mut cache {
+        *v += 100;
+    }
+    // VISITED must not be set by IntoIterator-for-&mut: SIEVE-oldest is still 1.
+    let evicted = cache.insert(3, 30);
+    assert_eq!(evicted, Some((1, 110)));
+}
+
 // ---------------- get_or_insert_with ----------------
 
 #[test]

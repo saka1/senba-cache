@@ -1122,6 +1122,34 @@ where
     }
 }
 
+impl<'a, K, V, S, H> IntoIterator for &'a Cache<K, V, S, H>
+where
+    K: Hash + Eq,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    type Item = (&'a K, &'a V);
+    type IntoIter = Iter<'a, K, V, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, K, V, S, H> IntoIterator for &'a mut Cache<K, V, S, H>
+where
+    K: Hash + Eq,
+    S: SlotSize,
+    H: BuildHasher,
+{
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = IterMut<'a, K, V, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 /// Iterator over a [`Cache`] yielding `(&K, &V)` pairs. Created by [`Cache::iter`].
 pub struct Iter<'a, K, V, S: SlotSize> {
     shards: &'a [Inner<K, V, S>],
