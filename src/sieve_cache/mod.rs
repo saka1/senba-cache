@@ -30,17 +30,18 @@
 //! - I7: I5 set ⊆ `0..capacity`
 //! - I8: live ids = `0..len` (maintained during warm-up and restored after remove via swap-to-fill-gap)
 
-use crate::hash::Xxh3Build;
 use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
+pub mod hash;
 mod iter;
 mod slot;
 mod stats;
 
+pub use hash::Xxh3Build;
 pub use iter::{Drain, Iter, IterMut, Keys, Values};
 pub use slot::{Slot16, Slot32, Slot64, SlotSize};
 pub use stats::Stats;

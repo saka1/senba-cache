@@ -92,7 +92,7 @@
 //!
 //! I8 が `entry_id = self.len` (warm-up 時) の正当性を担保する。
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 
@@ -843,7 +843,7 @@ mod tests {
     /// j8 の per_shard <= 64 制約に合わせて cap=64 でテストする。
     #[test]
     fn matches_sieve_orig_externally_1shard() {
-        use crate::sieve_orig::SieveCache as Orig;
+        use crate::experimental::sieve_orig::SieveCache as Orig;
         let cap = 64usize;
         let mut a: Orig<u64, u64> = Orig::new(cap);
         let mut b: SieveCache<u64, u64, 1> = SieveCache::new(cap);

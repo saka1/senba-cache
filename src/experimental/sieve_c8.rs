@@ -121,7 +121,7 @@
 //! - `hand: usize` は writer のみ参照 → `Mutex<WriterState>` 配下
 //! - `find_scalar` / `find_avx2`: 候補 1 件ごとに seqlock dance + Copy 読み
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::hash::{BuildHasher, Hash};
@@ -896,7 +896,7 @@ mod tests {
     /// シングルスレッドなので race なし → bit-exact 期待可能。
     #[test]
     fn matches_sieve_orig_externally_1shard() {
-        use crate::sieve_orig::SieveCache as Orig;
+        use crate::experimental::sieve_orig::SieveCache as Orig;
         let cap = 64usize;
         let mut a: Orig<u64, u64> = Orig::new(cap);
         let b: ConcurrentSieveCache<u64, u64, 1> = ConcurrentSieveCache::new(cap);

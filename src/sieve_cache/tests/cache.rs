@@ -195,7 +195,7 @@ fn remove_insert_churn() {
 #[test]
 #[cfg(feature = "experimental")]
 fn matches_sieve_orig_externally_1shard() {
-    use crate::sieve_orig::SieveCache as Orig;
+    use crate::experimental::sieve_orig::SieveCache as Orig;
     let cap = 64usize;
     let mut a: Orig<u64, u64> = Orig::new(cap);
     let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
@@ -217,7 +217,7 @@ fn matches_sieve_orig_externally_1shard() {
 #[test]
 #[cfg(feature = "experimental")]
 fn matches_sieve_orig_per_slot() {
-    use crate::sieve_orig::SieveCache as Orig;
+    use crate::experimental::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
     let mut oracle: Orig<u64, u64> = Orig::new(cap);
     let mut s16: Cache<u64, u64, Slot16> = Cache::with_shards(cap, 1);
@@ -242,7 +242,7 @@ fn matches_sieve_orig_per_slot() {
 #[test]
 #[cfg(feature = "experimental")]
 fn remove_during_churn_oracle_match() {
-    use crate::sieve_orig::SieveCache as Orig;
+    use crate::experimental::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
     let mut a: Orig<u64, u64> = Orig::new(cap);
     let mut b: Cache<u64, u64, Slot32> = Cache::with_shards(cap, 1);
@@ -274,7 +274,7 @@ fn remove_during_churn_oracle_match() {
 #[test]
 #[cfg(feature = "experimental")]
 fn find_avx2_low_fill_matches_oracle() {
-    use crate::sieve_orig::SieveCache as Orig;
+    use crate::experimental::sieve_orig::SieveCache as Orig;
     // capacity 64 → order_cap = round_up(128, 16) = 128. With only a handful of
     // keys inserted, `tail` stays well below `tags.len()` and the SIMD upper
     // bound differs sharply from the old `tags.len()` bound.
@@ -620,7 +620,7 @@ fn retain_restores_i8() {
 #[test]
 #[cfg(feature = "experimental")]
 fn retain_matches_remove_loop_for_eviction_order() {
-    use crate::sieve_orig::SieveCache as Orig;
+    use crate::experimental::sieve_orig::SieveCache as Orig;
     let cap = 32usize;
 
     // Fill both with the same trace.

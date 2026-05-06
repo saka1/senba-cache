@@ -1,6 +1,6 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use senba_cache::CacheImpl;
-use senba_cache::sieve_orig::SieveCache as Orig;
+use senba_cache::experimental::sieve_orig::SieveCache as Orig;
 // use senba_cache::experimental::sieve_v0::SieveCache as V0;
 // use senba_cache::experimental::sieve_v1::SieveCache as V1;
 // use senba_cache::experimental::sieve_v2::SieveCache as V2;

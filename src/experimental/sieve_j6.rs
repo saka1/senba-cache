@@ -52,7 +52,7 @@
 //! - `order_cap = max(32, ceil_to_32(2 * capacity))` (j3/j5 と同じ)
 //! - `Entry` から `visited: bool` が消えているので K=V=u64 で 16 B (padding 0)
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 

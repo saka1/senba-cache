@@ -16,7 +16,7 @@
 //!   「値そのものに NULL 情報が乗る」という C ポインタの性質に近く、
 //!   かつ 4B/リンクで詰められる。
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::MaybeUninit;

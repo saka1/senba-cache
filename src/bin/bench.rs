@@ -25,7 +25,7 @@ use senba_cache::CacheImpl;
 use senba_cache::Cache as Senba;
 use senba_cache::experimental::sieve_j7::SieveCache as J7;
 use senba_cache::experimental::sieve_j8::SieveCache as J8;
-use senba_cache::sieve_orig::SieveCache as Orig;
+use senba_cache::experimental::sieve_orig::SieveCache as Orig;
 
 /// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
 /// thin wrapper。bench でのみ使うので bench.rs 内に閉じる。

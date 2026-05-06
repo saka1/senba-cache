@@ -15,7 +15,7 @@
 //!
 //! `order` の `Option` は v2 と同じ理由で外す: tombstone bitmap が同じ情報を持つ。
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;

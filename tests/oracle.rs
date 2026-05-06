@@ -5,8 +5,7 @@ use senba_cache::workload::file;
 use senba_cache::workload::zipf::ZipfGen;
 use senba_cache::{
     CacheImpl,
-    experimental::{sieve_j3, sieve_j8, sieve_v0, sieve_v1, sieve_v2, sieve_v3},
-    sieve_orig,
+    experimental::{sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3},
 };
 
 fn run<C: CacheImpl<u64, u64>>(

@@ -2,33 +2,25 @@
 name = "senba-cache"
 version = "0.1.0"
 edition = "2024"
-# Keep the crates.io payload focused on the publishable surface. Research
-# modules, oracle / experimental drivers, internal design notes, and
-# vendored references are excluded — they remain in the repository for
-# development but are not shipped to consumers.
-exclude = [
-    "src/experimental/",
-    "src/sieve_orig.rs",
-    "src/bin/",
-    "benches/micro.rs",
-    "tests/oracle.rs",
-    "external/",
-    "profiles/",
-    "scripts/",
-    "docs/reports/",
-    "docs/figures/",
-    "docs/superpowers/",
-    "docs/api-comparison.md",
-    "docs/improvement-ideas.md",
-    "docs/sieve-paper-workload.md",
-    "CLAUDE.md",
-    ".claude/",
+# Allowlist the crates.io payload. Everything outside `src/sieve_cache/`
+# (research variants under `src/experimental/`, `src/sieve_orig.rs`,
+# `src/workload/`, research drivers under `src/bin/`, oracle tests,
+# vendored references, design notes) stays in the repo for development
+# but is not shipped to consumers. `include` is intentionally chosen
+# over `exclude` so adding new research files cannot accidentally leak
+# into the published crate.
+include = [
+    "src/lib.rs",
+    "src/sieve_cache/**/*.rs",
+    "Cargo.toml",
+    "/README.md",
 ]
 
 [dependencies]
-rand = "0.10"
-rand_distr = "0.6"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Used by `src/workload/` (Zipf generator) — research only.
+rand = { version = "0.10", optional = true }
+rand_distr = { version = "0.6", optional = true }
 # W-TinyLFU 比較用 (bench からのみ参照)。moka 本体ではなく mini-moka を選ぶのは
 # synchronous + background thread 無しで CPU を奪われない公平条件を作るため。
 mini-moka = { version = "0.10", optional = true }
@@ -45,11 +37,19 @@ criterion = { version = "0.8", default-features = false }
 
 [features]
 # Enables the research / dev surface: `experimental` module (historical
-# SIEVE variants), `sieve_orig` (oracle reference port), the `CacheImpl`
-# trait used by the cross-variant test / bench drivers, and the `impl
-# CacheImpl for Cache` adapter. The publishable surface (`Cache`, `Drain`,
-# `Stats`, `SlotSize`, `hash`, `workload`) is unaffected by this flag.
-experimental = ["dep:mini-moka", "dep:moka", "dep:parking_lot"]
+# SIEVE variants), `sieve_orig` (oracle reference port), `workload`
+# (Zipf / trace replay), the `CacheImpl` trait used by the cross-variant
+# test / bench drivers, and the `impl CacheImpl for Cache` adapter. The
+# publishable surface (`Cache`, `Drain`, `Stats`, `SlotSize`, and the
+# `sieve_cache::hash::Xxh3Build` default hasher) is unaffected by this
+# flag.
+experimental = [
+    "dep:mini-moka",
+    "dep:moka",
+    "dep:parking_lot",
+    "dep:rand",
+    "dep:rand_distr",
+]
 
 [[bench]]
 name = "micro"
@@ -59,10 +59,12 @@ required-features = ["experimental"]
 # Performance regression bench for the library-grade `senba_cache::Cache`
 # (sieve_cache.rs). Quality-gate companion to `cargo test`: fast (~10s),
 # narrow scenario set, fixed seeds, intended for `--save-baseline` /
-# `--baseline` comparison. See benches/sieve_cache_perf.rs and CLAUDE.md.
+# `--baseline` comparison. Depends on `senba_cache::workload` (Zipf), so
+# requires the `experimental` feature.
 [[bench]]
 name = "sieve_cache_perf"
 harness = false
+required-features = ["experimental"]
 
 # Research drivers — both consume `senba_cache::CacheImpl` and the
 # `experimental` / `sieve_orig` modules. Listing them explicitly disables
@@ -83,6 +85,7 @@ required-features = ["experimental"]
 # bench は release プロファイルから派生するので両方に入れておく。
 [profile.release]
 debug = "line-tables-only"
+lto = "thin"
 
 [profile.bench]
 debug = "line-tables-only"

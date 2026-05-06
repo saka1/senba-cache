@@ -50,7 +50,7 @@
 //! - `order_cap = max(16, ceil_to_16(2 * capacity))`
 //!   (AVX2 1 chunk = 16 u16 lane に切り上げて末尾 scalar 落ちを防ぐ)
 
-use crate::hash::Xxh3Build;
+use crate::sieve_cache::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 

@@ -12,11 +12,13 @@ The NSDI'24 paper is at https://yazhuozhang.com/assets/publication/nsdi24-sieve.
 
 ## Feature flags
 
-The crate has one feature, `experimental`, which gates the research /
-dev surface (`src/experimental/`, `src/sieve_orig.rs`, the `CacheImpl`
-trait, and the `impl CacheImpl for Cache` adapter). The publishable
-surface (`Cache`, `Drain`, `Stats`, `SlotSize`, `hash`, `workload`)
-compiles on default features.
+The crate has one feature, `experimental`, which gates the entire
+research / dev surface — `src/experimental/` (historical variants +
+`sieve_orig` oracle port + the `CacheImpl` trait), `src/workload/`
+(Zipf / trace replay), and the `impl CacheImpl for Cache` adapter on
+the library `Cache`. The publishable surface (`Cache`, `Drain`,
+`Stats`, `SlotSize`, and `sieve_cache::hash::Xxh3Build`) compiles on
+default features and is the *only* thing under `src/sieve_cache/`.
 
 Targets that depend on the research surface have `required-features =
 ["experimental"]` in `Cargo.toml` and **silently skip** without it:
@@ -25,14 +27,15 @@ Targets that depend on the research surface have `required-features =
 | ------------------------------- | :--------------: | :-----------------------: |
 | lib unit tests (public surface) | runs (~106)      | runs (~294, includes oracle cross-checks in `src/sieve_cache/tests/cache.rs`) |
 | `tests/oracle.rs`               | skipped          | runs                      |
-| `benches/sieve_cache_perf.rs`   | runs             | runs                      |
+| `benches/sieve_cache_perf.rs`   | skipped (uses `workload`) | runs              |
 | `benches/micro.rs`              | skipped          | runs                      |
 | `src/bin/bench`, `bench_concurrent` | skipped      | builds                    |
 
-Rule of thumb: **iterate with `--features experimental` whenever you're
-touching anything outside the public surface or anything that needs the
-oracle cross-checks**. Default-feature commands are for verifying the
-library surface compiles standalone (the publish path).
+Rule of thumb: **always iterate with `--features experimental`** —
+the perf bench, oracle cross-checks, and every research driver need
+it. Default-feature commands are only for verifying that the library
+surface (`src/sieve_cache/` + `src/lib.rs`) compiles standalone, which
+is the publish path.
 
 ## Commands
 
@@ -65,17 +68,16 @@ cargo clippy --all-targets --all-features            # zero warnings (must
 cargo test  --features experimental                  # full test surface
 ```
 
-For pure public-API edits (changes confined to `src/sieve_cache/`,
-`src/hash.rs`, `src/workload/`, or `benches/sieve_cache_perf.rs`), it's
-fine to run the default-feature gates first as a fast inner loop, then
-the `--features experimental` gates before commit. Anything touching
-`src/experimental/` or `src/sieve_orig.rs` requires the feature flag to
-even compile.
+For pure public-API edits (changes confined to `src/sieve_cache/`),
+it's fine to run the default-feature gates first as a fast inner loop,
+then the `--features experimental` gates before commit. Anything
+touching `src/experimental/` (including `sieve_orig`) or `src/workload/`
+requires the feature flag to even compile.
 
 ### Performance regression check (`benches/sieve_cache_perf.rs`)
 
-Whenever a change touches `src/sieve_cache/` or the modules it depends on
-(`hash`, `workload`, …) in ways that could plausibly affect performance —
+Whenever a change touches `src/sieve_cache/` (including its internal
+`hash` submodule) in ways that could plausibly affect performance —
 hot-path edits, layout changes, dispatch changes, new branches in `find` /
 `insert` / `evict_one_returning_id`, etc. — run the perf-gate bench with
 criterion's baseline mechanism:
@@ -123,20 +125,19 @@ so the current working directory does not matter.
 
 ## Architecture
 
-Public (publishable) surface — compiles on default features, shipped to crates.io:
+Public (publishable) surface — compiles on default features, shipped to crates.io. The crates.io payload is allowlisted in `Cargo.toml`'s `package.include` to **exactly** these files:
 
-- `src/sieve_cache/` — **library-grade SIEVE implementation** (`Cache`, `Drain`, `Stats`, `SlotSize` and the `Slot16/32/64` brackets). Split across `mod.rs` (Cache + Inner), `iter.rs` (`Iter`/`IterMut`/`Keys`/`Values`/`Drain`), `slot.rs` (`SlotSize` sealed trait), `stats.rs` (`Stats`), with tests under `tests/`. `benches/sieve_cache_perf.rs` guards its perf.
-- `src/hash.rs` — xxh3 `BuildHasher` (`Xxh3Build`), the default `H` parameter on `Cache`.
-- `src/workload/` — Zipf generator + trace replay utilities. Used by both the perf-gate and the research microbench.
-- `src/lib.rs` — module declarations and re-exports. Note `experimental` / `sieve_orig` / `CacheImpl` are `#[cfg(feature = "experimental")]`-gated.
+- `src/sieve_cache/` — **library-grade SIEVE implementation** (`Cache`, `Drain`, `Stats`, `SlotSize` and the `Slot16/32/64` brackets). Split across `mod.rs` (Cache + Inner), `iter.rs` (`Iter`/`IterMut`/`Keys`/`Values`/`Drain`), `slot.rs` (`SlotSize` sealed trait), `stats.rs` (`Stats`), `hash.rs` (`Xxh3Build` — the default `H` on `Cache`), with tests under `tests/`. `benches/sieve_cache_perf.rs` guards its perf.
+- `src/lib.rs` — module declarations and re-exports. `experimental` and `workload` are both `#[cfg(feature = "experimental")]`-gated.
 
-Research surface — gated behind the `experimental` feature flag, excluded from the crates.io payload via `package.exclude`:
+Research surface — gated behind the `experimental` feature flag, **not** in the crates.io payload (filtered out by `package.include`):
 
-- `src/experimental/` — historical / exploratory SIEVE variants (`sieve_v0..v3`, `sieve_j3..j8`, `sieve_c8`), each a self-contained module exposing the v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`). Used by `benches/micro.rs` and the `bin/bench*` harnesses for comparison.
+- `src/experimental/` — historical / exploratory SIEVE variants (`sieve_v0..v3`, `sieve_j3..j8`, `sieve_c8`) plus `sieve_orig` (the oracle), each a self-contained module exposing the v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`). Used by `benches/micro.rs` and the `bin/bench*` harnesses for comparison.
 - `src/experimental/mod.rs` also defines `pub trait CacheImpl<K, V>` — the cross-variant interface implemented by every variant (including `Cache`, behind the same feature gate). Re-exported at the crate root as `senba_cache::CacheImpl` when the feature is on.
-- `src/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/.../Sieve.c`). Doubly-linked list + single hand + per-entry visited bit, in safe Rust via an arena. **Treat this as the spec / oracle** — every variant's hit/miss behavior on any trace must match `sieve_orig` exactly. Oracle cross-checks inside `src/sieve_cache/tests/cache.rs` are tagged `#[cfg(feature = "experimental")]`.
-- `src/bin/bench.rs`, `src/bin/bench_concurrent.rs` — research drivers comparing senba's `Cache`, the experimental variants, `mini-moka`, and `moka`. The `mini-moka` / `moka` / `parking_lot` deps are `optional = true` and only pulled in by the `experimental` feature.
-- `tests/oracle.rs`, `benches/micro.rs` — same gating.
+- `src/experimental/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/.../Sieve.c`). Doubly-linked list + single hand + per-entry visited bit, in safe Rust via an arena. **Treat this as the spec / oracle** — every variant's hit/miss behavior on any trace must match `sieve_orig` exactly. Oracle cross-checks inside `src/sieve_cache/tests/cache.rs` are tagged `#[cfg(feature = "experimental")]`.
+- `src/workload/` — Zipf generator + trace replay utilities. Used by the perf-gate, microbench, and oracle test.
+- `src/bin/bench.rs`, `src/bin/bench_concurrent.rs` — research drivers comparing senba's `Cache`, the experimental variants, `mini-moka`, and `moka`. The `mini-moka` / `moka` / `parking_lot` / `rand` / `rand_distr` deps are `optional = true` and only pulled in by the `experimental` feature.
+- `tests/oracle.rs`, `benches/micro.rs`, `benches/sieve_cache_perf.rs` — same gating.
 - `docs/reports/` — write-ups of what each experiment showed (see "Documenting results" below). The code is the artifact; the reports are the conclusions.
 
 ## Documenting results
