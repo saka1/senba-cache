@@ -23,7 +23,7 @@
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext, find-avx2-avx512 |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
-| 単一 shard testbed (c10 設計の出発点) | single-shard-baseline |
+| 単一 shard testbed (c10 設計の出発点) | single-shard-baseline, c10s-vs-c8-baseline |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -243,6 +243,20 @@ uniform) × 3 op-mix × 5 threads × 2 variant = 150 trial。**uniform read-only
 coverage が広すぎ) など、c10 設計の attack 順位 (visited bit cache-line 分離 → writer
 lock-free claim → false sharing 排除) を定量化した baseline。HR は c8/c9 全 150 点で
 0.001 以下の差で一致、testbed 自体の正しさも自己検証済み。
+
+### 2026-05-08-c10s-vs-c8-baseline.md
+c10 lineage 第一案 `sieve_c10s` (= c8 から VISITED bit を tags 配列の外に分離して
+`Box<[AtomicU64]>` の bit-packed 別領域に出した shard variant) を testbed で c8 と直接
+比較。**read-only zipf-1.0 16T で c8 45 → c10s 92 Mops (+102%)、uniform で 342 → 597
+(+74%)** と reader 経路は 2x 改善 (仮説「tags 列を MESI Shared 維持にすれば AVX2 scan が
+cache miss を被らない」を支持)。ただし **read-heavy zipf 16T では -17〜-21% に regress** —
+c8 では fetch_or が tags 4 cache line に分散していたのが、c10s では visited 16 byte の
+1 line に集中するため hot key の ping-pong が顕在化、tag scan 清浄化の利得を上回る。
+HR は c8 と ±0.001 一致 (1 例外 = read-heavy adv-hot 16T で c10s が +11pp 高い、これは
+EMPTY 窓を短縮した副次効果)。実装上の落とし穴 1 件 (update 時 visited を reset でなく SET
+する仕様 = sieve_orig の `freq=1` 一致) と回帰 test を実装に同梱。c10 lineage の attack
+順位は (1) 単独では片側勝ちと判明したので、c10sw (visited per-entry padding) または
+c10w (writer Mutex CAS-claim) との合成が次の検証軸。
 
 ### 2026-05-08-find-avx2-avx512.md
 `find-avx2-frontier.md` Tier-C で「non-portable」と棚上げした AVX-512 を、server 用 CPU

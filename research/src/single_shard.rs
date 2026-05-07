@@ -70,6 +70,7 @@ pub mod adapters {
     use super::SingleShard;
     use crate::experimental::sieve_c8;
     use crate::experimental::sieve_c9;
+    use crate::experimental::sieve_c10s;
     use senba::Xxh3Build;
     use std::hash::{BuildHasher, Hash};
 
@@ -134,6 +135,55 @@ pub mod adapters {
             // testbed の利用観点では「writer 経路に入ったか」と「evict 発生有無」
             //   の方が重要なので、ここでは evict あり = true / なし = false で返す。
             //   (true = "shard が一杯で evict した" / false = "空きあり or update")
+            self.shard.insert(key, value, h).is_some()
+        }
+    }
+
+    /// c10s の内部 [`sieve_c10s::Shard`] を直接 wrap。c8 と同形 (visited 分離のみが差分)。
+    pub struct C10sSingleShard<K, V> {
+        shard: sieve_c10s::Shard<K, V>,
+        hasher: Xxh3Build,
+    }
+
+    impl<K, V> C10sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy,
+        V: Copy,
+    {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                shard: sieve_c10s::Shard::new(capacity),
+                hasher: Xxh3Build,
+            }
+        }
+    }
+
+    impl<K, V> SingleShard<K, V> for C10sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy + Send + Sync,
+        V: Copy + Send + Sync,
+    {
+        fn new(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+
+        fn capacity(&self) -> usize {
+            self.shard.capacity()
+        }
+
+        fn len(&self) -> usize {
+            self.shard.len()
+        }
+
+        fn read<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+            let h = self.hasher.hash_one(key);
+            let v = self.shard.get_by_hash(key, h)?;
+            Some(f(&v))
+        }
+
+        fn insert(&self, key: K, value: V) -> bool {
+            let h = self.hasher.hash_one(key);
+            // C8SingleShard と同じ契約: evict あり = true / なし (空き or update) = false。
             self.shard.insert(key, value, h).is_some()
         }
     }

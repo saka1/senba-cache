@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "docs" / "reports" / "data" / "2026-05-08-single-shard-baseline.csv"
 OUTDIR = ROOT / "docs" / "reports" / "data"
 
-VARIANTS = ["c8", "c9"]
-COLORS = {"c8": "#1f77b4", "c9": "#d62728"}
-MARKERS = {"c8": "o", "c9": "s"}
+VARIANTS = ["c8", "c9", "c10s"]
+COLORS = {"c8": "#1f77b4", "c9": "#d62728", "c10s": "#2ca02c"}
+MARKERS = {"c8": "o", "c9": "s", "c10s": "^"}
 
 # workload を 1 軸に畳むためのラベル生成。skew のある zipf は "zipf-α" にする。
 def workload_label(row) -> str:

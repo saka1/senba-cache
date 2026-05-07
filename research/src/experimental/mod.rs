@@ -4,6 +4,7 @@
 //! is [`sieve_orig`]. This module collects the historical / exploratory
 //! variants kept around for benchmark and design comparison.
 
+pub mod sieve_c10s;
 pub mod sieve_c8;
 pub mod sieve_c9;
 pub mod sieve_j3;

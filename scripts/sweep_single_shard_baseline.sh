@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Single-shard concurrent testbed baseline sweep.
-# 2 variants × 5 threads × 5 workloads × 3 op-mixes × 1 trial = 150 trials.
+# 3 variants (c8/c9/c10s) × 5 threads × 5 workloads × 3 op-mixes × 1 trial = 225 trials.
 #
 # 各 trial: ops_per_thread = 1M (= ops = 1M * threads)。multi-trial repeat は
 # c10 検証時に増やす。今回は scaling shape を素早く取るのが目的。
@@ -33,7 +33,7 @@ KEYS=100000  # zipf / uniform 用 key universe
 OPS_PER_THREAD=1000000
 WARMUP=80000  # threads で割れるよう 80000 を選択 (= 16T で 5000/thread)
 
-for variant in c8 c9; do
+for variant in c8 c9 c10s; do
   for op_mix in read-only read-heavy gim; do
     for workload_spec in "zipf:0.7" "zipf:1.0" "zipf:1.2" "adversarial-hot:_" "uniform:_"; do
       workload="${workload_spec%%:*}"
