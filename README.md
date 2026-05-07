@@ -2,7 +2,7 @@
 senba is a small, fast, single-threaded in-memory cache.
 Compared to well-known alternatives like moka and lru-cache, it has interesting characteristics:
 
-- **High hit ratio**: Uses a SIEVE-like eviction policy — a sharded variant of SIEVE (NSDI'24, Zhang et al.) keyed by the upper bits of the hash. On web-style workloads, hit ratio is comparable to LRU and W-TinyLFU.
+- **High hit ratio (for some workloads)**: Uses a SIEVE-like eviction policy, which is a sharded variant of SIEVE (NSDI'24, Zhang et al.). On web-style workloads, hit ratio is comparable to LRU and W-TinyLFU.
 - **Low, predictable overhead**: Values are stored directly in a fixed-stride arena, and shards are scanned in parallel using SIMD, so both lookups and inserts stay cheap. The cache does not use the doubly-linked list and separate hash table from the original SIEVE paper.
 
 The crate is single-threaded: every mutating operation takes `&mut self`.
