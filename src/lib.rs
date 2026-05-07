@@ -36,8 +36,8 @@ use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 
 pub mod hash;
-mod inner;
 mod iter;
+mod shard;
 mod slot;
 mod stats;
 
@@ -46,9 +46,9 @@ pub use iter::{Drain, Iter, IterMut, Keys, Values};
 pub use slot::{Slot16, Slot32, Slot64, SlotSize};
 pub use stats::Stats;
 
-pub(crate) use inner::{EMPTY, Entry, Inner, MAX_PER_SHARD};
+pub(crate) use shard::{EMPTY, Entry, MAX_PER_SHARD, Shard};
 #[cfg(test)]
-pub(crate) use inner::{LIVE, VISITED};
+pub(crate) use shard::{LIVE, VISITED};
 
 #[cfg(feature = "experimental")]
 pub mod experimental;
@@ -74,12 +74,12 @@ pub use experimental::CacheImpl;
 /// assert_eq!(c.get(&1), None);
 /// ```
 pub struct Cache<K, V, S: SlotSize = Slot32, H: BuildHasher = Xxh3Build> {
-    pub(crate) shards: Box<[Inner<K, V, S>]>,
+    pub(crate) shards: Box<[Shard<K, V, S>]>,
     /// `shards.len() - 1`. Cached so `shard_of_hash` is a single AND.
     shard_mask: usize,
     hasher: H,
     /// AVX2 + BMI1 availability, resolved once in `new` so the SIMD dispatch in
-    /// `Inner::find` is a single boolean load instead of a re-entry into
+    /// `Shard::find` is a single boolean load instead of a re-entry into
     /// `is_x86_feature_detected!` on every cache op. BMI1 is implied by AVX2 on
     /// every x86_64 CPU shipped to date, so detecting AVX2 suffices.
     has_avx2_bmi1: bool,
@@ -140,10 +140,10 @@ where
         );
         let base = capacity / shards;
         let extra = capacity % shards;
-        let inners: Vec<Inner<K, V, S>> = (0..shards)
+        let built: Vec<Shard<K, V, S>> = (0..shards)
             .map(|i| {
                 let cap_i = base + if i < extra { 1 } else { 0 };
-                Inner::new(cap_i)
+                Shard::new(cap_i)
             })
             .collect();
         let has_avx2_bmi1 = {
@@ -157,7 +157,7 @@ where
             }
         };
         Self {
-            shards: inners.into_boxed_slice(),
+            shards: built.into_boxed_slice(),
             shard_mask: shards - 1,
             hasher,
             has_avx2_bmi1,

@@ -2,10 +2,10 @@ use super::super::*;
 use super::TEST_SHARDS;
 
 /// Verifies bit-field exclusivity for Slot32 (default, Entry<u64,u64>=16).
-/// Inner<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x381f.
+/// Shard<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x381f.
 #[test]
 fn bit_layout_exclusivity_slot32() {
-    type I = Inner<u64, u64, Slot32>;
+    type I = Shard<u64, u64, Slot32>;
     assert_eq!(I::ID_SHIFT, 5);
     assert_eq!(I::ID_MASK, 0x07e0);
     assert_eq!(I::HASH_MASK, 0x381f);
@@ -29,7 +29,7 @@ fn bit_layout_exclusivity_slot32() {
 
 #[test]
 fn bit_layout_slot16() {
-    type I = Inner<u32, u32, Slot16>;
+    type I = Shard<u32, u32, Slot16>;
     assert_eq!(I::ID_SHIFT, 4);
     assert_eq!(I::ID_MASK, 0x03f0);
     assert_eq!(I::HASH_MASK, 0x3c0f);
@@ -37,7 +37,7 @@ fn bit_layout_slot16() {
 
 #[test]
 fn bit_layout_slot64() {
-    type I = Inner<u64, u64, Slot64>;
+    type I = Shard<u64, u64, Slot64>;
     assert_eq!(I::ID_SHIFT, 6);
     assert_eq!(I::ID_MASK, 0x0fc0);
     assert_eq!(I::HASH_MASK, 0x303f);
@@ -50,9 +50,9 @@ fn needle_spread_is_injective_all_slots() {
         let mut seen = std::collections::HashSet::new();
         for h in 0..=255u64 {
             let needle = match slot_id {
-                0 => Inner::<u64, u64, Slot16>::needle_from_hash(h << 56),
-                1 => Inner::<u64, u64, Slot32>::needle_from_hash(h << 56),
-                2 => Inner::<u64, u64, Slot64>::needle_from_hash(h << 56),
+                0 => Shard::<u64, u64, Slot16>::needle_from_hash(h << 56),
+                1 => Shard::<u64, u64, Slot32>::needle_from_hash(h << 56),
+                2 => Shard::<u64, u64, Slot64>::needle_from_hash(h << 56),
                 _ => unreachable!(),
             };
             assert!(seen.insert(needle), "slot {slot_id} hash {h} collides");

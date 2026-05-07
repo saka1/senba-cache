@@ -1,4 +1,4 @@
-//! Per-shard SIEVE state (`Inner`) — the algorithmic core. The publishable
+//! Per-shard SIEVE state (`Shard`) — the algorithmic core. The publishable
 //! [`Cache`](super::Cache) is a thin sharded wrapper around a slice of these.
 //!
 //! The bit-layout invariants (I4'–I8) and the c-hoist trick are documented in
@@ -24,7 +24,7 @@ pub(crate) struct Entry<K, V> {
 }
 
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
-pub(crate) struct Inner<K, V, S: SlotSize> {
+pub(crate) struct Shard<K, V, S: SlotSize> {
     pub(crate) capacity: usize,
     /// Parallel array #1: tag array. Size = `round_up(capacity, LANE).max(LANE)`.
     /// Under I4' there are never holes in `tags[0..len]`, so no slack past `capacity`
@@ -49,7 +49,7 @@ pub(crate) struct Inner<K, V, S: SlotSize> {
     pub(crate) evictions: u64,
 }
 
-impl<K, V, S: SlotSize> Inner<K, V, S> {
+impl<K, V, S: SlotSize> Shard<K, V, S> {
     /// Const-eval: `sizeof(Entry<K, V>) <= S::SIZE`.
     const _SIZE_OK: () = assert!(
         std::mem::size_of::<Entry<K, V>>() <= S::SIZE,
@@ -94,7 +94,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     #[inline]
     pub(crate) fn entry_ptr(&self, id: usize) -> *const Entry<K, V> {
         // Re-anchor the layout invariants at the use site, so that any future code
-        // path that touches Entry through Storage (not just `Inner::new`) keeps the
+        // path that touches Entry through Storage (not just `Shard::new`) keeps the
         // const-eval guard active.
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
@@ -109,7 +109,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     }
 }
 
-impl<K, V, S: SlotSize> Inner<K, V, S>
+impl<K, V, S: SlotSize> Shard<K, V, S>
 where
     K: Hash + Eq,
 {
@@ -203,7 +203,7 @@ where
     ///
     /// The host CPU must support both AVX2 and BMI1 (BMI1 is implied by AVX2 on every
     /// x86_64 part shipped to date). The caller is responsible for the runtime feature
-    /// check; `Inner::find` performs it via the cached `has_avx2_bmi1` flag set in
+    /// check; `Shard::find` performs it via the cached `has_avx2_bmi1` flag set in
     /// `Cache::new`.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
@@ -618,25 +618,25 @@ where
         // invariant that `tags[i] & LIVE != 0` iff `entries[id_of(tags[i])]`
         // is still initialized, so this loop is sound at any panic point.
         struct Guard<'a, K, V, S: SlotSize> {
-            inner: &'a mut Inner<K, V, S>,
+            shard: &'a mut Shard<K, V, S>,
         }
         impl<K, V, S: SlotSize> Drop for Guard<'_, K, V, S> {
             fn drop(&mut self) {
-                for i in 0..self.inner.tags.len() {
-                    let t = self.inner.tags[i];
+                for i in 0..self.shard.tags.len() {
+                    let t = self.shard.tags[i];
                     if t & LIVE != 0 {
-                        let id = Inner::<K, V, S>::id_of(t);
+                        let id = Shard::<K, V, S>::id_of(t);
                         // SAFETY: LIVE bit ⟹ entries[id] initialized (I6).
-                        unsafe { std::ptr::drop_in_place(self.inner.entry_ptr_mut(id)) };
-                        self.inner.tags[i] = EMPTY;
+                        unsafe { std::ptr::drop_in_place(self.shard.entry_ptr_mut(id)) };
+                        self.shard.tags[i] = EMPTY;
                     }
                 }
-                self.inner.len = 0;
-                self.inner.hand = 0;
+                self.shard.len = 0;
+                self.shard.hand = 0;
             }
         }
-        let guard = Guard { inner: self };
-        let inner = &mut *guard.inner;
+        let guard = Guard { shard: self };
+        let shard = &mut *guard.shard;
 
         // Pass 1: walk tags[0..old_len], decide keep/drop, compact survivors
         // into tags[0..write] in place. Each iteration is structured so that
@@ -646,29 +646,29 @@ where
         let mut write = 0usize;
         let mut drops_before_hand = 0usize;
         for read in 0..old_len {
-            let t = inner.tags[read];
+            let t = shard.tags[read];
             debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
             let id = Self::id_of(t);
             // SAFETY: LIVE ⟹ entries[id] initialized (I6). The closure receives
             // &K and &mut V via raw-pointer reborrow; nothing else aliases.
             let keep = unsafe {
-                let p = inner.entry_ptr_mut(id);
+                let p = shard.entry_ptr_mut(id);
                 f(&(*p).key, &mut (*p).value)
             };
             if keep {
                 if write != read {
-                    inner.tags[write] = t;
-                    inner.tags[read] = EMPTY;
+                    shard.tags[write] = t;
+                    shard.tags[read] = EMPTY;
                 }
                 write += 1;
             } else {
                 // Zero the tag *before* dropping so an intervening panic in
                 // Drop (rare but possible) can't leave a stale LIVE tag
                 // pointing at an uninitialized slot.
-                inner.tags[read] = EMPTY;
+                shard.tags[read] = EMPTY;
                 // SAFETY: LIVE ⟹ entries[id] initialized (I6). Tag has just
                 // been cleared so the guard's cleanup will not visit this id.
-                unsafe { std::ptr::drop_in_place(inner.entry_ptr_mut(id)) };
+                unsafe { std::ptr::drop_in_place(shard.entry_ptr_mut(id)) };
                 if read < old_hand {
                     drops_before_hand += 1;
                 }
@@ -678,8 +678,8 @@ where
         // Commit new len + hand. The remaining tags[write..old_len] are
         // already EMPTY (every iteration that increased write zeroed read,
         // every drop iteration zeroed read), so I4' is preserved.
-        inner.len = write;
-        inner.hand = if old_hand >= old_len {
+        shard.len = write;
+        shard.hand = if old_hand >= old_len {
             0
         } else {
             let h = old_hand - drops_before_hand;
@@ -694,7 +694,7 @@ where
         if write > 0 {
             let mut occupied: u64 = 0;
             for i in 0..write {
-                occupied |= 1u64 << Self::id_of(inner.tags[i]);
+                occupied |= 1u64 << Self::id_of(shard.tags[i]);
             }
             let low_mask: u64 = if write >= 64 {
                 u64::MAX
@@ -716,16 +716,16 @@ where
                 // bit in `occupied` is 0 ⟹ no live tag references it ⟹
                 // entries[l_id] is uninitialized).
                 unsafe {
-                    let v = std::ptr::read(inner.entry_ptr(h_id));
-                    std::ptr::write(inner.entry_ptr_mut(l_id), v);
+                    let v = std::ptr::read(shard.entry_ptr(h_id));
+                    std::ptr::write(shard.entry_ptr_mut(l_id), v);
                 }
                 let mut found = false;
                 for i in 0..write {
-                    let t = inner.tags[i];
+                    let t = shard.tags[i];
                     if Self::id_of(t) == h_id {
                         let cleared = t & !Self::ID_MASK;
                         let new_id_field = (l_id as u16) << Self::ID_SHIFT;
-                        inner.tags[i] = cleared | new_id_field;
+                        shard.tags[i] = cleared | new_id_field;
                         found = true;
                         break;
                     }
@@ -739,7 +739,7 @@ where
             }
         }
 
-        // Disarm the panic guard; the borrow of `inner` ends here.
+        // Disarm the panic guard; the borrow of `shard` ends here.
         std::mem::forget(guard);
     }
 
@@ -762,7 +762,7 @@ where
     }
 }
 
-impl<K, V, S> Clone for Inner<K, V, S>
+impl<K, V, S> Clone for Shard<K, V, S>
 where
     K: Hash + Eq + Clone,
     V: Clone,
@@ -771,7 +771,7 @@ where
     fn clone(&self) -> Self {
         // Clone every live (key, value) into an owned Vec first. If any user
         // Clone impl panics partway, the partial Vec drops cleanly and we
-        // never touch the destination Inner — so the destination cannot end
+        // never touch the destination Shard — so the destination cannot end
         // up with a LIVE tag pointing at an uninitialized slot.
         let mut cloned: Vec<(usize, Entry<K, V>)> = Vec::with_capacity(self.len);
         for i in 0..self.len {
@@ -789,7 +789,7 @@ where
             ));
         }
 
-        let mut new = Inner::<K, V, S>::new(self.capacity);
+        let mut new = Shard::<K, V, S>::new(self.capacity);
         // tags arrays have identical length (both = round_up(capacity, LANE).max(LANE)).
         new.tags.copy_from_slice(&self.tags);
         new.hand = self.hand;
@@ -809,7 +809,7 @@ where
     }
 }
 
-impl<K, V, S: SlotSize> Drop for Inner<K, V, S> {
+impl<K, V, S: SlotSize> Drop for Shard<K, V, S> {
     fn drop(&mut self) {
         // Enumerate live tags, extract their ids, and drop entries[id].
         // I4' (no holes) + I5 (unique ids) ⟹ no skip and no double-drop.

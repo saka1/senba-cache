@@ -3,7 +3,7 @@ name = "senba"
 version = "0.1.0"
 edition = "2024"
 # Allowlist the crates.io payload. The publishable surface lives at the
-# crate root (`src/lib.rs` plus `inner.rs`, `iter.rs`, `slot.rs`,
+# crate root (`src/lib.rs` plus `shard.rs`, `iter.rs`, `slot.rs`,
 # `stats.rs`, `hash.rs`, and the `tests/` submodule). Everything else
 # (research variants under `src/experimental/`, `src/workload/`,
 # research drivers under `src/bin/`, oracle tests, vendored references,
@@ -12,7 +12,7 @@ edition = "2024"
 # new research files cannot accidentally leak into the published crate.
 include = [
     "src/lib.rs",
-    "src/inner.rs",
+    "src/shard.rs",
     "src/iter.rs",
     "src/slot.rs",
     "src/stats.rs",

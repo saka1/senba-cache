@@ -4,11 +4,11 @@
 use std::hash::BuildHasher;
 use std::marker::PhantomData;
 
-use super::{Cache, EMPTY, Entry, Inner, SlotSize};
+use super::{Cache, EMPTY, Entry, Shard, SlotSize};
 
 /// Iterator over a [`Cache`] yielding `(&K, &V)` pairs. Created by [`Cache::iter`].
 pub struct Iter<'a, K, V, S: SlotSize> {
-    pub(super) shards: &'a [Inner<K, V, S>],
+    pub(super) shards: &'a [Shard<K, V, S>],
     pub(super) shard_idx: usize,
     pub(super) slot_idx: usize,
 }
@@ -26,9 +26,9 @@ impl<'a, K, V, S: SlotSize> Iterator for Iter<'a, K, V, S> {
             }
             let i = self.slot_idx;
             self.slot_idx += 1;
-            let id = Inner::<K, V, S>::id_of(sh.tags[i]);
+            let id = Shard::<K, V, S>::id_of(sh.tags[i]);
             // SAFETY: tags[0..len] are live (I4'), so entries[id] is initialized (I6).
-            // The lifetime 'a comes from `shards: &'a [Inner<...>]`, so the returned
+            // The lifetime 'a comes from `shards: &'a [Shard<...>]`, so the returned
             // references stay valid for the iterator's lifetime.
             let e = unsafe { &*sh.entry_ptr(id) };
             return Some((&e.key, &e.value));
@@ -38,21 +38,21 @@ impl<'a, K, V, S: SlotSize> Iterator for Iter<'a, K, V, S> {
 
 /// Mutable iterator over a [`Cache`] yielding `(&K, &mut V)` pairs. Created by [`Cache::iter_mut`].
 ///
-/// Holds a raw pointer to the cache's shard array plus a `PhantomData<&'a mut [Inner]>`
+/// Holds a raw pointer to the cache's shard array plus a `PhantomData<&'a mut [Shard]>`
 /// to encode the exclusive borrow at the type level. The implementation walks
 /// shards via raw pointer arithmetic and reads `len` / `tags[i]` through
-/// `addr_of!` projections so that no intermediate `&mut Inner` ever exists
-/// while a previously-yielded `&'a mut V` is alive — `&mut Inner` would
+/// `addr_of!` projections so that no intermediate `&mut Shard` ever exists
+/// while a previously-yielded `&'a mut V` is alive — `&mut Shard` would
 /// otherwise claim unique access to bytes the caller still holds a borrow into.
 pub struct IterMut<'a, K, V, S: SlotSize> {
-    pub(super) shards: *mut Inner<K, V, S>,
+    pub(super) shards: *mut Shard<K, V, S>,
     pub(super) n_shards: usize,
     pub(super) shard_idx: usize,
     pub(super) slot_idx: usize,
-    pub(super) _marker: PhantomData<&'a mut [Inner<K, V, S>]>,
+    pub(super) _marker: PhantomData<&'a mut [Shard<K, V, S>]>,
 }
 
-// SAFETY: IterMut is morally `&'a mut [Inner<K, V, S>]` — same Send/Sync
+// SAFETY: IterMut is morally `&'a mut [Shard<K, V, S>]` — same Send/Sync
 // bounds as the underlying mutable slice reference.
 unsafe impl<K: Send, V: Send, S: SlotSize> Send for IterMut<'_, K, V, S> {}
 unsafe impl<K: Sync, V: Sync, S: SlotSize> Sync for IterMut<'_, K, V, S> {}
@@ -65,10 +65,10 @@ impl<'a, K, V, S: SlotSize> Iterator for IterMut<'a, K, V, S> {
             if self.shard_idx >= self.n_shards {
                 return None;
             }
-            // SAFETY: shards points into the cache's Box<[Inner]> for which we
+            // SAFETY: shards points into the cache's Box<[Shard]> for which we
             // hold an exclusive borrow (encoded in `_marker`). shard_idx is
             // bounded by n_shards.
-            let sh: *mut Inner<K, V, S> = unsafe { self.shards.add(self.shard_idx) };
+            let sh: *mut Shard<K, V, S> = unsafe { self.shards.add(self.shard_idx) };
             // SAFETY: addr_of! produces a raw pointer to the field without
             // forming any intermediate reference, so the read does not alias
             // previously yielded `&mut V` borrows into entries[id].
@@ -82,7 +82,7 @@ impl<'a, K, V, S: SlotSize> Iterator for IterMut<'a, K, V, S> {
             self.slot_idx += 1;
             // SAFETY: tags[0..len] are LIVE (I4'). We read the u16 through the
             // Vec's data pointer; the brief shared reborrow of `Vec<u16>` to
-            // call `as_ptr` covers the Vec metadata bytes inside Inner, which
+            // call `as_ptr` covers the Vec metadata bytes inside Shard, which
             // are disjoint from the entries arena's heap allocation where any
             // outstanding `&mut V` lives.
             let tag = unsafe {
@@ -90,7 +90,7 @@ impl<'a, K, V, S: SlotSize> Iterator for IterMut<'a, K, V, S> {
                 let data = (*tags_field).as_ptr();
                 *data.add(i)
             };
-            let id = Inner::<K, V, S>::id_of(tag);
+            let id = Shard::<K, V, S>::id_of(tag);
             // SAFETY: same disjoint-fields argument for the entries Vec
             // metadata. `entries[id]` is initialized (I6) because the tag is
             // LIVE. Distinct (shard_idx, id) pairs across iterations means

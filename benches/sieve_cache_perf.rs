@@ -11,7 +11,7 @@
 //! - **Small scenario set**, so the whole run fits in ~25–30s.
 //! - **Fixed seeds and trace lengths**, so two runs on the same machine are
 //!   directly comparable via `--save-baseline` / `--baseline`.
-//! - **Public API only** (`Cache<K, V, S>`). No probing into `Inner`,
+//! - **Public API only** (`Cache<K, V, S>`). No probing into `Shard`,
 //!   no module-private tricks. If a refactor breaks the public path, this
 //!   bench notices.
 //! - **Three code paths covered**:
