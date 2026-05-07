@@ -5,6 +5,8 @@ Compared to well-known alternatives like moka and lru-cache, it has interesting 
 - **High hit ratio (for some workloads)**: Uses a SIEVE-like eviction policy, which is a sharded variant of SIEVE (NSDI'24, Zhang et al.). On web-style workloads, hit ratio is comparable to LRU and W-TinyLFU.
 - **Low, predictable overhead**: Values are stored directly in a fixed-stride arena, and shards are scanned in parallel using SIMD, so both lookups and inserts stay cheap. The cache does not use the doubly-linked list and separate hash table from the original SIEVE paper.
 
+SIMD is x86_64 + AVX2/BMI1 only; other targets fall back to a scalar scan (still correct, just slower).
+
 The crate is single-threaded: every mutating operation takes `&mut self`.
 Wrap in `Mutex<Cache>` / `RwLock<Cache>` if you need concurrent access.
 
@@ -107,6 +109,11 @@ println!(
 
 `evictions` counts only capacity-driven evictions inside `insert`;
 explicit removal (`remove`, `clear`, `retain`, `drain`) is not counted.
+
+## Future work
+
+- **Wider SIMD coverage** — NEON for aarch64, and a portable 128-bit fallback for x86_64 without AVX2, so the vectorized `find` is not gated on a single ISA extension.
+- **Multi-threaded API** — a concurrent variant that does not require the caller to wrap `Cache` in a `Mutex` / `RwLock`. The current single-threaded design is deliberate (it keeps the per-shard SIEVE state machine and the SIMD scan trivially sound); a sharded, lock-amortized concurrent surface is the natural next step.
 
 ## Reference
 
