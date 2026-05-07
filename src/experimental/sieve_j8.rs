@@ -92,7 +92,7 @@
 //!
 //! I8 が `entry_id = self.len` (warm-up 時) の正当性を担保する。
 
-use crate::sieve_cache::Xxh3Build;
+use crate::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 

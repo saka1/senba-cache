@@ -1,5 +1,5 @@
-# senba-cache
-senba-cache is a small, fast, single-threaded in-memory cache.
+# senba
+senba is a small, fast, single-threaded in-memory cache.
 Compared to well-known alternatives like moka and lru-cache, it has interesting characteristics:
 
 - **High hit ratio**: Uses a SIEVE-like eviction policy — a sharded variant of SIEVE (NSDI'24, Zhang et al.) keyed by the upper bits of the hash. On web-style workloads, hit ratio is comparable to LRU and W-TinyLFU.
@@ -12,11 +12,11 @@ Wrap in `Mutex<Cache>` / `RwLock<Cache>` if you need concurrent access.
 
 ```toml
 [dependencies]
-senba-cache = "0.1"
+senba = "0.1"
 ```
 
 ```rust
-use senba_cache::Cache;
+use senba::Cache;
 
 let mut cache: Cache<u64, String> = Cache::new(1024);
 cache.insert(1, "hello".into());
@@ -68,7 +68,7 @@ If the entry doesn't fit, the crate refuses to compile and the error
 message tells you which size to use instead. Just bump it:
 
 ```rust
-use senba_cache::{Cache, Slot64};
+use senba::{Cache, Slot64};
 
 let cache: Cache<String, String, Slot64> = Cache::new(1024);
 ```
@@ -79,11 +79,11 @@ even there, store the value behind an indirection like `Box<V>` or
 
 ### Custom hasher
 
-The default hasher is xxh3 (`senba_cache::hash::Xxh3Build`). To plug in
+The default hasher is xxh3 (`senba::hash::Xxh3Build`). To plug in
 your own `BuildHasher`:
 
 ```rust
-use senba_cache::Cache;
+use senba::Cache;
 use std::collections::hash_map::RandomState;
 
 let cache: Cache<u64, u64, _, RandomState> =

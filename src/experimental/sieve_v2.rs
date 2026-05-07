@@ -10,7 +10,7 @@
 //! eviction loop は v0 と同じ素直な線形スキャン (v1 の bit-parallel は混ぜない)。
 //! Option 剥がし「だけ」の効果を v0 と直接比較するための変種。
 
-use crate::sieve_cache::Xxh3Build;
+use crate::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;

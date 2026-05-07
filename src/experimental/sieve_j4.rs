@@ -38,8 +38,8 @@
 //! `assert!(SHARDS.is_power_of_two())` を `new` 内で課して、shard 選択を
 //! 高速な mask 操作に維持する (一般 N だと % 演算が必要)。
 
+use crate::Xxh3Build;
 use crate::experimental::sieve_j3::SieveCache as J3;
-use crate::sieve_cache::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 
 /// デフォルトのシャード数 (= `SieveCache<K, V>` で SHARDS を省略した時の値)。

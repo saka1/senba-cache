@@ -29,7 +29,7 @@
 //!   `order_cap = 2*capacity` なので「dead 比率 50%」も同タイミングで自動到達。
 //!   別カウンタは持たない。
 
-use crate::sieve_cache::Xxh3Build;
+use crate::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 

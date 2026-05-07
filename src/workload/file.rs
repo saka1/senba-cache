@@ -86,7 +86,7 @@ pub fn libcachesim_csv_from_path(path: impl AsRef<Path>) -> io::Result<impl Iter
 
 /// Twitter cache trace の CSV から **生 String キー**を `Iterator<Item = String>` で返す。
 ///
-/// `twitter_csv_from_path` の pre-hash 版に対する peer。`senba_cache::Cache<K, V>` のように
+/// `twitter_csv_from_path` の pre-hash 版に対する peer。`senba::Cache<K, V>` のように
 /// 任意 `K: Hash + Eq` を取れる実装が出てきたため、String キーをそのままキャッシュに
 /// 流して実 workload のキー比較・ハッシュコストを実測するために用意した。
 /// op 列を無視する点・ストリーミングで返す点は `twitter_csv_from_path` と同一。

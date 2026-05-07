@@ -121,7 +121,7 @@
 //! - `hand: usize` は writer のみ参照 → `Mutex<WriterState>` 配下
 //! - `find_scalar` / `find_avx2`: 候補 1 件ごとに seqlock dance + Copy 読み
 
-use crate::sieve_cache::Xxh3Build;
+use crate::Xxh3Build;
 use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::hash::{BuildHasher, Hash};

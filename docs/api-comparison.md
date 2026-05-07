@@ -13,7 +13,7 @@
 > 「欠けているもの一覧」の三箇所を `〇` に塗り替えて、§11 の更新履歴に
 > 一行残すこと。
 
-`senba::Cache`(`src/sieve_cache.rs`) の公開 API を、Rust のキャッシュ系ライブラリ
+`senba::Cache`(`src/lib.rs`) の公開 API を、Rust のキャッシュ系ライブラリ
 代表格である **moka**(`moka::sync::Cache`) と **lru**(`lru::LruCache`) を主軸に、
 補助として **quick_cache**(`quick_cache::sync::Cache`)・**stretto**(`stretto::Cache`)
 と並べて、メソッド単位で機能差を整理する。本ドキュメントは「senba にどんな機能が

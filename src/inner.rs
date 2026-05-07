@@ -53,7 +53,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// Const-eval: `sizeof(Entry<K, V>) <= S::SIZE`.
     const _SIZE_OK: () = assert!(
         std::mem::size_of::<Entry<K, V>>() <= S::SIZE,
-        "senba_cache::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
+        "senba::Cache: sizeof(Entry<K, V>) exceeds the chosen SlotSize. \
          Try a larger SlotSize (e.g. Slot64)."
     );
 
@@ -63,7 +63,7 @@ impl<K, V, S: SlotSize> Inner<K, V, S> {
     /// (`tag & ID_MASK = id × S::SIZE`). This catches that at compile time.
     const _STORAGE_SIZE_OK: () = assert!(
         std::mem::size_of::<<S as SlotSize>::Storage<Entry<K, V>>>() == S::SIZE,
-        "senba_cache::Cache: SlotStorage size differs from SlotSize::SIZE. \
+        "senba::Cache: SlotStorage size differs from SlotSize::SIZE. \
          (likely caused by Entry alignment > 8 byte)"
     );
 

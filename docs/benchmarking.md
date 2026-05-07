@@ -18,7 +18,7 @@ land.
 ## Perf-regression gate (`benches/sieve_cache_perf.rs`)
 
 This is the quality-gate companion to `cargo test` / `cargo clippy` for
-the public `senba_cache::Cache`. It uses three fixed scenarios
+the public `senba::Cache`. It uses three fixed scenarios
 (`insert_u64` / `mixed_u64` / `insert_string`) covering the warm-up +
 eviction loop on the smallest entry size, the SIMD `find` + visited
 bit promotion path, and the heavier-entry drop-on-evict path. Whole run
@@ -60,7 +60,7 @@ cargo bench --bench micro --features experimental -- --profile-time 5 \
 just run the loop" — useful when you want to attach a profiler.
 
 Configuration is set by `(skew, capacity)` over a Zipf trace generated
-by `senba_cache::workload::zipf`. The defaults follow NSDI'24 §5.3 /
+by `senba::workload::zipf`. The defaults follow NSDI'24 §5.3 /
 §6.1 synthetic-Zipf shape (see `docs/sieve-paper-workload.md` if you
 have access to the source tree, excluded from the published crate):
 

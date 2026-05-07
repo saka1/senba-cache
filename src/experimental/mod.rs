@@ -1,6 +1,6 @@
 //! Experimental SIEVE variants.
 //!
-//! Library-grade implementation lives in [`crate::sieve_cache`]; the spec/oracle
+//! Library-grade implementation lives in [`crate`]; the spec/oracle
 //! is [`sieve_orig`]. This module collects the historical / exploratory
 //! variants kept around for benchmark and design comparison.
 
@@ -22,7 +22,7 @@ pub mod sieve_v3;
 /// (`benches/micro.rs`) to drive every SIEVE variant through identical
 /// traces. Lives under `experimental` because every consumer is research
 /// / dev tooling — the publishable surface
-/// ([`crate::sieve_cache::Cache`]) implements it only when the
+/// ([`crate::Cache`]) implements it only when the
 /// `experimental` feature is enabled.
 pub trait CacheImpl<K, V> {
     fn new(capacity: usize) -> Self

@@ -9,7 +9,7 @@
 //! 期待される効き場: hand..tail 間に visited 連続帯や tombstone 連続帯が
 //! 走るようなワークロード (mid-skew Zipf, churn 後の compaction 直前など)。
 
-use crate::sieve_cache::Xxh3Build;
+use crate::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;

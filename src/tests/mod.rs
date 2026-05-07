@@ -1,4 +1,4 @@
-//! Unit tests for `sieve_cache`. Split by topic to mirror the module layout:
+//! Unit tests for `senba::Cache`. Split by topic to mirror the module layout:
 //! `slot.rs` covers the `SlotSize` machinery, `stats.rs` the `Stats` counters,
 //! `iter.rs` the iterator types (`Iter` / `IterMut` / `Keys` / `Values` /
 //! `Drain`), and `cache.rs` everything else (insert / get / remove / peek /
