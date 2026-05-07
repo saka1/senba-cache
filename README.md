@@ -120,3 +120,21 @@ explicit removal (`remove`, `clear`, `retain`, `drain`) is not counted.
 ```
 
 Paper: <https://yazhuozhang.com/assets/publication/nsdi24-sieve.pdf>
+
+## Releasing
+
+1. Bump the version locally:
+   ```bash
+   ./scripts/bump-version.sh patch    # or minor / major
+   ```
+   The script edits `Cargo.toml` + `Cargo.lock`, commits, and
+   optionally pushes.
+2. Wait for CI to go green on `main`.
+3. Trigger the **Release** workflow from the Actions tab
+   (`workflow_dispatch`, on `main`). It runs:
+   - `validate` — fmt / clippy / test / `cargo publish --dry-run`,
+     and verifies that `v<version>` does not yet exist as a tag.
+   - `publish` — `cargo publish -p senba` via crates.io trusted
+     publishing (gated by the `release` environment).
+   - `release` — pushes the `v<version>` tag and creates a GitHub
+     Release with auto-generated notes.

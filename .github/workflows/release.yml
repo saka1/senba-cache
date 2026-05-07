@@ -1,0 +1,115 @@
+name: Release
+
+# Triggered manually from the Actions tab. Reads the senba [package] version
+# from the root Cargo.toml, validates that the corresponding tag does not yet
+# exist, runs the workspace quality gate, publishes the senba crate to
+# crates.io, then tags the commit and creates a GitHub Release.
+#
+# All three jobs check out `${{ github.sha }}` explicitly so that a push to
+# main landing between jobs cannot publish or tag an unvalidated commit.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Read version and check tag
+        id: version
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          tag="v${version}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists. Bump the version in Cargo.toml first."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      # Rehearse the publish: catches package.include regressions, README /
+      # license issues, and any uncommitted-state problems before the real
+      # `cargo publish` in the publish job.
+      - run: cargo publish -p senba --dry-run
+
+  publish:
+    name: Publish to crates.io
+    needs: validate
+    # Defense-in-depth: validate already gates by branch, but guard publish
+    # explicitly so a future `needs:` refactor can't accidentally let it
+    # run from a non-main dispatch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1
+        id: auth
+      - run: cargo publish -p senba
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  release:
+    name: GitHub Release
+    needs: [validate, publish]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Same env as `publish` so protection rules apply to both release-touching jobs.
+    environment: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          # Required so `git describe --tags --abbrev=0 HEAD^` in the
+          # commit-log step can resolve the prior release tag.
+          fetch-depth: 0
+      - name: Create tag
+        run: |
+          git tag "${{ needs.validate.outputs.tag }}"
+          git push origin "${{ needs.validate.outputs.tag }}"
+      - name: Build commit log
+        run: |
+          prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$prev_tag" ]; then
+            range="${prev_tag}..HEAD"
+          else
+            range="HEAD"
+          fi
+          {
+            echo "## Commits"
+            echo ""
+            git log "$range" --pretty=format:"- %s (%h)" --no-merges
+          } > commit-log.md
+      - name: Create release
+        run: gh release create "${{ needs.validate.outputs.tag }}" --generate-notes --notes-file commit-log.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
