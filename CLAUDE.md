@@ -106,11 +106,17 @@ cargo bench -p senba-research --bench sieve_cache_perf -- --save-baseline before
 cargo bench -p senba-research --bench sieve_cache_perf -- --baseline before
 ```
 
-The bench has three scenarios (insert_u64 / mixed_u64 / insert_string).
-Criterion prints `Performance has regressed.` / `... has improved.` per
-scenario; treat **>5% regression on any scenario** as a signal to
-investigate before commit. Sampling and noise-threshold tuning live in the
-bench file itself.
+The bench has six scenarios (insert_u64 / mixed_u64 / insert_string /
+insert_u32_slot16 / get_heavy_u64 / mixed_lowskew_u64) covering the three
+slot strides (Slot16/32/64), two op-mix points (50/50, 90/10) and two
+Zipf skews (1.0, 0.7). Criterion prints `Performance has regressed.` /
+`... has improved.` per scenario; treat **>5% regression on any scenario**
+as a signal to investigate before commit. If a regression appears on a
+single scenario but Twitter trace cross-check (`research/src/bin/bench`,
+`--source twitter`/`twitter-string`) goes the other direction, the
+regression is likely scenario-specific layout noise — see
+`docs/reports/2026-05-07-aligned-tags-load.md` for one such case.
+Sampling and noise-threshold tuning live in the bench file itself.
 
 The bench lives in `senba-research` (it depends on `senba_research::workload`
 for Zipf generation), but the contract it gates is `senba::Cache`. Edits to

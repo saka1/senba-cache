@@ -14,13 +14,20 @@
 //! - **Public API only** (`Cache<K, V, S>`). No probing into `Shard`,
 //!   no module-private tricks. If a refactor breaks the public path, this
 //!   bench notices.
-//! - **Three code paths covered**:
-//!     1. insert-only on `u64,u64,Slot32` — the hot warm-up + eviction loop
-//!        on the smallest entry size (where any per-op overhead shows up).
-//!     2. mixed get+insert on the same config — exercises the SIMD `find`
-//!        path and the visited-bit set.
+//! - **Six code paths covered**:
+//!     1. insert-only on `u64,u64,Slot32` — the hot warm-up + eviction loop.
+//!     2. mixed 50/50 get+insert on `u64,u64,Slot32` — exercises the SIMD
+//!        `find` path and the visited-bit set.
 //!     3. insert-only on `String,String,Slot64` — covers the heavier-entry
 //!        path (drop on eviction, larger Storage stride).
+//!     4. insert-only on `u32,u32,Slot16` — smallest slot stride (4 entries
+//!        per cache line); catches layout regressions that the wider Slot32
+//!        path masks.
+//!     5. get-heavy 90/10 on `u64,u64,Slot32` — pushes `find_avx2` to
+//!        ~90% of timed ops, closer to real read-dominant workloads.
+//!     6. mixed 50/50 at Zipf skew 0.7 on `u64,u64,Slot32` — eviction-
+//!        dominant regime where cache-layout effects on `tags[]` are most
+//!        visible (low locality, many distinct keys).
 //!
 //! Usage (also documented in CLAUDE.md):
 //!
@@ -36,7 +43,7 @@
 //! investigate before merging.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use senba::{Cache, Slot32, Slot64};
+use senba::{Cache, Slot16, Slot32, Slot64};
 use senba_research::workload::zipf::ZipfGen;
 use std::hint::black_box;
 use std::time::Duration;
@@ -51,6 +58,10 @@ const SEED: u64 = 0xC0FFEE;
 const N_KEYS: u64 = 5_000;
 const TRACE_LEN: usize = 200_000;
 const SKEW: f64 = 1.0;
+/// Low-skew variant for scenario 6. `0.7` is the boundary below which Zipf
+/// access feels close to uniform — eviction-dominant, low hit ratio, the
+/// regime where `find_avx2` runs over near-full shards every op.
+const SKEW_LOW: f64 = 0.7;
 const CAP_U64: usize = 384; // 48 / shard
 const CAP_STR: usize = 256; // 32 / shard
 
@@ -83,6 +94,12 @@ fn perf_group<'a>(
 
 fn zipf_trace() -> Vec<u64> {
     ZipfGen::new(SKEW, N_KEYS, SEED).take(TRACE_LEN).collect()
+}
+
+fn zipf_trace_low_skew() -> Vec<u64> {
+    ZipfGen::new(SKEW_LOW, N_KEYS, SEED)
+        .take(TRACE_LEN)
+        .collect()
 }
 
 /// Scenario 1: insert-only on `Cache<u64, u64, Slot32, 8>`.
@@ -162,5 +179,103 @@ fn bench_insert_string(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(perf, bench_insert_u64, bench_mixed_u64, bench_insert_string);
+/// Scenario 4: insert-only on `Cache<u32, u32, Slot16, 8>`.
+/// Exercises the smallest slot stride (16B / entry, 4 entries per cache
+/// line). Layout-sensitive regressions in the entries-arena access pattern
+/// surface here before they show up on the wider Slot32 path.
+fn bench_insert_u32_slot16(c: &mut Criterion) {
+    let mut g = perf_group(c, "sieve_cache_perf/insert_u32_slot16");
+    let trace: Vec<u32> = zipf_trace().into_iter().map(|k| k as u32).collect();
+    g.throughput(Throughput::Elements(trace.len() as u64));
+    g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {
+        b.iter_batched(
+            || Cache::<u32, u32, Slot16>::with_shards(CAP_U64, 8),
+            |mut c| {
+                for &k in trace {
+                    c.insert(black_box(k), k);
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+}
+
+/// Scenario 5: 90% get / 10% insert on `Cache<u64, u64, Slot32, 8>`.
+/// Pre-warmed so steady-state reads dominate. Closer to read-heavy
+/// production workloads (Twitter clusters typically 75–95% gets), and
+/// pushes `find_avx2` to ~90% of timed ops — the path most affected by
+/// SIMD scan codegen and tags-array layout.
+fn bench_get_heavy_u64(c: &mut Criterion) {
+    let mut g = perf_group(c, "sieve_cache_perf/get_heavy_u64");
+    let trace = zipf_trace();
+    g.throughput(Throughput::Elements(trace.len() as u64));
+    g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {
+        b.iter_batched(
+            || {
+                let mut c = Cache::<u64, u64, Slot32>::with_shards(CAP_U64, 8);
+                for &k in trace.iter().take(CAP_U64 * 2) {
+                    c.insert(k, k);
+                }
+                c
+            },
+            |mut c| {
+                for (i, &k) in trace.iter().enumerate() {
+                    if i % 10 == 0 {
+                        c.insert(black_box(k), k);
+                    } else {
+                        black_box(c.get(&k));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+}
+
+/// Scenario 6: 50/50 get+insert at Zipf skew 0.7 on `Cache<u64, u64, Slot32, 8>`.
+/// Same shape as scenario 2 but with a flatter access distribution — most
+/// gets miss, most inserts evict, so `find_avx2` runs over near-full shards
+/// continuously. This is the regime where `tags[]` storage layout (cache-
+/// line splits, allocator-induced offsets) shows the largest perf delta;
+/// scenario 2's higher skew compresses traffic onto a small hot set and
+/// hides those effects.
+fn bench_mixed_lowskew_u64(c: &mut Criterion) {
+    let mut g = perf_group(c, "sieve_cache_perf/mixed_lowskew_u64");
+    let trace = zipf_trace_low_skew();
+    g.throughput(Throughput::Elements(trace.len() as u64));
+    g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {
+        b.iter_batched(
+            || {
+                let mut c = Cache::<u64, u64, Slot32>::with_shards(CAP_U64, 8);
+                for &k in trace.iter().take(CAP_U64 * 2) {
+                    c.insert(k, k);
+                }
+                c
+            },
+            |mut c| {
+                for (i, &k) in trace.iter().enumerate() {
+                    if i & 1 == 0 {
+                        black_box(c.get(&k));
+                    } else {
+                        c.insert(black_box(k), k);
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+}
+
+criterion_group!(
+    perf,
+    bench_insert_u64,
+    bench_mixed_u64,
+    bench_insert_string,
+    bench_insert_u32_slot16,
+    bench_get_heavy_u64,
+    bench_mixed_lowskew_u64,
+);
 criterion_main!(perf);
