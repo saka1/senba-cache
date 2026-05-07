@@ -1,14 +1,14 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use senba::CacheImpl;
-use senba::experimental::sieve_orig::SieveCache as Orig;
-// use senba::experimental::sieve_v0::SieveCache as V0;
-// use senba::experimental::sieve_v1::SieveCache as V1;
-// use senba::experimental::sieve_v2::SieveCache as V2;
-use senba::experimental::sieve_j3::SieveCache as J3;
-use senba::experimental::sieve_j4::SieveCache as J4;
-use senba::experimental::sieve_j5::SieveCache as J5;
-use senba::experimental::sieve_v3::SieveCache as V3;
-use senba::workload::zipf::ZipfGen;
+use senba_research::CacheImpl;
+use senba_research::experimental::sieve_orig::SieveCache as Orig;
+// use senba_research::experimental::sieve_v0::SieveCache as V0;
+// use senba_research::experimental::sieve_v1::SieveCache as V1;
+// use senba_research::experimental::sieve_v2::SieveCache as V2;
+use senba_research::experimental::sieve_j3::SieveCache as J3;
+use senba_research::experimental::sieve_j4::SieveCache as J4;
+use senba_research::experimental::sieve_j5::SieveCache as J5;
+use senba_research::experimental::sieve_v3::SieveCache as V3;
+use senba_research::workload::zipf::ZipfGen;
 use std::hint::black_box;
 use std::time::Duration;
 

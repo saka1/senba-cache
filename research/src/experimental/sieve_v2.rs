@@ -1,21 +1,16 @@
-//! v1 (bit-parallel scan) + v2 (Option 剥がし) を合流させた変種。さらに `evict_one`
-//! の 4 パス構造を 2 パスに圧縮する。
+//! `sieve_v0` の派生。アルゴリズムは v0 と完全に同一だが、`order` の `Option`
+//! ラッパを剥がす。
 //!
-//! v1 の `evict_one` は `[hand,tail) → [0,hand)` を最大 4 周していた:
-//!   pass 1+2: `!combined` (= visited も tombstone も 0) を探しつつ visited を全クリア
-//!   pass 3+4: visited が全消えた状態で `!tombstone` の最初を拾う
-//! steady state (ほぼ全 visited) では word 読みが 2 倍になっていた。
+//! v0 では `order: Vec<Option<EntryId>>` で「dead slot は None」を表現していたが、
+//! `tombstone: BitSet` がすでに同じ情報 (qpos が dead か live か) を持っている。
+//! `Option<usize>` は alignment で 16B/slot 占有していたのを `usize` 8B にできる
+//! (cap=16384, order_cap=32768 なら 256KB → 128KB)。`order[pos]` の値は
+//! `!tombstone.get(pos)` のときにのみ意味があり、dead slot 側にはもう書き込まない。
 //!
-//! v3 では `find_victim_in_range` を拡張し、同一スイープ中に
-//!
-//! - `!combined` の最初の qpos (=即 victim)
-//! - `!tombstone` の最初の qpos (=visited 全消し後の victim 候補)
-//!
-//! を同時に記録する。これで pass 3+4 を畳んで最大 2 パスで終わる。
-//!
-//! `order` の `Option` は v2 と同じ理由で外す: tombstone bitmap が同じ情報を持つ。
+//! eviction loop は v0 と同じ素直な線形スキャン (v1 の bit-parallel は混ぜない)。
+//! Option 剥がし「だけ」の効果を v0 と直接比較するための変種。
 
-use crate::Xxh3Build;
+use senba::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;
@@ -55,18 +50,6 @@ impl BitSet {
     }
 }
 
-/// 1 ワード内の bit range `[lo, hi)` のマスク。`lo, hi` は 0..=64。
-#[inline]
-fn bit_range_mask(lo: usize, hi: usize) -> u64 {
-    debug_assert!(lo <= 64 && hi <= 64);
-    if hi <= lo {
-        return 0;
-    }
-    let high = if hi == 64 { !0u64 } else { (1u64 << hi) - 1 };
-    let low = if lo == 0 { 0 } else { (1u64 << lo) - 1 };
-    high & !low
-}
-
 #[derive(Debug)]
 struct Entry<K, V> {
     key: K,
@@ -82,6 +65,7 @@ pub struct SieveCache<K, V> {
     free_list: Vec<EntryId>,
 
     /// qpos -> EntryId。`tombstone.get(qpos) == false` のときのみ意味がある。
+    /// dead slot の値は読まれないので未定義 (上書きしない)。
     order: Vec<EntryId>,
     visited: BitSet,
     tombstone: BitSet,
@@ -90,16 +74,6 @@ pub struct SieveCache<K, V> {
     hand: usize,
     len: usize,
     dead: usize,
-}
-
-/// `find_victim_in_range` の結果。
-/// - `victim`: `!combined` (= visited も tombstone も 0) を満たす最初の qpos。
-///   これがあればそれが即 victim。
-/// - `first_live`: `!tombstone` を満たす最初の qpos。`victim` が None で
-///   visited が全クリアされた後、これが victim になる。
-struct ScanResult {
-    victim: Option<usize>,
-    first_live: Option<usize>,
 }
 
 impl<K, V> SieveCache<K, V>
@@ -197,112 +171,46 @@ where
         }
     }
 
-    /// `[lo, hi)` を qpos 昇順にスイープし:
-    ///
-    /// - `!combined` (visited=0 かつ tombstone=0) の最初の qpos を `victim` に
-    /// - `!tombstone` の最初の qpos を `first_live` に
-    ///
-    /// それぞれ記録する。`victim` が見つかったら、その qpos より前の visited は
-    /// word 単位で 0 にクリアされた状態でリターンする。`victim` が見つからな
-    /// かった場合 (= 範囲内すべて visited か tombstone) は、範囲全体の visited
-    /// が 0 にクリアされた状態でリターンする (これが SIEVE の second-chance)。
-    fn find_victim_in_range(&mut self, lo: usize, hi: usize) -> ScanResult {
-        debug_assert!(lo <= hi);
-        debug_assert!(hi <= self.order.len());
-        let mut first_live: Option<usize> = None;
-        let mut p = lo;
-        while p < hi {
-            let w = p / 64;
-            let b = p % 64;
-            let end_b = (hi - w * 64).min(64);
-            let valid = bit_range_mask(b, end_b);
-
-            let visited_w = self.visited.words[w];
-            let tomb_w = self.tombstone.words[w];
-            let combined = visited_w | tomb_w;
-
-            // victim = !combined & valid の最下位ビット
-            let candidates = !combined & valid;
-            if candidates != 0 {
-                let v_bit = candidates.trailing_zeros() as usize;
-                let v_pos = w * 64 + v_bit;
-
-                // first_live がまだなら、この word の [b, v_bit) 区間で探す。
-                // ただし v_pos 自身も live なので first_live = victim 位置でも OK。
-                if first_live.is_none() {
-                    first_live = Some(v_pos);
-                }
-
-                // [b, v_bit) を通過 → visited を一括クリア
-                let traversed = bit_range_mask(b, v_bit);
-                self.visited.words[w] &= !traversed;
-
-                return ScanResult {
-                    victim: Some(v_pos),
-                    first_live,
-                };
-            }
-
-            // この word に victim はない。first_live をついでに探す。
-            if first_live.is_none() {
-                let live_in_word = !tomb_w & valid;
-                if live_in_word != 0 {
-                    first_live = Some(w * 64 + live_in_word.trailing_zeros() as usize);
-                }
-            }
-
-            // [b, end_b) の visited を一括クリア
-            let traversed = bit_range_mask(b, end_b);
-            self.visited.words[w] &= !traversed;
-            p = (w + 1) * 64;
-        }
-        ScanResult {
-            victim: None,
-            first_live,
-        }
-    }
-
     fn evict_one(&mut self) -> Option<(K, V)> {
         if self.len == 0 {
             return None;
         }
+
         if self.hand >= self.tail {
             self.hand = 0;
         }
+        loop {
+            if self.hand >= self.tail {
+                self.hand = 0;
+            }
+            let pos = self.hand;
+            if self.tombstone.get(pos) {
+                self.hand += 1;
+                continue;
+            }
+            let eid = self.order[pos];
+            if self.visited.get(pos) {
+                self.visited.clear(pos);
+                self.hand += 1;
+                continue;
+            }
 
-        // pass 1: [hand, tail)
-        let r1 = self.find_victim_in_range(self.hand, self.tail);
-        if let Some(pos) = r1.victim {
-            return Some(self.do_evict(pos));
-        }
-        // pass 2: [0, hand)。終わった時点で [0, tail) の visited は全部 0。
-        let r2 = self.find_victim_in_range(0, self.hand);
-        if let Some(pos) = r2.victim {
-            return Some(self.do_evict(pos));
-        }
+            // victim
+            self.tombstone.set(pos);
+            self.visited.clear(pos);
+            // order[pos] は触らない。次回 tombstone 越しでしか参照されないので不要。
+            self.dead += 1;
+            self.len -= 1;
+            self.hand += 1;
+            if self.hand >= self.tail {
+                self.hand = 0;
+            }
+            let entry = self.entries[eid].take().expect("live slot must have entry");
+            self.index.remove(&entry.key);
+            self.free_list.push(eid);
 
-        // ここまで来たら全 visited を消した。リング順 (hand 起点) で最初の live を取る。
-        let pos = r1
-            .first_live
-            .or(r2.first_live)
-            .expect("len > 0 must yield a live slot");
-        Some(self.do_evict(pos))
-    }
-
-    fn do_evict(&mut self, pos: usize) -> (K, V) {
-        let eid = self.order[pos];
-        self.tombstone.set(pos);
-        self.visited.clear(pos);
-        self.dead += 1;
-        self.len -= 1;
-        self.hand = pos + 1;
-        if self.hand >= self.tail {
-            self.hand = 0;
+            return Some((entry.key, entry.value));
         }
-        let entry = self.entries[eid].take().expect("victim entry must be live");
-        self.index.remove(&entry.key);
-        self.free_list.push(eid);
-        (entry.key, entry.value)
     }
 
     fn maybe_compact(&mut self) {
@@ -383,70 +291,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bit_range_mask_basics() {
-        assert_eq!(bit_range_mask(0, 0), 0);
-        assert_eq!(bit_range_mask(0, 64), !0u64);
-        assert_eq!(bit_range_mask(8, 16), 0xFF00);
-    }
-
-    #[test]
-    fn scan_finds_victim_and_first_live() {
-        let mut c: SieveCache<i32, i32> = SieveCache::new(4);
-        c.tail = 8;
-        c.len = 8;
-        for i in 0..8 {
-            c.order[i] = 0;
-        }
-        // visited: 0,1,2 のみ
-        for i in 0..3 {
-            c.visited.set(i);
-        }
-        let r = c.find_victim_in_range(0, 8);
-        assert_eq!(r.victim, Some(3));
-        assert_eq!(r.first_live, Some(3));
-        for i in 0..3 {
-            assert!(!c.visited.get(i));
-        }
-    }
-
-    #[test]
-    fn scan_all_visited_returns_none_and_clears() {
-        let mut c: SieveCache<i32, i32> = SieveCache::new(20);
-        c.tail = 30;
-        c.len = 30;
-        for i in 0..30 {
-            c.order[i] = 0;
-            c.visited.set(i);
-        }
-        let r = c.find_victim_in_range(0, 30);
-        assert_eq!(r.victim, None);
-        // 全部 visited だったので live は (tombstone=0 の最初) = 0
-        assert_eq!(r.first_live, Some(0));
-        for i in 0..30 {
-            assert!(!c.visited.get(i));
-        }
-    }
-
-    #[test]
-    fn scan_skips_tombstones_for_first_live() {
-        let mut c: SieveCache<i32, i32> = SieveCache::new(10);
-        c.tail = 10;
-        c.len = 7;
-        for i in 0..10 {
-            c.order[i] = 0;
-        }
-        for i in 0..3 {
-            c.tombstone.set(i);
-        }
-        // 0..3 が tombstone, 残りは visited も tombstone も 0
-        let r = c.find_victim_in_range(0, 10);
-        assert_eq!(r.victim, Some(3));
-        assert_eq!(r.first_live, Some(3));
-    }
-
-    // ---- v0 のテストミラー ----
 
     #[test]
     fn cache_initially_empty() {

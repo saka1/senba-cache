@@ -1,4 +1,4 @@
-use crate::Xxh3Build;
+use senba::Xxh3Build;
 use std::collections::HashMap;
 
 type EntryId = usize;

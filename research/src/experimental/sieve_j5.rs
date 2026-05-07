@@ -26,8 +26,8 @@
 //! 飽和済み) で j4=34 ns。これが j5 で 28 ns 程度まで落ちれば H3 ≈ 5–10 ns/op
 //! の妥当性が立つ。落ちなければ H3 は弱い (= 残り差は double-hash 以外の何か)。
 
-use crate::Xxh3Build;
 use crate::experimental::sieve_j3::SieveCache as J3;
+use senba::Xxh3Build;
 use std::hash::{BuildHasher, Hash};
 
 /// j4 と同じ既定。cap=1024 を per-shard=128 に分割するのが当面の主実験帯。

@@ -1,6 +1,6 @@
 //! Experimental SIEVE variants.
 //!
-//! Library-grade implementation lives in [`crate`]; the spec/oracle
+//! Library-grade implementation lives in [`senba`]; the spec/oracle
 //! is [`sieve_orig`]. This module collects the historical / exploratory
 //! variants kept around for benchmark and design comparison.
 
@@ -18,12 +18,10 @@ pub mod sieve_v2;
 pub mod sieve_v3;
 
 /// Common interface used by the cross-variant oracle test
-/// (`tests/oracle.rs`) and the research microbench
-/// (`benches/micro.rs`) to drive every SIEVE variant through identical
-/// traces. Lives under `experimental` because every consumer is research
-/// / dev tooling — the publishable surface
-/// ([`crate::Cache`]) implements it only when the
-/// `experimental` feature is enabled.
+/// (`research/tests/oracle.rs`) and the research microbench
+/// (`research/benches/micro.rs`) to drive every SIEVE variant through
+/// identical traces. The publishable [`senba::Cache`] also implements
+/// it via the adapter at the `senba_research` crate root.
 pub trait CacheImpl<K, V> {
     fn new(capacity: usize) -> Self
     where

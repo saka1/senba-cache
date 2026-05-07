@@ -6,55 +6,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `senba-cache` is a sandbox for exploring **good Rust implementations of the SIEVE eviction algorithm** (NSDI'24, Zhang et al.). The aim is to develop and compare multiple variants — starting from a faithful port of the original C reference, then iterating toward Rust-idiomatic / high-performance designs — and study the trade-offs between them (correctness, allocation behavior, cache locality, ergonomics).
 
-A second, downstream aim is to **harvest the results of that experimentation into a publishable library** (the `senba` crate on crates.io): the variant that wins out on the sandbox benches gets promoted to the crate root (`src/lib.rs` + flat sibling modules) and treated as a stable, perf-gated public surface (`benches/sieve_cache_perf.rs`). The experimental modules under `src/experimental/` stay as research artifacts behind the `experimental` feature flag; the library surface is what we intend to ship. Decisions that affect the library surface (API additions, semantics, perf contract) should be made with that downstream use in mind, not just sandbox convenience.
+A second, downstream aim is to **harvest the results of that experimentation into a publishable library** (the `senba` crate on crates.io): the variant that wins out on the sandbox benches gets promoted to the workspace-root `senba` crate (`src/lib.rs` + flat sibling modules) and treated as a stable, perf-gated public surface (`research/benches/sieve_cache_perf.rs`). The experimental modules under `research/src/experimental/` stay as research artifacts in the non-publishable `senba-research` crate; the `senba` crate is what we intend to ship. Decisions that affect the library surface (API additions, semantics, perf contract) should be made with that downstream use in mind, not just sandbox convenience.
 
 The NSDI'24 paper is at https://yazhuozhang.com/assets/publication/nsdi24-sieve.pdf, and the authors' reference C implementation is included as a git submodule at `external/NSDI24-SIEVE/` (https://github.com/cacheMon/NSDI24-SIEVE).
 
-## Feature flags
+## Workspace layout
 
-The crate has one feature, `experimental`, which gates the entire
-research / dev surface — `src/experimental/` (historical variants +
-`sieve_orig` oracle port + the `CacheImpl` trait), `src/workload/`
-(Zipf / trace replay), and the `impl CacheImpl for Cache` adapter on
-the library `Cache`. The publishable surface (`Cache`, `Drain`,
-`Stats`, `SlotSize`, and `senba::hash::Xxh3Build`) compiles on
-default features and lives at the crate root: `src/lib.rs` plus the
-flat sibling modules `inner.rs` / `iter.rs` / `slot.rs` / `stats.rs`
-/ `hash.rs` (with unit tests under `src/tests/`).
+The repo is a **two-member Cargo workspace**:
 
-Targets that depend on the research surface have `required-features =
-["experimental"]` in `Cargo.toml` and **silently skip** without it:
+| Member          | Path        | Publish?     | Purpose                                                                                  |
+| --------------- | ----------- | ------------ | ---------------------------------------------------------------------------------------- |
+| `senba`         | `./`        | yes (crates.io) | Library surface: `Cache`, `Drain`, `Stats`, `SlotSize` (`Slot16/32/64`), `hash::Xxh3Build`. |
+| `senba-research`| `research/` | `publish = false` | Historical / exploratory SIEVE variants (`experimental/`), Zipf + trace replay (`workload/`), research drivers (`bin/bench*`), oracle tests, micro-bench. Depends on `senba` via path dep. |
 
-| Target                          | Default features | `--features experimental` |
-| ------------------------------- | :--------------: | :-----------------------: |
-| lib unit tests (public surface) | runs (~106)      | runs (~294, includes oracle cross-checks in `src/tests/cache.rs`) |
-| `tests/oracle.rs`               | skipped          | runs                      |
-| `benches/sieve_cache_perf.rs`   | skipped (uses `workload`) | runs              |
-| `benches/micro.rs`              | skipped          | runs                      |
-| `src/bin/bench`, `bench_concurrent` | skipped      | builds                    |
+The `senba` package's crates.io payload is allowlisted in `Cargo.toml`'s
+`package.include` to exactly the publishable surface — required because the
+package directory is the workspace root and would otherwise pull in everything
+(`research/`, `external/`, `docs/`, etc.).
 
-Rule of thumb: **always iterate with `--features experimental`** —
-the perf bench, oracle cross-checks, and every research driver need
-it. Default-feature commands are only for verifying that the library
-surface (the crate-root files: `src/lib.rs`, `src/inner.rs`,
-`src/iter.rs`, `src/slot.rs`, `src/stats.rs`, `src/hash.rs`)
-compiles standalone, which is the publish path.
+`senba::Cache` implements `senba_research::CacheImpl` in `research/src/lib.rs`
+via the orphan rule (the trait is local to `senba-research`). This lets
+cross-variant drivers and the oracle test treat senba's library `Cache` and
+the experimental variants symmetrically.
 
 ## Commands
 
 ```bash
-# library / publish surface (= what crates.io consumers see)
-cargo check
-cargo test --lib
-cargo clippy
+# publishable surface (= what crates.io consumers see)
+cargo check  -p senba
+cargo test   -p senba
+cargo clippy -p senba
 
-# full sandbox (oracle, experimental variants, research drivers)
-cargo check  --features experimental
-cargo test   --features experimental
-cargo clippy --all-targets --all-features
+# research surface (experimental variants + oracle + drivers)
+cargo check  -p senba-research
+cargo test   -p senba-research
+cargo clippy -p senba-research --all-targets
+
+# whole workspace (both crates, all targets)
+cargo check --workspace
+cargo test  --workspace
+cargo clippy --workspace --all-targets
 
 # single test
-cargo test --features experimental <name>
+cargo test -p senba-research <name>
 ```
 
 ## Quality Gates
@@ -62,36 +56,34 @@ cargo test --features experimental <name>
 After any code change, ensure all pass:
 
 ```bash
-cargo fmt                                            # auto-format
-cargo clippy --all-targets --all-features            # zero warnings (must
-                                                     # include tests — CI
-                                                     # runs --all-targets;
-                                                     # --all-features picks
-                                                     # up experimental)
-cargo test  --features experimental                  # full test surface
+cargo fmt --all                                      # auto-format
+cargo clippy --workspace --all-targets -- -D warnings  # zero warnings
+cargo test --workspace                               # full test surface
 ```
 
-For pure public-API edits (changes confined to the crate-root library
-files: `src/lib.rs` and its flat sibling modules), it's fine to run
-the default-feature gates first as a fast inner loop, then the
-`--features experimental` gates before commit. Anything touching
-`src/experimental/` (including `sieve_orig`) or `src/workload/`
-requires the feature flag to even compile.
+For pure public-API edits confined to the senba crate (`src/lib.rs` and its
+flat sibling modules), it's fine to run the senba-only gates first as a fast
+inner loop, then the full workspace gates before commit:
 
-### Performance regression check (`benches/sieve_cache_perf.rs`)
+```bash
+cargo check  -p senba
+cargo test   -p senba
+cargo clippy -p senba -- -D warnings
+```
 
-Whenever a change touches the crate-root library files (`src/lib.rs`,
-`src/inner.rs`, `src/iter.rs`, `src/slot.rs`, `src/stats.rs`,
-`src/hash.rs`) in ways that could plausibly affect performance —
-hot-path edits, layout changes, dispatch changes, new branches in
-`find` / `insert` / `evict_one_returning_id`, etc. — run the perf-gate
-bench with criterion's baseline mechanism:
+### Performance regression check (`research/benches/sieve_cache_perf.rs`)
+
+Whenever a change touches the senba library files (`src/lib.rs`, `src/shard.rs`,
+`src/iter.rs`, `src/slot.rs`, `src/stats.rs`, `src/hash.rs`) in ways that
+could plausibly affect performance — hot-path edits, layout changes, dispatch
+changes, new branches in `find` / `insert` / `evict_one_returning_id`, etc. —
+run the perf-gate bench with criterion's baseline mechanism:
 
 ```bash
 # before your change (or on the parent commit)
-cargo bench --bench sieve_cache_perf -- --save-baseline before
+cargo bench -p senba-research --bench sieve_cache_perf -- --save-baseline before
 # after your change
-cargo bench --bench sieve_cache_perf -- --baseline before
+cargo bench -p senba-research --bench sieve_cache_perf -- --baseline before
 ```
 
 The bench has three scenarios (insert_u64 / mixed_u64 / insert_string).
@@ -100,15 +92,19 @@ scenario; treat **>5% regression on any scenario** as a signal to
 investigate before commit. Sampling and noise-threshold tuning live in the
 bench file itself.
 
+The bench lives in `senba-research` (it depends on `senba_research::workload`
+for Zipf generation), but the contract it gates is `senba::Cache`. Edits to
+the senba library hot path must respect this gate.
+
 Skipping the perf-gate is fine for pure documentation / test-only / clippy
 fixes — anything that demonstrably cannot affect the compiled `Cache` hot
 path. When in doubt, run it; it's cheap.
 
-This bench is **separate from `benches/micro.rs`** by design. `micro.rs` is
-the experimental playground (variants come and go, scenarios get rewritten
-freely); `sieve_cache_perf.rs` is the stable contract for the library
-`Cache` and should only be edited deliberately, with the understanding that
-edits invalidate prior saved baselines.
+This bench is **separate from `research/benches/micro.rs`** by design.
+`micro.rs` is the experimental playground (variants come and go, scenarios
+get rewritten freely); `sieve_cache_perf.rs` is the stable contract for the
+library `Cache` and should only be edited deliberately, with the
+understanding that edits invalidate prior saved baselines.
 
 ## Plot / analysis scripts (Python)
 
@@ -130,19 +126,22 @@ so the current working directory does not matter.
 
 ## Architecture
 
-Public (publishable) surface — compiles on default features, shipped to crates.io. The crates.io payload is allowlisted in `Cargo.toml`'s `package.include` to **exactly** these files:
+### `senba` (publishable)
 
-- `src/lib.rs` — **library-grade SIEVE implementation** (`Cache`, `Drain`, `Stats`, `SlotSize` and the `Slot16/32/64` brackets). Holds the public `Cache` type plus the module declarations / re-exports for the flat sibling files. `experimental` and `workload` modules are both `#[cfg(feature = "experimental")]`-gated.
-- `src/inner.rs` — per-shard `Inner` (the SIEVE state machine, SIMD `find`, evict / insert / remove). `src/iter.rs` — iterator types (`Iter`/`IterMut`/`Keys`/`Values`/`Drain`). `src/slot.rs` — `SlotSize` sealed trait. `src/stats.rs` — `Stats`. `src/hash.rs` — `Xxh3Build` (the default `H` on `Cache`). `src/tests/` — unit tests, split by topic. `benches/sieve_cache_perf.rs` guards perf for this set.
+The crates.io payload is allowlisted in the root `Cargo.toml`'s
+`package.include` to **exactly** these files:
 
-Research surface — gated behind the `experimental` feature flag, **not** in the crates.io payload (filtered out by `package.include`):
+- `src/lib.rs` — **library-grade SIEVE implementation** (`Cache`, `Drain`, `Stats`, `SlotSize` and the `Slot16/32/64` brackets). Holds the public `Cache` type plus the module declarations / re-exports for the flat sibling files.
+- `src/shard.rs` — per-shard state (the SIEVE state machine, SIMD `find`, evict / insert / remove). `src/iter.rs` — iterator types (`Iter`/`IterMut`/`Keys`/`Values`/`Drain`). `src/slot.rs` — `SlotSize` sealed trait. `src/stats.rs` — `Stats`. `src/hash.rs` — `Xxh3Build` (the default `H` on `Cache`). `src/tests/` — unit tests, split by topic.
+- `research/benches/sieve_cache_perf.rs` guards perf for this set (lives in `senba-research`).
 
-- `src/experimental/` — historical / exploratory SIEVE variants (`sieve_v0..v3`, `sieve_j3..j8`, `sieve_c8`) plus `sieve_orig` (the oracle), each a self-contained module exposing the v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`). Used by `benches/micro.rs` and the `bin/bench*` harnesses for comparison.
-- `src/experimental/mod.rs` also defines `pub trait CacheImpl<K, V>` — the cross-variant interface implemented by every variant (including `Cache`, behind the same feature gate). Re-exported at the crate root as `senba::CacheImpl` when the feature is on.
-- `src/experimental/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/.../Sieve.c`). Doubly-linked list + single hand + per-entry visited bit, in safe Rust via an arena. **Treat this as the spec / oracle** — every variant's hit/miss behavior on any trace must match `sieve_orig` exactly. Oracle cross-checks inside `src/tests/cache.rs` are tagged `#[cfg(feature = "experimental")]`.
-- `src/workload/` — Zipf generator + trace replay utilities. Used by the perf-gate, microbench, and oracle test.
-- `src/bin/bench.rs`, `src/bin/bench_concurrent.rs` — research drivers comparing senba's `Cache`, the experimental variants, `mini-moka`, and `moka`. The `mini-moka` / `moka` / `parking_lot` / `rand` / `rand_distr` deps are `optional = true` and only pulled in by the `experimental` feature.
-- `tests/oracle.rs`, `benches/micro.rs`, `benches/sieve_cache_perf.rs` — same gating.
+### `senba-research` (non-publishable)
+
+- `research/src/experimental/` — historical / exploratory SIEVE variants (`sieve_v0..v3`, `sieve_j3..j8`, `sieve_c8`) plus `sieve_orig` (the oracle), each a self-contained module exposing the v0-style API (`new`, `len`, `capacity`, `contains_key`, `get(&mut)`, `insert -> Option<(K,V)>`). Used by `research/benches/micro.rs` and the `research/src/bin/bench*` harnesses for comparison.
+- `research/src/experimental/mod.rs` defines `pub trait CacheImpl<K, V>` — the cross-variant interface implemented by every variant. Re-exported at `senba_research::CacheImpl`. The `impl CacheImpl for senba::Cache` adapter lives in `research/src/lib.rs`.
+- `research/src/experimental/sieve_orig.rs` — **faithful port of the NSDI'24 author reference** (`external/NSDI24-SIEVE/.../Sieve.c`). Doubly-linked list + single hand + per-entry visited bit, in safe Rust via an arena. **Treat this as the spec / oracle** — every variant's hit/miss behavior on any trace must match `sieve_orig` exactly. Oracle cross-checks for the senba library `Cache` live in `research/tests/oracle_cache_match.rs`; oracle cross-checks across the experimental variants live in `research/tests/oracle.rs`.
+- `research/src/workload/` — Zipf generator + trace replay utilities. Used by the perf-gate, micro-bench, and oracle test.
+- `research/src/bin/bench.rs`, `research/src/bin/bench_concurrent.rs` — research drivers comparing senba's `Cache`, the experimental variants, `mini-moka`, and `moka`. The `mini-moka` / `moka` / `parking_lot` / `rand` / `rand_distr` deps live on `senba-research` (not on `senba`).
 - `docs/reports/` — write-ups of what each experiment showed (see "Documenting results" below). The code is the artifact; the reports are the conclusions.
 
 ## Documenting results
@@ -160,7 +159,7 @@ Reports are the primary output of this project. Code and bench numbers that aren
 
 ## Adding a new SIEVE variant
 
-1. Add `src/experimental/sieve_<name>.rs` with the same public API as `sieve_orig`.
-2. Register it in `src/experimental/mod.rs`.
+1. Add `research/src/experimental/sieve_<name>.rs` with the same public API as `sieve_orig`.
+2. Register it in `research/src/experimental/mod.rs`.
 3. Mirror the test names in `sieve_orig` so equivalent behavior is checked side-by-side.
-4. The bar for correctness is "produces the same evicted-key sequence as `sieve_orig` on the same input trace" — not just "passes the unit tests".
+4. The bar for correctness is "produces the same evicted-key sequence as `sieve_orig` on the same input trace" — not just "passes the unit tests". Add a corresponding entry under `research/tests/oracle.rs`.

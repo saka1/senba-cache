@@ -1,15 +1,22 @@
+[workspace]
+members = [".", "research"]
+resolver = "2"
+
 [package]
 name = "senba"
 version = "0.1.0"
 edition = "2024"
-# Allowlist the crates.io payload. The publishable surface lives at the
-# crate root (`src/lib.rs` plus `shard.rs`, `iter.rs`, `slot.rs`,
-# `stats.rs`, `hash.rs`, and the `tests/` submodule). Everything else
-# (research variants under `src/experimental/`, `src/workload/`,
-# research drivers under `src/bin/`, oracle tests, vendored references,
-# design notes) stays in the repo for development but is not shipped to
-# consumers. `include` is intentionally chosen over `exclude` so adding
-# new research files cannot accidentally leak into the published crate.
+rust-version = "1.85"
+description = "A fast, single-threaded cache using the sharded SIEVE policy."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/saka1/senba-cache"
+keywords = ["cache", "sieve", "lru", "in-memory"]
+categories = ["caching", "data-structures"]
+# senba lives at the workspace root, so the package directory contains the
+# whole repo tree (`research/`, `external/`, `docs/`, etc.). Allowlist what
+# actually ships to crates.io — the publishable surface (crate-root files +
+# unit tests) plus README and LICENSE.
 include = [
     "src/lib.rs",
     "src/shard.rs",
@@ -20,71 +27,11 @@ include = [
     "src/tests/**/*.rs",
     "Cargo.toml",
     "/README.md",
+    "/LICENSE",
 ]
 
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-# Used by `src/workload/` (Zipf generator) — research only.
-rand = { version = "0.10", optional = true }
-rand_distr = { version = "0.6", optional = true }
-# W-TinyLFU 比較用 (bench からのみ参照)。moka 本体ではなく mini-moka を選ぶのは
-# synchronous + background thread 無しで CPU を奪われない公平条件を作るため。
-mini-moka = { version = "0.10", optional = true }
-# moka 0.12+ は adaptive window sizing が入っており、scan-heavy で window を広げる。
-# mini-moka との比較で「default tuning がボトルネックか / W-TinyLFU 系全般の性質か」を切り分ける。
-moka = { version = "0.12", default-features = false, features = ["sync"], optional = true }
-# c8 (並行 j8) で writer 直列化に使う。std::sync::Mutex より uncontended が速く
-# (~12 ns vs ~25 ns)、PoisonError も持たない。read path は lock-free なので
-# writer 競合域でだけ効く。
-parking_lot = { version = "0.12", optional = true }
-
-[dev-dependencies]
-criterion = { version = "0.8", default-features = false }
-
-[features]
-# Enables the research / dev surface: `experimental` module (historical
-# SIEVE variants), `sieve_orig` (oracle reference port), `workload`
-# (Zipf / trace replay), the `CacheImpl` trait used by the cross-variant
-# test / bench drivers, and the `impl CacheImpl for Cache` adapter. The
-# publishable surface (`Cache`, `Drain`, `Stats`, `SlotSize`, and the
-# `senba::hash::Xxh3Build` default hasher) is unaffected by this flag.
-experimental = [
-    "dep:mini-moka",
-    "dep:moka",
-    "dep:parking_lot",
-    "dep:rand",
-    "dep:rand_distr",
-]
-
-[[bench]]
-name = "micro"
-harness = false
-required-features = ["experimental"]
-
-# Performance regression bench for the library-grade `senba::Cache`.
-# Quality-gate companion to `cargo test`: fast (~10s), narrow scenario
-# set, fixed seeds, intended for `--save-baseline` / `--baseline`
-# comparison. Depends on `senba::workload` (Zipf), so requires the
-# `experimental` feature.
-[[bench]]
-name = "sieve_cache_perf"
-harness = false
-required-features = ["experimental"]
-
-# Research drivers — both consume `senba::CacheImpl` and the
-# `experimental` / `sieve_orig` modules. Listing them explicitly disables
-# Cargo's `src/bin/` auto-discovery for default-feature builds.
-[[bin]]
-name = "bench"
-required-features = ["experimental"]
-
-[[bin]]
-name = "bench_concurrent"
-required-features = ["experimental"]
-
-[[test]]
-name = "oracle"
-required-features = ["experimental"]
 
 # samply / perf annotate でソース行と asm を対応させるための debuginfo。
 # bench は release プロファイルから派生するので両方に入れておく。

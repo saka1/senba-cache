@@ -1,9 +1,9 @@
 //! sieve_orig (NSDI'24 著者参照ポート) を oracle として、
 //! 他の variant が同じトレースで同じ evict 列を出すことを検証する差分テスト。
 
-use senba::workload::file;
-use senba::workload::zipf::ZipfGen;
-use senba::{
+use senba_research::workload::file;
+use senba_research::workload::zipf::ZipfGen;
+use senba_research::{
     CacheImpl,
     experimental::{sieve_j3, sieve_j8, sieve_orig, sieve_v0, sieve_v1, sieve_v2, sieve_v3},
 };
@@ -72,7 +72,10 @@ fn v0_matches_orig_on_synthetic_zipf() {
 
 #[test]
 fn v0_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[256usize, 1024, 4096] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);
@@ -120,7 +123,10 @@ fn v1_matches_orig_on_synthetic_zipf() {
 
 #[test]
 fn v1_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[256usize, 1024, 4096] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);
@@ -167,7 +173,10 @@ fn v2_matches_orig_on_synthetic_zipf() {
 
 #[test]
 fn v2_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[256usize, 1024, 4096] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);
@@ -215,7 +224,10 @@ fn v3_matches_orig_on_synthetic_zipf() {
 
 #[test]
 fn v3_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[256usize, 1024, 4096] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);
@@ -254,7 +266,10 @@ fn j3_matches_orig_on_synthetic_zipf() {
 
 #[test]
 fn j3_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[256usize, 1024, 4096] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);
@@ -284,7 +299,10 @@ fn j8_1shard_matches_orig_on_synthetic_zipf() {
 /// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
 #[test]
 fn j8_1shard_matches_orig_on_bundled_zipf() {
-    let path = "external/NSDI24-SIEVE/mydata/zipf/zipf_1.0";
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
     for &cap in &[16usize, 32, 64] {
         let trace_a = file::from_path(path).unwrap().take(100_000);
         let trace_b = file::from_path(path).unwrap().take(100_000);

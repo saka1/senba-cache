@@ -741,12 +741,20 @@ dependencies = [
 name = "senba"
 version = "0.1.0"
 dependencies = [
+ "xxhash-rust",
+]
+
+[[package]]
+name = "senba-research"
+version = "0.0.0"
+dependencies = [
  "criterion",
  "mini-moka",
  "moka",
  "parking_lot",
  "rand",
  "rand_distr",
+ "senba",
  "xxhash-rust",
 ]
 

@@ -7,15 +7,16 @@ two runs months apart are directly comparable, while the research
 microbench is a playground that gets rewritten freely as new variants
 land.
 
-| Harness                      | Default features? | Audience              | Stability                |
-| ---------------------------- | :---------------: | --------------------- | ------------------------ |
-| `benches/sieve_cache_perf.rs` |       yes         | Library contributors  | Stable contract          |
-| `benches/micro.rs`            |       no¹         | SIEVE researchers     | Rewritten as needed      |
+| Harness                                   | Crate            | Audience              | Stability           |
+| ----------------------------------------- | ---------------- | --------------------- | ------------------- |
+| `research/benches/sieve_cache_perf.rs`    | `senba-research` | Library contributors  | Stable contract     |
+| `research/benches/micro.rs`               | `senba-research` | SIEVE researchers     | Rewritten as needed |
 
-¹ Requires `--features experimental`. So do `src/bin/bench.rs`,
-`src/bin/bench_concurrent.rs`, and `tests/oracle.rs`.
+Both harnesses live in the non-publishable `senba-research` workspace
+member alongside the experimental variants and the Zipf workload
+generator. The publishable `senba` crate has no benches of its own.
 
-## Perf-regression gate (`benches/sieve_cache_perf.rs`)
+## Perf-regression gate (`research/benches/sieve_cache_perf.rs`)
 
 This is the quality-gate companion to `cargo test` / `cargo clippy` for
 the public `senba::Cache`. It uses three fixed scenarios
@@ -28,10 +29,10 @@ Use criterion's baseline mechanism to compare before / after a change:
 
 ```bash
 # before your change (or on the parent commit)
-cargo bench --bench sieve_cache_perf -- --save-baseline before
+cargo bench -p senba-research --bench sieve_cache_perf -- --save-baseline before
 
 # after your change
-cargo bench --bench sieve_cache_perf -- --baseline before
+cargo bench -p senba-research --bench sieve_cache_perf -- --baseline before
 ```
 
 Criterion prints `Performance has regressed.` / `... has improved.` per
@@ -39,20 +40,20 @@ scenario. Treat **>5% regression on any scenario** as a signal to
 investigate before merging — wall-clock noise on a quiet machine is
 typically ±2–3%, so 5% is a deliberate margin.
 
-The gate uses only the public API (`Cache`, `Slot32`, `Slot64`,
-`workload::zipf::ZipfGen`) — if a refactor breaks the public path, this
-bench notices.
+The gate uses only `senba`'s public API (`Cache`, `Slot32`, `Slot64`)
+plus `senba_research::workload::zipf::ZipfGen` for the trace — if a
+refactor breaks the senba public path, this bench notices.
 
-## Research microbench (`benches/micro.rs`)
+## Research microbench (`research/benches/micro.rs`)
 
 The microbench is the experimental playground used to compare SIEVE
-variants under synthetic workloads. It runs the `experimental` /
-`sieve_orig` modules side-by-side, so it requires the feature flag.
+variants under synthetic workloads. It runs the
+`senba_research::experimental::*` modules side-by-side.
 
 ```bash
-cargo bench --bench micro --features experimental
-cargo bench --bench micro --features experimental insert_only        # filter
-cargo bench --bench micro --features experimental -- --profile-time 5 \
+cargo bench -p senba-research --bench micro
+cargo bench -p senba-research --bench micro insert_only        # filter
+cargo bench -p senba-research --bench micro -- --profile-time 5 \
     'insert_only/v0/skew1/10000'
 ```
 
@@ -60,7 +61,7 @@ cargo bench --bench micro --features experimental -- --profile-time 5 \
 just run the loop" — useful when you want to attach a profiler.
 
 Configuration is set by `(skew, capacity)` over a Zipf trace generated
-by `senba::workload::zipf`. The defaults follow NSDI'24 §5.3 /
+by `senba_research::workload::zipf`. The defaults follow NSDI'24 §5.3 /
 §6.1 synthetic-Zipf shape (see `docs/sieve-paper-workload.md` if you
 have access to the source tree, excluded from the published crate):
 
@@ -77,7 +78,7 @@ uv run --project scripts python scripts/criterion_compare.py
 ```
 
 If you change `SKEWS`, `CAP_RATIOS`, `N_KEYS`, or `TRACE_LEN` in
-`benches/micro.rs`, also update the same constants in
+`research/benches/micro.rs`, also update the same constants in
 `scripts/criterion_compare.py`.
 
 ## Profiling with samply
@@ -108,7 +109,7 @@ not needed).
 
 ```bash
 # Build the bench binary
-cargo bench --bench micro --features experimental --no-run
+cargo bench -p senba-research --bench micro --no-run
 
 # Note the path of the produced micro-XXXX binary
 BIN=$(ls -t target/release/deps/micro-* | grep -v '\.d$' | head -1)

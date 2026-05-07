@@ -36,8 +36,8 @@
 //! investigate before merging.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use senba::workload::zipf::ZipfGen;
 use senba::{Cache, Slot32, Slot64};
+use senba_research::workload::zipf::ZipfGen;
 use std::hint::black_box;
 use std::time::Duration;
 

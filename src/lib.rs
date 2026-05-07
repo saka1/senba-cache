@@ -50,13 +50,6 @@ pub(crate) use shard::{EMPTY, Entry, MAX_PER_SHARD, Shard};
 #[cfg(test)]
 pub(crate) use shard::{LIVE, VISITED};
 
-#[cfg(feature = "experimental")]
-pub mod experimental;
-#[cfg(feature = "experimental")]
-pub mod workload;
-#[cfg(feature = "experimental")]
-pub use experimental::CacheImpl;
-
 // ---------------- Public type Cache ----------------
 
 /// Publishable SIEVE cache. The entry stride is specified at the type level via `SlotSize`.
@@ -529,39 +522,6 @@ where
 }
 
 // `Iter` / `IterMut` / `Keys` / `Values` / `Drain` live in `iter.rs`.
-
-// `CacheImpl` intentionally does **not** expose `remove` (`is_empty` has a default
-// impl on the trait). All sibling variants (sieve_orig, sieve_v*, sieve_j*) follow
-// the same convention, so cross-variant bench / oracle drivers stay symmetric.
-// `Cache::remove` is available on the inherent impl above when needed directly.
-//
-// Gated behind the `experimental` feature because `CacheImpl` is research /
-// dev tooling — see `src/experimental/mod.rs` for the trait definition.
-#[cfg(feature = "experimental")]
-impl<K, V, S> crate::CacheImpl<K, V> for Cache<K, V, S>
-where
-    K: Hash + Eq,
-    S: SlotSize,
-{
-    fn new(capacity: usize) -> Self {
-        Self::new(capacity)
-    }
-    fn capacity(&self) -> usize {
-        self.capacity()
-    }
-    fn len(&self) -> usize {
-        self.len()
-    }
-    fn get(&mut self, key: &K) -> Option<&V> {
-        self.get(key)
-    }
-    fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
-        self.insert(key, value)
-    }
-    fn contains_key(&self, key: &K) -> bool {
-        self.contains_key(key)
-    }
-}
 
 #[cfg(test)]
 mod tests;
