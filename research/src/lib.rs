@@ -10,6 +10,7 @@
 //! cross-variant drivers can drop it in alongside the experimental variants.
 
 pub mod experimental;
+pub mod single_shard;
 pub mod workload;
 
 pub use experimental::CacheImpl;

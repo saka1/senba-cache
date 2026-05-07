@@ -162,7 +162,7 @@ struct Entry<K, V> {
 type EntriesArena<K, V> = UnsafeCell<Box<[MaybeUninit<Entry<K, V>>]>>;
 
 /// 1 shard 分の並行 SIEVE。
-pub(crate) struct Shard<K, V> {
+pub struct Shard<K, V> {
     capacity: usize,
     /// tag 列。reader が atomic load、writer が Mutex 配下で atomic store。
     /// `Box<[AtomicU16]>` は resize しない (固定長)。
@@ -200,6 +200,20 @@ impl<K, V> Shard<K, V> {
     fn id_of(tag: u16) -> usize {
         ((tag & Self::ID_MASK) >> Self::ID_SHIFT) as usize
     }
+
+    /// reader-safe な capacity 取得。
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// reader-safe な live entry 数の取得。Acquire load なので writer の最新値を観測する。
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<K, V> Shard<K, V>
@@ -207,7 +221,7 @@ where
     K: Hash + Eq + Copy,
     V: Copy,
 {
-    fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
         assert!(
             capacity <= MAX_PER_SHARD,
@@ -374,12 +388,18 @@ where
     }
 
     /// reader 用 contains。値を copy しないだけで find_get と同じ seqlock dance。
-    fn contains(&self, key: &K, hash: u64) -> bool {
+    pub fn contains(&self, key: &K, hash: u64) -> bool {
         self.find_get(key, Self::needle_from_hash(hash)).is_some()
     }
 
+    /// reader 用 get。adapter / single-shard testbed が直接呼ぶための pub wrapper。
+    /// 内部は `find_get` と同じ seqlock dance。VISITED bit を立てる side effect あり。
+    pub fn get_by_hash(&self, key: &K, hash: u64) -> Option<V> {
+        self.find_get(key, Self::needle_from_hash(hash))
+    }
+
     /// writer (insert) 用。Mutex を取って既存 j8 の eviction ロジックを実行する。
-    fn insert(&self, key: K, value: V, hash: u64) -> Option<(K, V)> {
+    pub fn insert(&self, key: K, value: V, hash: u64) -> Option<(K, V)> {
         let needle = Self::needle_from_hash(hash);
         let mut state = self.writer.lock();
 

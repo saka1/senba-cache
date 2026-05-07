@@ -23,6 +23,7 @@
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext, find-avx2-avx512 |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
+| 単一 shard testbed (c10 設計の出発点) | single-shard-baseline |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -229,6 +230,19 @@ call ごと −2〜−3 cy。runtime 検出は CPUID vendor + family check (AMD 
 fast PEXT) を推奨、起動コストゼロ。前報 Tier-S/A とは概ね直交、B1 (SoA tag split) とは
 P2 が排他で prototype 比較で決着。本稿は解析ノート (実測なし)、推奨着手順は
 S1/S2/S3 → P3 → A2 → P2 → (B1 vs P2 prototype 比較)。
+
+### 2026-05-08-single-shard-baseline.md
+新 testbed `bench_single_shard` (c8/c9 の **shard 内側 1 個だけ** を N thread で叩く) の
+baseline sweep + c10 設計向け方向付け。`SingleShard` trait + closure-based read を
+`research/src/single_shard.rs` に新設、c8 内部 `Shard` を pub 化して adapter wrap、c9 は
+`with_shards(cap, 1)` で単一 shard 化。3 workload 軸 (zipf×3 skew / adversarial-hot /
+uniform) × 3 op-mix × 5 threads × 2 variant = 150 trial。**uniform read-only 16T で c8
+352 Mops vs c9 5.25 Mops の 67x 差** (Mutex per shard は contention 無くても scaling
+殺す)、**adversarial-hot read-only で c8 も 16T で 31 Mops にプラトー** (visited bit
+`fetch_or` の cache-line ping-pong)、**gim 50/50 では c8 すら 1T < 2T** (writer Mutex
+coverage が広すぎ) など、c10 設計の attack 順位 (visited bit cache-line 分離 → writer
+lock-free claim → false sharing 排除) を定量化した baseline。HR は c8/c9 全 150 点で
+0.001 以下の差で一致、testbed 自体の正しさも自己検証済み。
 
 ### 2026-05-08-find-avx2-avx512.md
 `find-avx2-frontier.md` Tier-C で「non-portable」と棚上げした AVX-512 を、server 用 CPU
