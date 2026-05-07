@@ -43,6 +43,7 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache;
+use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
@@ -55,13 +56,13 @@ const CHUNK_OPS: usize = 1024;
 /// - `get` は hit/miss だけ返す (値は bench で使わない、clone コスト分が乗るのは
 ///   どの variant も同条件)。
 trait ConcCache: Send + Sync + 'static {
-    fn build(capacity: usize) -> Arc<Self>;
+    fn build(capacity: usize, shards: usize) -> Arc<Self>;
     fn get_hit(&self, key: &u64) -> bool;
     fn insert(&self, key: u64, value: u64);
 }
 
 impl<const S: usize> ConcCache for ConcurrentSieveCache<u64, u64, S> {
-    fn build(capacity: usize) -> Arc<Self> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
         Arc::new(ConcurrentSieveCache::new(capacity))
     }
     #[inline]
@@ -74,8 +75,22 @@ impl<const S: usize> ConcCache for ConcurrentSieveCache<u64, u64, S> {
     }
 }
 
+impl ConcCache for ConcurrentSieveC9<u64, u64> {
+    fn build(capacity: usize, shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC9::with_shards(capacity, shards))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC9::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveC9::insert(self, key, value);
+    }
+}
+
 impl ConcCache for moka::sync::Cache<u64, u64> {
-    fn build(capacity: usize) -> Arc<Self> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
         // moka の Cache 自体が内部で Arc を持っているため Arc<Cache> は二重 Arc
         // になるが、harness を generic に保つために統一する。clone はどちらにせよ
         // cheap (bench loop の hot path には居ない)。
@@ -92,7 +107,7 @@ impl ConcCache for moka::sync::Cache<u64, u64> {
 }
 
 impl ConcCache for mini_moka::sync::Cache<u64, u64> {
-    fn build(capacity: usize) -> Arc<Self> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
         Arc::new(mini_moka::sync::Cache::new(capacity as u64))
     }
     #[inline]
@@ -102,6 +117,25 @@ impl ConcCache for mini_moka::sync::Cache<u64, u64> {
     #[inline]
     fn insert(&self, key: u64, value: u64) {
         mini_moka::sync::Cache::insert(self, key, value);
+    }
+}
+
+/// 操作ミックス。
+/// - `Gim`: 既存の get-if-miss-insert (= miss なら insert)。元の bench_concurrent と同じ。
+/// - `ReadHeavy`: 95% get / 5% insert。get と insert は別 Zipf draw を使う
+///   (insert 側は seed をずらして cache の hot key 集合を直接押し込まない)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpMix {
+    Gim,
+    ReadHeavy,
+}
+
+impl OpMix {
+    fn as_str(self) -> &'static str {
+        match self {
+            OpMix::Gim => "gim",
+            OpMix::ReadHeavy => "read-heavy",
+        }
     }
 }
 
@@ -116,8 +150,10 @@ struct Args {
     seed: u64,
     variants: Vec<String>,
     /// c8 の SHARDS (const generic)。runtime 値を const に dispatch する match で使う。
+    /// c9 では `with_shards` 引数として直接渡す。
     /// moka / mini-moka には影響しない (内部 shard を独自管理)。
     shards: usize,
+    op_mix: OpMix,
 }
 
 fn parse_args() -> Args {
@@ -132,6 +168,7 @@ fn parse_args() -> Args {
     let mut seed: u64 = 42;
     let mut variants: Vec<String> = vec!["c8".into()];
     let mut shards: usize = 8;
+    let mut op_mix = OpMix::Gim;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -152,11 +189,19 @@ fn parse_args() -> Args {
                 variants = val().split(',').map(|s| s.trim().to_string()).collect();
             }
             "--shards" => shards = val().parse().expect("--shards is usize"),
+            "--op-mix" => {
+                let v = val();
+                op_mix = match v.as_str() {
+                    "gim" => OpMix::Gim,
+                    "read-heavy" => OpMix::ReadHeavy,
+                    other => panic!("--op-mix must be gim|read-heavy, got: {other}"),
+                };
+            }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_concurrent [--variant c8,moka,mini_moka] \
-                     [--shards N] --cap N --threads N --skew F --keys N \
-                     --ops N --warmup N --trials N --seed N"
+                    "usage: bench_concurrent [--variant c8,c9,moka,mini_moka] \
+                     [--shards N] [--op-mix gim|read-heavy] --cap N --threads N \
+                     --skew F --keys N --ops N --warmup N --trials N --seed N"
                 );
                 std::process::exit(0);
             }
@@ -182,8 +227,8 @@ fn parse_args() -> Args {
     );
     for v in &variants {
         assert!(
-            matches!(v.as_str(), "c8" | "moka" | "mini_moka"),
-            "unknown variant: {v} (expected c8|moka|mini_moka)"
+            matches!(v.as_str(), "c8" | "c9" | "moka" | "mini_moka"),
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka)"
         );
     }
 
@@ -198,6 +243,7 @@ fn parse_args() -> Args {
         seed,
         variants,
         shards,
+        op_mix,
     }
 }
 
@@ -207,13 +253,18 @@ struct ThreadResult {
     chunk_means_ns: Vec<f64>,
 }
 
+/// `read-heavy` mode で「op が insert か」を判定する。Zipf draw を 1 回追加で
+/// 流すよりも、index 単位の単純な mod 判定 (= 5% insert) が overhead が小さい。
+const READ_HEAVY_INSERT_EVERY: usize = 20;
+
 fn run_trial<C: ConcCache>(args: &Args) -> TrialResult {
-    let cache = C::build(args.cap);
+    let cache = C::build(args.cap, args.shards);
     // +1 で main thread も barrier に並ぶ (warmup 完了 → measurement 開始の
     // 全 thread 同時スタートを成立させる)。
     let barrier = Arc::new(Barrier::new(args.threads + 1));
     let warmup_per_thread = args.warmup / args.threads;
     let ops_per_thread = args.ops / args.threads;
+    let op_mix = args.op_mix;
 
     let results: Vec<ThreadResult> = std::thread::scope(|s| {
         let mut handles = Vec::new();
@@ -226,7 +277,13 @@ fn run_trial<C: ConcCache>(args: &Args) -> TrialResult {
             handles.push(s.spawn(move || {
                 // Zipf テーブル構築は measurement 外。
                 let mut zipf = ZipfGen::new(skew, keys, seed);
+                // read-heavy では insert 側を別 seed の Zipf で draw する
+                // (cache を「自分が今 read している hot key 集合そのもの」で汚染しないため)。
+                // 0xC0FFEE_DEAD_BEEF は単に違う seed を選ぶための定数。
+                let mut zipf_ins = ZipfGen::new(skew, keys, seed ^ 0x00C0_FFEE_DEAD_BEEF_u64);
                 // warmup: 並列に warm 状態を作る。直列 prefill より steady state に近い。
+                // 計測 mode (gim / read-heavy) に依らず GIM で warm する: cache を
+                // hot key で埋める段階は read-heavy でも必要。
                 for _ in 0..warmup_per_thread {
                     let k = zipf.next().unwrap();
                     if !cache.get_hit(&k) {
@@ -241,12 +298,27 @@ fn run_trial<C: ConcCache>(args: &Args) -> TrialResult {
                     Vec::with_capacity(ops_per_thread / CHUNK_OPS + 1);
                 let mut chunk_t0 = t0;
                 let mut chunk_count = 0usize;
-                for _ in 0..ops_per_thread {
-                    let k = zipf.next().unwrap();
-                    if cache.get_hit(&k) {
-                        hits += 1;
-                    } else {
-                        cache.insert(k, k);
+                for i in 0..ops_per_thread {
+                    match op_mix {
+                        OpMix::Gim => {
+                            let k = zipf.next().unwrap();
+                            if cache.get_hit(&k) {
+                                hits += 1;
+                            } else {
+                                cache.insert(k, k);
+                            }
+                        }
+                        OpMix::ReadHeavy => {
+                            if i.is_multiple_of(READ_HEAVY_INSERT_EVERY) {
+                                let k = zipf_ins.next().unwrap();
+                                cache.insert(k, k);
+                            } else {
+                                let k = zipf.next().unwrap();
+                                if cache.get_hit(&k) {
+                                    hits += 1;
+                                }
+                            }
+                        }
                     }
                     chunk_count += 1;
                     if chunk_count == CHUNK_OPS {
@@ -335,12 +407,17 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     // shards 列は moka/mini-moka では「N/A」相当 (内部 shard を独自管理)。
-    // CSV を tidy に保つため、c8 以外は 0 を入れる。集計時は variant でフィルタする想定。
-    let shards_col = if variant == "c8" { args.shards } else { 0 };
+    // CSV を tidy に保つため、c8/c9 以外は 0 を入れる。集計時は variant でフィルタする想定。
+    let shards_col = if matches!(variant, "c8" | "c9") {
+        args.shards
+    } else {
+        0
+    };
     println!(
-        "{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
+        "{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
         variant,
         trial,
+        args.op_mix.as_str(),
         args.skew,
         args.keys,
         args.threads,
@@ -370,12 +447,13 @@ fn main() {
     let args = parse_args();
 
     println!(
-        "variant,trial,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
+        "variant,trial,op_mix,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
     );
     for variant in &args.variants {
         for trial in 0..args.trials {
             let r = match variant.as_str() {
                 "c8" => run_c8(&args),
+                "c9" => run_trial::<ConcurrentSieveC9<u64, u64>>(&args),
                 "moka" => run_trial::<moka::sync::Cache<u64, u64>>(&args),
                 "mini_moka" => run_trial::<mini_moka::sync::Cache<u64, u64>>(&args),
                 other => panic!("unknown variant: {other}"),

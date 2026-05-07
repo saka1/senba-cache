@@ -5,6 +5,7 @@
 //! variants kept around for benchmark and design comparison.
 
 pub mod sieve_c8;
+pub mod sieve_c9;
 pub mod sieve_j3;
 pub mod sieve_j4;
 pub mod sieve_j5;

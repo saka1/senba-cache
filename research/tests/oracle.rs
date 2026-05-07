@@ -302,6 +302,54 @@ fn j8_1shard_matches_orig_on_synthetic_zipf() {
     }
 }
 
+/// c9 (per-shard `Mutex<Shard>` で wrap した SIEVE) は senba::Cache の shift-on-evict
+/// を移植した形なので、1 shard 同期で sieve_orig と eviction stream が完全一致するはず。
+/// c9 の API は `get -> Option<V>` (native の `&self` 経由) なので、CacheImpl trait
+/// 経由ではなく直接呼ぶ。
+#[test]
+fn c9_1shard_matches_orig_on_synthetic_zipf() {
+    use senba_research::experimental::sieve_c9::ConcurrentSieveCache as C9;
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace_a: Vec<u64> = ZipfGen::new(skew, 10_000, 42).take(200_000).collect();
+        let mut orig: Vec<Option<(u64, u64)>> = Vec::with_capacity(trace_a.len());
+        let mut c9_evicts: Vec<Option<(u64, u64)>> = Vec::with_capacity(trace_a.len());
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: C9<u64, u64> = C9::with_shards(cap, 1);
+        for k in &trace_a {
+            orig.push(a.insert(*k, *k));
+            c9_evicts.push(b.insert(*k, *k));
+        }
+        assert_eviction_streams_eq(
+            &orig,
+            &c9_evicts,
+            &format!("c9(1-shard) vs orig zipf skew={skew} cap={cap}"),
+        );
+    }
+}
+
+/// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
+#[cfg(feature = "external-traces")]
+#[test]
+fn c9_1shard_matches_orig_on_bundled_zipf() {
+    use senba_research::experimental::sieve_c9::ConcurrentSieveCache as C9;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../external/NSDI24-SIEVE/mydata/zipf/zipf_1.0"
+    );
+    for &cap in &[16usize, 32, 64] {
+        let trace_a: Vec<u64> = file::from_path(path).unwrap().take(100_000).collect();
+        let mut orig: Vec<Option<(u64, u64)>> = Vec::with_capacity(trace_a.len());
+        let mut c9_evicts: Vec<Option<(u64, u64)>> = Vec::with_capacity(trace_a.len());
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: C9<u64, u64> = C9::with_shards(cap, 1);
+        for k in &trace_a {
+            orig.push(a.insert(*k, *k));
+            c9_evicts.push(b.insert(*k, *k));
+        }
+        assert_eviction_streams_eq(&orig, &c9_evicts, &format!("c9(1-shard) bundled cap={cap}"));
+    }
+}
+
 /// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
 #[cfg(feature = "external-traces")]
 #[test]
