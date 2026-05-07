@@ -157,14 +157,18 @@ where
         }
     }
 
+    /// Total number of entries the cache can hold across all shards. Set at
+    /// construction and never changes.
     pub fn capacity(&self) -> usize {
         self.shards.iter().map(|s| s.capacity).sum()
     }
 
+    /// Number of live entries currently held across all shards.
     pub fn len(&self) -> usize {
         self.shards.iter().map(|s| s.len).sum()
     }
 
+    /// Returns `true` when no entries are live in any shard.
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|s| s.len == 0)
     }
@@ -187,6 +191,8 @@ where
         s
     }
 
+    /// Returns `true` if `key` is currently in the cache. Non-promoting:
+    /// does not set VISITED and is not counted in `hits` / `misses`.
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -196,6 +202,9 @@ where
         self.shards[self.shard_of_hash(h)].contains(key, h, self.has_avx2_bmi1)
     }
 
+    /// Returns a reference to the value for `key`, or `None` if absent.
+    /// Sets the SIEVE VISITED bit on hit so the entry counts as recently
+    /// accessed for eviction; updates `hits` / `misses`.
     #[inline]
     pub fn get<Q>(&mut self, key: &Q) -> Option<&V>
     where
@@ -220,6 +229,10 @@ where
         self.shards[i].get_mut(key, h, self.has_avx2_bmi1)
     }
 
+    /// Inserts `(key, value)`. If `key` already exists its value is
+    /// replaced and the previous `(K, V)` is returned. Otherwise, when the
+    /// receiving shard is full, the SIEVE-chosen victim is evicted and
+    /// returned. Returns `None` when the entry simply fills empty space.
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let h = self.hasher.hash_one(&key);
@@ -227,6 +240,8 @@ where
         self.shards[i].insert(key, value, h, self.has_avx2_bmi1)
     }
 
+    /// Removes the entry for `key` and returns its value, or `None` if
+    /// absent. Explicit removal is not counted in `evictions`.
     pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
