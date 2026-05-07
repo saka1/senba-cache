@@ -20,9 +20,9 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
-| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier |
+| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
-| c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design |
+| c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -205,3 +205,27 @@ check 経由で LLVM が `((tag & MASK) >> SHIFT) << SHIFT == tag & MASK` を畳
 再構築されている点と `Shard::len` が 2nd cache line に落ちている点も観測。本稿は解析
 ノート (実測なし) で、Tier-S 4 件 + Tier-A (inner unroll ×2 / 4-chunk specialization)
 + Tier-B (SoA tag split) の着手順を提案。
+
+### 2026-05-08-c8-vs-c9-thread-sweep.md
+P2: c8 (lock-free seqlock + AtomicU16 visited) vs c9 (per-shard `Mutex<Shard>` wrap)
+vs moka 0.12 vs mini-moka 0.10 を 4 variant × 5 thread (1〜16) × 3 skew (0.7/1.0/1.2)
+× 2 op-mix (gim / read-heavy 95-5) で sweep。**結論は明確に c8 ベース**: 1T と低 skew
+では c9 が +8〜26% 上回る (uncontended Mutex < seqlock dance) が、scaling 側は skew で
+完全に分かれ、skew=1.2 / 16T では c8 92.5 Mops vs c9 10.6 Mops と **8.7x の差** が出る
+(c9 は 8T 以降で逆 scale)。read-heavy でも同形 (hot Mutex は reader も詰まらせる)。
+HR は c8/c9 完全一致 (両者 senba::Cache の shift-on-evict を継承)。p99 chunk latency も
+高 skew で c9 が c8 の 8-16x に劣化。P3 (`senba::concurrent::Cache`) は c8 を母体に、
+1T fast path を c9 から逆輸入する方向で別 design doc に起案。c10 候補として RwLock per
+shard / hot shard sub-shard 分割 / lock-free senba::Shard 化を §6 で提案。
+
+### 2026-05-08-find-avx2-pext.md
+`find-avx2-frontier.md` §C2 で「Zen 1/2 で PEXT 激遅、non-portable 前提なら別議論」と
+棚上げした BMI2 PEXT/PDEP 採用案を、Zen 1/2 (2017〜2019) のシェア低下と CPUID family
+check 1 個で fast path 専用に焼ける見通しが立ったことから解禁、机上検討まで進めたもの。
+hot path に効くのは 2 軸: **P2** (PEXT で pair-mask → lane-mask 圧縮 + inner unroll ×2)
+が per_shard=64 帯で −3〜−5 cy/scan、Path A の load 並列化と Path B の BLSR ×1 を同時に
+取れる本命。**P3** (`needle_from_hash` を PDEP 1 命令化) は依存関係ゼロでクリーン採用、
+call ごと −2〜−3 cy。runtime 検出は CPUID vendor + family check (AMD family ≥ 0x19 で
+fast PEXT) を推奨、起動コストゼロ。前報 Tier-S/A とは概ね直交、B1 (SoA tag split) とは
+P2 が排他で prototype 比較で決着。本稿は解析ノート (実測なし)、推奨着手順は
+S1/S2/S3 → P3 → A2 → P2 → (B1 vs P2 prototype 比較)。
