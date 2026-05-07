@@ -22,6 +22,7 @@
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
+| c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -172,6 +173,14 @@ reuse が visited bit 絡みで oracle と発散する点もメモ。
 の thin wrapper、その奥の worker をアトム (non-inline)、アトム内部の小さい helper は
 inline」が正解で、perf-gate でも insert_string -4〜-9% の改善を確認。`Inner::*` に
 `#[inline]` を撒くのはコード肥大方向の bias で筋が悪い、という設計原則も明文化。
+
+### 2026-05-08-sieve-c9-design.md
+`sieve_c9` (senba::Cache の最新 ST 実装 = j8 + shift-on-evict + AlignedTags を、
+per-shard `Mutex<Shard>` で wrap した並行版) の設計 + bench 比較計画。`V: Clone` で
+業界主流 (moka / quick_cache / jedisct1) に整合する API 形を取り、c8 (V: Copy +
+seqlock-via-tag) とは別アルゴリズムとして並走させる。本 spec は P1 (c9 設計確定) +
+P2 (bench harness 拡張 + sweep 計画確定) まで。正式版 `senba::concurrent::Cache`
+への昇格 (P3) はスコープアウト。
 
 ### 2026-05-07-aligned-tags-load.md
 `Shard::find_avx2` の SIMD load を `Vec<u16>` + `loadu` から `AlignedTags`
