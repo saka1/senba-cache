@@ -7,7 +7,7 @@
 //! Design constraints (intentionally narrow — see `benches/micro.rs` for the
 //! experimental playground that gets rewritten freely):
 //!
-//! - **Small scenario set**, so the whole run fits in ~10s.
+//! - **Small scenario set**, so the whole run fits in ~25–30s.
 //! - **Fixed seeds and trace lengths**, so two runs on the same machine are
 //!   directly comparable via `--save-baseline` / `--baseline`.
 //! - **Public API only** (`Cache<K, V, S>`). No probing into `Inner`,
@@ -58,11 +58,25 @@ fn perf_group<'a>(
     name: &str,
 ) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
     let mut g = c.benchmark_group(name);
-    // Slightly tighter than micro.rs: this bench is for regression checking,
-    // not exploration, so we keep variance low at the cost of total runtime.
-    g.sample_size(30)
-        .warm_up_time(Duration::from_millis(500))
-        .measurement_time(Duration::from_secs(2));
+    // Tuned for low-variance regression checking, not exploration. The numbers
+    // below were picked so that running the bench twice back-to-back with no
+    // code change reports "within noise threshold" on all three scenarios on a
+    // typical WSL2 / x86_64 dev machine. Total runtime ≈ 25–30s.
+    //
+    // - `sample_size(60)`: 2× the criterion default at this measurement_time,
+    //   roughly halving the CI width on the median (sqrt(N) scaling).
+    // - `measurement_time(4s)`: each sample averages more iterations, smoothing
+    //   per-sample jitter from CPU freq scaling / other processes.
+    // - `warm_up_time(1s)`: gives the JIT-free Rust binary time to settle into
+    //   a steady I/D-cache + branch-predictor state before timing starts.
+    // - `noise_threshold(0.02)`: changes within ±2% are formally classified as
+    //   noise. Criterion still prints the delta but won't say "regressed" /
+    //   "improved" until the median moves past this floor. The CLAUDE.md gate
+    //   (>5% on any scenario = investigate) sits comfortably above it.
+    g.sample_size(60)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(4))
+        .noise_threshold(0.02);
     g
 }
 

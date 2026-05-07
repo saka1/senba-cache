@@ -89,11 +89,11 @@ cargo bench --bench sieve_cache_perf -- --save-baseline before
 cargo bench --bench sieve_cache_perf -- --baseline before
 ```
 
-The bench has three scenarios (insert_u64 / mixed_u64 / insert_string) and
-finishes in ~10s. Criterion prints `Performance has regressed.` /
-`... has improved.` per scenario; treat **>5% regression on any scenario**
-as a signal to investigate before commit. Wall-clock noise on a quiet
-machine is typically ±2–3%, so 5% is a deliberate margin.
+The bench has three scenarios (insert_u64 / mixed_u64 / insert_string).
+Criterion prints `Performance has regressed.` / `... has improved.` per
+scenario; treat **>5% regression on any scenario** as a signal to
+investigate before commit. Sampling and noise-threshold tuning live in the
+bench file itself.
 
 Skipping the perf-gate is fine for pure documentation / test-only / clippy
 fixes — anything that demonstrably cannot affect the compiled `Cache` hot
