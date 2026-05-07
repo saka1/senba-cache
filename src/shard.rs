@@ -23,13 +23,63 @@ pub(crate) struct Entry<K, V> {
     pub(crate) value: V,
 }
 
+/// One AVX2-load worth of tags. `align(32)` makes the address of every chunk
+/// (and therefore the start of the flat `[u16]` view) suitable for
+/// `vmovdqa` / `_mm256_load_si256` rather than the unaligned variant.
+#[repr(C, align(32))]
+#[derive(Clone, Copy)]
+pub(crate) struct TagsChunk(pub [u16; LANE]);
+
+/// `Vec<TagsChunk>` storage that derefs as a flat `&[u16]` view of length
+/// `chunks.len() * LANE`. The flat view is bit-for-bit equivalent to the prior
+/// `Vec<u16>` layout (same stride, same indexing), so all scalar paths through
+/// `self.tags[i]` keep working unchanged via `Deref` / `DerefMut`. The point
+/// of the wrapper is the alignment contract: the underlying chunk allocation
+/// is 32-byte aligned, which lets `find_avx2` use aligned loads.
+pub(crate) struct AlignedTags {
+    chunks: Vec<TagsChunk>,
+}
+
+impl AlignedTags {
+    /// `order_cap` must be a non-zero multiple of `LANE`.
+    fn zeroed(order_cap: usize) -> Self {
+        debug_assert!(order_cap > 0 && order_cap % LANE == 0);
+        let n_chunks = order_cap / LANE;
+        Self {
+            chunks: vec![TagsChunk([EMPTY; LANE]); n_chunks],
+        }
+    }
+}
+
+impl std::ops::Deref for AlignedTags {
+    type Target = [u16];
+    #[inline]
+    fn deref(&self) -> &[u16] {
+        let n = self.chunks.len() * LANE;
+        // SAFETY: TagsChunk is `#[repr(C, align(32))] struct(_)([u16; LANE])`,
+        // so a contiguous Vec<TagsChunk> is layout-equivalent to [u16; n_chunks*LANE].
+        unsafe { std::slice::from_raw_parts(self.chunks.as_ptr().cast::<u16>(), n) }
+    }
+}
+
+impl std::ops::DerefMut for AlignedTags {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u16] {
+        let n = self.chunks.len() * LANE;
+        // SAFETY: see Deref impl.
+        unsafe { std::slice::from_raw_parts_mut(self.chunks.as_mut_ptr().cast::<u16>(), n) }
+    }
+}
+
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
 pub(crate) struct Shard<K, V, S: SlotSize> {
     pub(crate) capacity: usize,
     /// Parallel array #1: tag array. Size = `round_up(capacity, LANE).max(LANE)`.
     /// Under I4' there are never holes in `tags[0..len]`, so no slack past `capacity`
     /// is needed — the LANE-aligned remainder beyond `len` is permanent EMPTY pad.
-    pub(crate) tags: Vec<u16>,
+    /// Stored as `Vec<TagsChunk>` so the start address is 32-byte aligned (each
+    /// chunk = one AVX2 lane); derefs as `&[u16]` for the scalar paths.
+    pub(crate) tags: AlignedTags,
     /// Parallel array #2: entries arena. Size = `capacity` (no slack).
     /// Indexed by the 6-bit id embedded in each tag.
     /// `sizeof(S::Storage<Entry<K, V>>) == S::SIZE` is guaranteed by `_STORAGE_SIZE_OK`.
@@ -131,7 +181,7 @@ where
         entries.resize_with(capacity, MaybeUninit::uninit);
         Self {
             capacity,
-            tags: vec![EMPTY; order_cap],
+            tags: AlignedTags::zeroed(order_cap),
             entries,
             hand: 0,
             len: 0,
@@ -224,6 +274,14 @@ where
         let limit = (self.len + LANE - 1) & !(LANE - 1);
         debug_assert!(limit <= self.tags.len());
         let tags_ptr = self.tags.as_ptr();
+        // `AlignedTags` storage is `Vec<TagsChunk>` with `align(32)` on the chunk,
+        // so the flat `*const u16` view starts on a 32-byte boundary. The aligned
+        // load below relies on that, plus `i += LANE` (= 32-byte stride).
+        debug_assert_eq!(
+            (tags_ptr as usize) & 31,
+            0,
+            "tags storage must be 32-byte aligned for vmovdqa"
+        );
         let tags_byte_ptr = tags_ptr as *const u8;
         // Hold entries as a byte pointer. sizeof(Storage<Entry>) == S::SIZE (fixed),
         // so `tag & ID_MASK` is directly the byte offset into the arena.
@@ -238,7 +296,9 @@ where
 
             let mut i = 0usize;
             while i < limit {
-                let v = _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i);
+                // i is always a multiple of LANE, so `tags_ptr.add(i)` advances
+                // by a multiple of 32 bytes from the (32-aligned) base.
+                let v = _mm256_load_si256(tags_ptr.add(i) as *const __m256i);
                 let masked = _mm256_and_si256(v, mask_v);
                 let cmp = _mm256_cmpeq_epi16(masked, needle_v);
                 let mut mask = _mm256_movemask_epi8(cmp) as u32;

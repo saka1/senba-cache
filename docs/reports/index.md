@@ -172,3 +172,15 @@ reuse が visited bit 絡みで oracle と発散する点もメモ。
 の thin wrapper、その奥の worker をアトム (non-inline)、アトム内部の小さい helper は
 inline」が正解で、perf-gate でも insert_string -4〜-9% の改善を確認。`Inner::*` に
 `#[inline]` を撒くのはコード肥大方向の bias で筋が悪い、という設計原則も明文化。
+
+### 2026-05-07-aligned-tags-load.md
+`Shard::find_avx2` の SIMD load を `Vec<u16>` + `loadu` から `AlignedTags`
+(`Vec<TagsChunk>` + `repr(align(32))`) + `_mm256_load_si256` に切り替えた記録。
+Twitter trace で u64 -3.35% / String -4.39% (geomean、32 cells)。disasm 比較で
+LLVM が両 intrinsic を `vpand ymm, ymm, m256` に fold するため命令選択そのものは
+等価と判明、効果の正体は **glibc malloc の 16B 揃えで base mod 64 ∈ {16, 48} の
+50% で起きていた cache-line split の解消**。criterion `insert_string` だけは +5%
+退行 (シナリオ固有のヒープレイアウト依存 noise)、Twitter で逆方向に改善するため
+adopt。`debug_assert!` で alignment invariant を docs としてコードに刻むのと、
+将来 LLVM が memory-operand fold をやめた場合の保険として aligned intrinsic も
+維持。

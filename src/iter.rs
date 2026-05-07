@@ -81,9 +81,10 @@ impl<'a, K, V, S: SlotSize> Iterator for IterMut<'a, K, V, S> {
             let i = self.slot_idx;
             self.slot_idx += 1;
             // SAFETY: tags[0..len] are LIVE (I4'). We read the u16 through the
-            // Vec's data pointer; the brief shared reborrow of `Vec<u16>` to
-            // call `as_ptr` covers the Vec metadata bytes inside Shard, which
-            // are disjoint from the entries arena's heap allocation where any
+            // tags storage's data pointer; the brief shared reborrow of
+            // `AlignedTags` (deref-coerced to `&[u16]` for `as_ptr`) covers
+            // only the tags-storage metadata bytes inside Shard, which are
+            // disjoint from the entries arena's heap allocation where any
             // outstanding `&mut V` lives.
             let tag = unsafe {
                 let tags_field = std::ptr::addr_of!((*sh).tags);
