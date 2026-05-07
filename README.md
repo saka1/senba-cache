@@ -1,20 +1,12 @@
 # senba-cache
+senba-cache is a small, fast, single-threaded in-memory cache.
+Compared to well-known alternatives like moka and lru-cache, it has interesting characteristics:
 
-A Rust cache library implementing the **SIEVE** eviction algorithm
-(NSDI'24, Zhang et al.). SIEVE is a single-hand FIFO sweep with a
-per-entry visited bit; on web-style workloads it matches or exceeds
-LRU and W-TinyLFU on hit ratio while keeping the per-op work small.
+- **High hit ratio**: Uses a SIEVE-like eviction policy — a sharded variant of SIEVE (NSDI'24, Zhang et al.) keyed by the upper bits of the hash. On web-style workloads, hit ratio is comparable to LRU and W-TinyLFU.
+- **Low, predictable overhead**: Values are stored directly in a fixed-stride arena, and shards are scanned in parallel using SIMD, so both lookups and inserts stay cheap. The cache does not use the doubly-linked list and separate hash table from the original SIEVE paper.
 
-`senba-cache` ships a sharded, SIMD-accelerated implementation with a
-`HashMap`-style API. Each shard caps at 64 entries so a 6-bit id packs
-inline with the hash bits in a single tag word, which is what the
-AVX2 (BMI1) `find` path scans 16 lanes at a time. Storage is a fixed
-stride arena (16 / 32 / 64 byte slot brackets) selected at the type
-level; choice of stride is part of the public API.
-
-The crate is single-threaded: every mutating operation takes
-`&mut self`. Wrap in `Mutex<Cache>` / `RwLock<Cache>` if you need
-concurrent access.
+The crate is single-threaded: every mutating operation takes `&mut self`.
+Wrap in `Mutex<Cache>` / `RwLock<Cache>` if you need concurrent access.
 
 ## Quick start
 
@@ -38,12 +30,33 @@ for k in 3..=2048 {
 }
 ```
 
-## Choosing a `SlotSize`
+## API at a glance
 
-The entries arena uses a fixed stride per slot so the SIMD `find` path
-can compute byte offsets via a single shift. Pick the smallest bracket
-that fits `Entry<K, V>`; if the entry is too large the crate refuses to
-compile.
+Full signatures and semantics live in the rustdoc; this is just the map.
+
+- **Lookup** — `get`, `get_mut`, `get_key_value`, `peek`, `peek_mut`,
+  `peek_key_value`, `contains_key`. All accept `Borrow<Q>`, so a
+  `Cache<String, V>` can be queried by `&str`.
+- **Mutation** — `insert`, `remove`, `clear`, `retain`,
+  `get_or_insert_with`.
+- **Iteration** — `iter`, `iter_mut`, `keys`, `values`, `drain`, plus
+  `IntoIterator for &Cache` / `&mut Cache`. Order is unspecified.
+- **Traits** — `Clone` (where `K, V, H: Clone`), `Debug` (where
+  `K, V: Debug`), `Extend<(K, V)>`, `Extend<(&K, &V)>`.
+
+Two semantic notes worth keeping in mind:
+
+- `insert` returns `Option<(K, V)>` — the entry it evicted on capacity
+  overflow, if any.
+- `get*` promote on hit (and update hit/miss counters); `peek*`,
+  `contains_key`, and iteration are non-promoting.
+
+## Tuning
+
+### Slot size
+
+`Cache` stores each entry in a fixed-size slot. Three sizes are
+available — pick the smallest one your `(K, V)` fits in:
 
 | `SlotSize`         | Stride | Typical fit                                         |
 | ------------------ | -----: | --------------------------------------------------- |
@@ -51,16 +64,20 @@ compile.
 | `Slot32` (default) |   32 B | `(String, V_small)`, `(Arc<str>, Arc<str>)`         |
 | `Slot64`           |   64 B | `(String, String)`, `(K, V)` up to ~56 B payload    |
 
+If the entry doesn't fit, the crate refuses to compile and the error
+message tells you which size to use instead. Just bump it:
+
 ```rust
 use senba_cache::{Cache, Slot64};
 
 let cache: Cache<String, String, Slot64> = Cache::new(1024);
 ```
 
-`sizeof(Entry<K, V>) > S::SIZE` is rejected at compile time with a
-const-eval message pointing at the next bracket up.
+`Slot64` is the largest size supported. If your `(K, V)` doesn't fit
+even there, store the value behind an indirection like `Box<V>` or
+`Arc<V>` so the slot only has to hold a pointer.
 
-## Custom hasher
+### Custom hasher
 
 The default hasher is xxh3 (`senba_cache::hash::Xxh3Build`). To plug in
 your own `BuildHasher`:
@@ -90,36 +107,6 @@ println!(
 
 `evictions` counts only capacity-driven evictions inside `insert`;
 explicit removal (`remove`, `clear`, `retain`, `drain`) is not counted.
-
-## API surface
-
-- Lookups: `get`, `get_mut`, `peek`, `peek_mut`, `get_key_value`,
-  `peek_key_value`, `contains_key`. All accept `Borrow<Q>` so a
-  `Cache<String, V>` can be queried by `&str`.
-- Mutation: `insert -> Option<(K, V)>` (returns the evicted pair on
-  overflow), `remove`, `clear`, `retain`, `get_or_insert_with`.
-- Iteration: `iter`, `iter_mut`, `keys`, `values`, `drain`,
-  `IntoIterator for &Cache` / `&mut Cache`. Iteration is non-promoting
-  and order is unspecified.
-- Trait impls: `Clone` (where `K, V, H: Clone`), `Debug` (where
-  `K, V: Debug`), `Extend<(K, V)>` and `Extend<(&K, &V)>`.
-
-## Sharding
-
-The shard count is the smallest power of two `N` such that
-`ceil(capacity / N) <= 64`, chosen automatically by `Cache::new`. To
-override (mainly for testing / oracle comparison) use
-`Cache::with_shards(capacity, n)` with `n` a power of two satisfying
-the same per-shard bound. Sharding is purely for keeping per-shard
-SIEVE state inside the SIMD scan window — it does not enable
-concurrent access.
-
-## Benchmarks
-
-A perf-regression gate (`benches/sieve_cache_perf.rs`) is included for
-contributors who want to verify their changes don't hurt the hot path.
-See [`docs/benchmarking.md`](docs/benchmarking.md) for the workflow,
-plus notes on the research microbench and profiling setup.
 
 ## Reference
 
