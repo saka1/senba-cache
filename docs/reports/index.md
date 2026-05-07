@@ -23,7 +23,7 @@
 | j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
-| ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
+| ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
 ---
 
@@ -165,3 +165,10 @@ reuse が visited bit 絡みで oracle と発散する点もメモ。
 **昇格済み**: `senba::Cache` を moka / lru / quick_cache / stretto と公開メソッド単位で
 横並び比較したドキュメント。欠落 API のチェックリストを兼ねるため living document として
 `docs/api-comparison.md` に移動。
+
+### 2026-05-07-inline-design-cache-vs-inner.md
+`Inner` を `inner.rs` に切り出した際の perf 退行をきっかけに、`Cache::op → Inner::op
+→ helper` の3層で `#[inline]` をどこに置くべきか整理。HashMap 流の「公開API は inline
+の thin wrapper、その奥の worker をアトム (non-inline)、アトム内部の小さい helper は
+inline」が正解で、perf-gate でも insert_string -4〜-9% の改善を確認。`Inner::*` に
+`#[inline]` を撒くのはコード肥大方向の bias で筋が悪い、という設計原則も明文化。
