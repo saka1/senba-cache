@@ -51,6 +51,26 @@ cargo clippy --workspace --all-targets
 cargo test -p senba-research <name>
 ```
 
+### Tests gated by the `external-traces` feature
+
+A handful of oracle tests in `research/tests/oracle.rs`
+(`*_matches_orig_on_bundled_zipf`) read trace files from the
+`external/NSDI24-SIEVE` git submodule. They are gated behind the
+**default-off** `external-traces` feature on `senba-research` so that
+`cargo test --workspace` in CI works without initializing the submodule.
+
+To run them locally (after `git submodule update --init`):
+
+```bash
+cargo test -p senba-research --features external-traces
+# or just the oracle target:
+cargo test -p senba-research --features external-traces --test oracle
+```
+
+When adding a new test that depends on a file under `external/`, gate it the
+same way: `#[cfg(feature = "external-traces")]` on the `#[test]` fn (and on
+any imports that become unused without the feature, e.g. `workload::file`).
+
 ## Quality Gates
 
 After any code change, ensure all pass:

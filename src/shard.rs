@@ -229,38 +229,42 @@ where
         // so `tag & ID_MASK` is directly the byte offset into the arena.
         // Storage's first field is entry at offset 0, so we reach Entry directly.
         let entries_byte_ptr = self.entries.as_ptr() as *const u8;
-        let needle_v = _mm256_set1_epi16(needle as i16);
-        let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
-        let id_mask_u32 = Self::ID_MASK as u32;
+        // SAFETY: AVX2/BMI1 are guaranteed by the `#[target_feature]` contract on
+        // this fn; the caller has ensured the host CPU supports them.
+        unsafe {
+            let needle_v = _mm256_set1_epi16(needle as i16);
+            let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
+            let id_mask_u32 = Self::ID_MASK as u32;
 
-        let mut i = 0usize;
-        while i < limit {
-            let v = unsafe { _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i) };
-            let masked = _mm256_and_si256(v, mask_v);
-            let cmp = _mm256_cmpeq_epi16(masked, needle_v);
-            let mut mask = _mm256_movemask_epi8(cmp) as u32;
+            let mut i = 0usize;
+            while i < limit {
+                let v = _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i);
+                let masked = _mm256_and_si256(v, mask_v);
+                let cmp = _mm256_cmpeq_epi16(masked, needle_v);
+                let mut mask = _mm256_movemask_epi8(cmp) as u32;
 
-            let chunk_byte_ptr = unsafe { tags_byte_ptr.add(i * 2) };
+                let chunk_byte_ptr = tags_byte_ptr.add(i * 2);
 
-            while mask != 0 {
-                let bit = mask.trailing_zeros() as usize;
-                let tag = unsafe { *(chunk_byte_ptr.add(bit) as *const u16) } as u32;
-                let id_bytes = (tag & id_mask_u32) as usize;
-                // SAFETY: live needle ⟹ tag live ⟹ entries[id] initialized (I6).
-                // id_bytes = id × S::SIZE and id < capacity ⟹ in bounds.
-                // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
-                let entry_ptr = unsafe { entries_byte_ptr.add(id_bytes) as *const Entry<K, V> };
-                let e = unsafe { &*entry_ptr };
-                if e.key.borrow() == key {
-                    let lane = bit >> 1;
-                    return Some(i + lane);
+                while mask != 0 {
+                    let bit = mask.trailing_zeros() as usize;
+                    let tag = *(chunk_byte_ptr.add(bit) as *const u16) as u32;
+                    let id_bytes = (tag & id_mask_u32) as usize;
+                    // live needle ⟹ tag live ⟹ entries[id] initialized (I6).
+                    // id_bytes = id × S::SIZE and id < capacity ⟹ in bounds.
+                    // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
+                    let entry_ptr = entries_byte_ptr.add(id_bytes) as *const Entry<K, V>;
+                    let e = &*entry_ptr;
+                    if e.key.borrow() == key {
+                        let lane = bit >> 1;
+                        return Some(i + lane);
+                    }
+                    mask = _blsr_u32(mask);
+                    mask = _blsr_u32(mask);
                 }
-                mask = _blsr_u32(mask);
-                mask = _blsr_u32(mask);
+                i += LANE;
             }
-            i += LANE;
+            None
         }
-        None
     }
 
     pub(crate) fn contains<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> bool

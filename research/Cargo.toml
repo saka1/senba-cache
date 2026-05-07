@@ -4,6 +4,13 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[features]
+# Opt-in for tests that read trace files from the `external/NSDI24-SIEVE`
+# git submodule. Off by default so `cargo test --workspace` works without
+# initializing submodules (CI uses the default-off form). Enable locally
+# with `cargo test -p senba-research --features external-traces`.
+external-traces = []
+
 [dependencies]
 senba = { path = ".." }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

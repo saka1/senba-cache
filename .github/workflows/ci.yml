@@ -43,6 +43,9 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # `external-traces` feature is intentionally off: tests that read trace
+      # files from the `external/NSDI24-SIEVE` git submodule do not run in CI.
+      # Run them locally with `cargo test -p senba-research --features external-traces`.
       - run: cargo test --workspace
 
   doc:

@@ -18,13 +18,7 @@ categories = ["caching", "data-structures"]
 # actually ships to crates.io — the publishable surface (crate-root files +
 # unit tests) plus README and LICENSE.
 include = [
-    "src/lib.rs",
-    "src/shard.rs",
-    "src/iter.rs",
-    "src/slot.rs",
-    "src/stats.rs",
-    "src/hash.rs",
-    "src/tests/**/*.rs",
+    "src/**/*.rs",
     "Cargo.toml",
     "/README.md",
     "/LICENSE",
@@ -33,10 +27,12 @@ include = [
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-# samply / perf annotate でソース行と asm を対応させるための debuginfo。
-# bench は release プロファイルから派生するので両方に入れておく。
 [profile.release]
+# debuginfo so samply / `perf annotate` can map asm back to source lines.
+# bench inherits from release, so set it on both profiles.
 debug = "line-tables-only"
+# Applies to in-workspace builds (incl. perf-gate bench) only; ignored for
+# downstream crates.io consumers, where the root crate's profile wins.
 lto = "thin"
 
 [profile.bench]

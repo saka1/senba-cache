@@ -1,6 +1,7 @@
 //! sieve_orig (NSDI'24 著者参照ポート) を oracle として、
 //! 他の variant が同じトレースで同じ evict 列を出すことを検証する差分テスト。
 
+#[cfg(feature = "external-traces")]
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
 use senba_research::{
@@ -70,6 +71,7 @@ fn v0_matches_orig_on_synthetic_zipf() {
     }
 }
 
+#[cfg(feature = "external-traces")]
 #[test]
 fn v0_matches_orig_on_bundled_zipf() {
     let path = concat!(
@@ -121,6 +123,7 @@ fn v1_matches_orig_on_synthetic_zipf() {
     }
 }
 
+#[cfg(feature = "external-traces")]
 #[test]
 fn v1_matches_orig_on_bundled_zipf() {
     let path = concat!(
@@ -171,6 +174,7 @@ fn v2_matches_orig_on_synthetic_zipf() {
     }
 }
 
+#[cfg(feature = "external-traces")]
 #[test]
 fn v2_matches_orig_on_bundled_zipf() {
     let path = concat!(
@@ -222,6 +226,7 @@ fn v3_matches_orig_on_synthetic_zipf() {
     }
 }
 
+#[cfg(feature = "external-traces")]
 #[test]
 fn v3_matches_orig_on_bundled_zipf() {
     let path = concat!(
@@ -264,6 +269,7 @@ fn j3_matches_orig_on_synthetic_zipf() {
     }
 }
 
+#[cfg(feature = "external-traces")]
 #[test]
 fn j3_matches_orig_on_bundled_zipf() {
     let path = concat!(
@@ -297,6 +303,7 @@ fn j8_1shard_matches_orig_on_synthetic_zipf() {
 }
 
 /// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
+#[cfg(feature = "external-traces")]
 #[test]
 fn j8_1shard_matches_orig_on_bundled_zipf() {
     let path = concat!(
