@@ -20,7 +20,7 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
-| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext |
+| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext, find-avx2-avx512 |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
@@ -229,3 +229,18 @@ call ごと −2〜−3 cy。runtime 検出は CPUID vendor + family check (AMD 
 fast PEXT) を推奨、起動コストゼロ。前報 Tier-S/A とは概ね直交、B1 (SoA tag split) とは
 P2 が排他で prototype 比較で決着。本稿は解析ノート (実測なし)、推奨着手順は
 S1/S2/S3 → P3 → A2 → P2 → (B1 vs P2 prototype 比較)。
+
+### 2026-05-08-find-avx2-avx512.md
+`find-avx2-frontier.md` Tier-C で「non-portable」と棚上げした AVX-512 を、server 用 CPU
+での実態的 ubiquity (Intel Xeon Skylake-X+ / Sapphire Rapids+、AMD EPYC Zen 4+) を踏まえ
+opt-in 経路として再評価。具体的な勝ち手 3 軸: **V1** (AVX-512 VL + kmask, 256-bit 幅)
+で `vpcmpeqw_mask` 直結により `vpmovmskb` (5 cy) と BLSR pair を一掃、per_shard=16 で
+−0.8 ns / per_shard=64 で −3 ns、**downclock 無し**。**V2** (zmm 512-bit) で per_shard=64
+が 4 chunks → 2 chunks に半減、更に −2 ns、ただし Skylake-X / Cascade Lake で
+downclock 懸念のため cargo feature `avx512-zmm` で opt-in。**V5** (V2 + B1 SoA tag split)
+で 64 u8 lane を 1 zmm shot 比較、per_shard=64 が outer ループ無しで完結、AVX-512 と
+B1 の最も強い相乗。PEXT 系 (P1/P2) は kmask が初めから lane-mask 形式なので **AVX-512
+経路では不要**、P3 (PDEP needle) と Tier-S (S1/S2/S3) は SIMD path 非依存で温存。
+配布形態は cargo feature `avx512-vl` / `avx512-zmm` の二段で、AVX-512 が無い CPU は
+ランタイム detect で AVX2 path に自動 fallback。本稿は解析ノート (実測なし)、推奨
+着手順は S1/S2/S3 + P3 → V1 → A2 → V2 と V5 の二択を prototype で詰める。
