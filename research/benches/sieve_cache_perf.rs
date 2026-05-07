@@ -185,6 +185,8 @@ fn bench_insert_string(c: &mut Criterion) {
 /// surface here before they show up on the wider Slot32 path.
 fn bench_insert_u32_slot16(c: &mut Criterion) {
     let mut g = perf_group(c, "sieve_cache_perf/insert_u32_slot16");
+    // `N_KEYS = 5_000` fits in u32 with huge headroom, so the cast from the
+    // shared u64 Zipf trace is value-preserving.
     let trace: Vec<u32> = zipf_trace().into_iter().map(|k| k as u32).collect();
     g.throughput(Throughput::Elements(trace.len() as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP_U64), &trace, |b, trace| {

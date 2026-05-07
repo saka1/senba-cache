@@ -117,6 +117,18 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
          (likely caused by Entry alignment > 8 byte)"
     );
 
+    /// Const-eval: `TagsChunk` must be 32-byte aligned. `find_avx2` issues
+    /// `_mm256_load_si256` against `tags.as_ptr()`, which is sound only because
+    /// `Vec<TagsChunk>` inherits `repr(C, align(32))` on its element type. If a
+    /// future refactor drops the align attribute, the runtime `debug_assert!` in
+    /// `find_avx2` would catch it in debug builds but release builds would
+    /// silently execute UB on misaligned chunks. Anchor the invariant at compile
+    /// time so it cannot be lost.
+    const _TAGSCHUNK_ALIGN_OK: () = assert!(
+        std::mem::align_of::<TagsChunk>() == 32,
+        "senba::Cache: TagsChunk must be 32-byte aligned for vmovdqa"
+    );
+
     /// Bit position of the id field (6 bits) within a tag.
     /// Chosen as `log2(S::SIZE)` so that `id << ID_SHIFT == id × S::SIZE`.
     pub(crate) const ID_SHIFT: u32 = (S::SIZE as u32).trailing_zeros();
@@ -167,6 +179,7 @@ where
         // Materialize const asserts (they are not evaluated unless referenced).
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
+        let _: () = Self::_TAGSCHUNK_ALIGN_OK;
 
         assert!(capacity > 0, "capacity must be > 0");
         assert!(
@@ -263,9 +276,13 @@ where
         Q: Eq + ?Sized,
     {
         // Re-anchor layout invariants at this use site (the c-hoist arithmetic below
-        // assumes `sizeof(Storage<Entry>) == S::SIZE`, which `_STORAGE_SIZE_OK` enforces).
+        // assumes `sizeof(Storage<Entry>) == S::SIZE`, which `_STORAGE_SIZE_OK` enforces;
+        // the aligned load below assumes 32-byte alignment, which `_TAGSCHUNK_ALIGN_OK`
+        // enforces structurally — the `debug_assert_eq!` further down only catches
+        // runtime mishaps under `cfg(debug_assertions)`).
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
+        let _: () = Self::_TAGSCHUNK_ALIGN_OK;
         use std::arch::x86_64::*;
         // Round `len` up to LANE. Tags beyond `len` are EMPTY (= 0) and the LIVE-bit
         // check would skip them anyway, but bounding the scan at the rounded-up live
