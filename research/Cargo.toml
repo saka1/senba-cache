@@ -9,7 +9,12 @@ publish = false
 # git submodule. Off by default so `cargo test --workspace` works without
 # initializing submodules (CI uses the default-off form). Enable locally
 # with `cargo test -p senba-research --features external-traces`.
-external-traces = []
+#
+# Also pulls in `zstd` (C dep) for on-the-fly `.zst` decompression of ARC
+# paper traces. Default-off keeps the cross-build path C-free, so
+# `bench_vtune` etc. can be cross-compiled to Windows without a Windows
+# C toolchain.
+external-traces = ["dep:zstd"]
 
 [dependencies]
 senba = { path = ".." }
@@ -29,7 +34,14 @@ moka = { version = "0.12", default-features = false, features = ["sync"] }
 parking_lot = "0.12"
 # ARC paper trace ( `external/mokabench/cache-trace/arc/*.lis.zst` ) を bench から
 # 直接食わせるため zstd を生やす。decompressed `.lis` も読めるよう拡張子で分岐。
-zstd = "0.13"
+# `external-traces` feature 経由でしか有効化されない (default off) — C 拡張なので
+# Windows クロスビルド時に C toolchain を不要にするため optional。
+zstd = { version = "0.13", optional = true }
+# Intel ITT API — `bench_vtune` から VTune の collection を programmatically
+# pause/resume する。VTune が attach していないときは no-op なので Linux ビルド
+# も普通に通る。Windows クロスビルドでは ittapi-sys の C ソースを clang-cl で
+# コンパイルするので、cargo-xwin + clang-cl 環境が要る (CLAUDE.md 参照)。
+ittapi = "0.5"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false }

@@ -118,14 +118,26 @@ pub fn twitter_csv_from_path_string(
 /// フォーマット: 1 行 `start len ...` または `start` (len 省略時は 1)。
 /// `start..start+len` の各整数を 1 アクセスとして展開する。
 ///
-/// 拡張子 `.zst` の場合は zstd で on-the-fly 展開する。`spc1likeread` のような
-/// 分割 zst (`.zst.00`, `.zst.01`, ...) はサポートしない (連結が要るため)。
-/// LIRS の `*` (NOOP 行) は今のところスキップしない — ARC trace には現れない。
+/// 拡張子 `.zst` の場合は zstd で on-the-fly 展開する (`external-traces`
+/// feature が必要)。`spc1likeread` のような分割 zst (`.zst.00`, `.zst.01`,
+/// ...) はサポートしない (連結が要るため)。LIRS の `*` (NOOP 行) は今のところ
+/// スキップしない — ARC trace には現れない。
 pub fn arc_from_path(path: impl AsRef<Path>) -> io::Result<Box<dyn Iterator<Item = Key>>> {
     let p = path.as_ref();
     let file = File::open(p)?;
     let reader: Box<dyn Read> = if p.extension() == Some(OsStr::new("zst")) {
-        Box::new(zstd::Decoder::new(file)?)
+        #[cfg(feature = "external-traces")]
+        {
+            Box::new(zstd::Decoder::new(file)?)
+        }
+        #[cfg(not(feature = "external-traces"))]
+        {
+            let _ = file;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "zstd-compressed ARC trace requires --features external-traces",
+            ));
+        }
     } else {
         Box::new(file)
     };
