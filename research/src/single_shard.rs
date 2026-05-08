@@ -74,6 +74,7 @@ pub mod adapters {
     use crate::experimental::sieve_c11s;
     use crate::experimental::sieve_c12s;
     use crate::experimental::sieve_c13s;
+    use crate::experimental::sieve_c14s;
     use senba::Xxh3Build;
     use std::hash::{BuildHasher, Hash};
 
@@ -339,6 +340,55 @@ pub mod adapters {
         fn insert(&self, key: K, value: V) -> bool {
             let h = self.hasher.hash_one(&key);
             // 戻り値の意味: C8/C10s/C11s/C12s と同じ契約 (evict あり = true / なし = false)
+            self.shard.insert(key, value, h).is_some()
+        }
+    }
+
+    /// c14s の内部 [`sieve_c14s::Shard`] を直接 wrap。c13s の 3 点 tuning
+    /// (find_lockfree AVX2 化 / MAX_RETRY=1 / reader bounded retry) を載せた変種。
+    pub struct C14sSingleShard<K, V> {
+        shard: sieve_c14s::Shard<K, V>,
+        hasher: Xxh3Build,
+    }
+
+    impl<K, V> C14sSingleShard<K, V>
+    where
+        K: Hash + Eq,
+        V: Clone,
+    {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                shard: sieve_c14s::Shard::new(capacity),
+                hasher: Xxh3Build,
+            }
+        }
+    }
+
+    impl<K, V> SingleShard<K, V> for C14sSingleShard<K, V>
+    where
+        K: Hash + Eq + Send + Sync,
+        V: Clone + Send + Sync,
+    {
+        fn new(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+
+        fn capacity(&self) -> usize {
+            self.shard.capacity()
+        }
+
+        fn len(&self) -> usize {
+            self.shard.len()
+        }
+
+        fn read<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+            let h = self.hasher.hash_one(key);
+            let v = self.shard.get_by_hash(key, h)?;
+            Some(f(&v))
+        }
+
+        fn insert(&self, key: K, value: V) -> bool {
+            let h = self.hasher.hash_one(&key);
             self.shard.insert(key, value, h).is_some()
         }
     }

@@ -8,6 +8,7 @@ pub mod sieve_c10s;
 pub mod sieve_c11s;
 pub mod sieve_c12s;
 pub mod sieve_c13s;
+pub mod sieve_c14s;
 pub mod sieve_c8;
 pub mod sieve_c9;
 pub mod sieve_j3;

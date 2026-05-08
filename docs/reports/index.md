@@ -410,3 +410,32 @@ caller-merge (main 38d39f3) 後でも hit-heavy 帯の優劣は変わらず、mi
 前リビジョンの「`senba_n128 cap=256` で HR collapse」は per-shard=2 強制の
 artifact で、`Cache::new(cap)` 経由なら起きない (ユーザは shards を選ばなくて良いし
 選ぶべきでもない)。次は OLTP/MergeP/Zipf 3 点 perf-gate 候補が follow-up。
+
+### 2026-05-08-c14s-design.md
+c13s sweep の不採用要因 2 点 (uniform read-heavy regression / adversarial-hot HR
+drop) を、構造変更ではなく 3 点の実装 tuning で潰す c14s の設計書。**(1) find_lockfree
+の AVX2 化** (c13s の scalar 64 scan が uniform write での pure overhead だった分の
+解消)、**(2) Path A の MAX_RETRY=1** (CAS 失敗時の即 Mutex escalate、c13s の retry
+loop が adversarial-hot で writer-vs-writer reload 競合を増やすだけだったため廃止)、
+**(3) reader bounded retry** (Path A cycle と reader seqlock validate が干渉した
+ときの false-miss 吸収)。SIEVE 等価性は Path A が引き続き state machine を触らない
+ため自明保持。c15 (entry-level seqlock = false-miss 自体を消す方向) は §7 に粗描き
+で残し、c14s は実装 tunable レベルでの暫定解として位置付け。**ERRATUM**: §2.3 の
+reader retry を "true/false miss を区別不可" とした前提が誤りで、実装では
+seqlock-fail + LIVE=0 観測の 2 点で racing 検出 → 条件付き retry に変更 (sweep
+report 参照)。
+
+### 2026-05-08-c14s-sweep.md
+c14s (c13s + AVX2 find_lockfree + MAX_RETRY=1 + reader bounded retry) の sweep
+評価。設計書 §2.3 が "true-miss と false-miss を区別不可" としていた前提が誤りで、
+初版実装は **無条件 4× retry** が miss-path を 4 倍化、uniform read-only 16T で
+c11s 比 -75% の壊滅的 regression を出した。samply で leaf 62% が `get_by_hash` の
+retry ループに集中していると同定、`try_candidate` の seqlock failure と scan 中の
+LIVE=0 lane 観測の 2 点を racing シグナルとして外に出し、racing 時のみ retry する
+形に修正。修正後 sweep で **§4 acceptance T2/T3/T4 はすべて pass**、特に
+adversarial-hot HR は c11s 0.871 / c13s 0.571 / **c14s 0.920** で c13s の SIEVE
+意味的精度劣化を完治した。**T1 (uniform read-heavy 16T) は依然 fail** だが
+c14s/c11s = 0.323 と c13s/c11s = 0.345 がほぼ同水準で、これは Path B/C (writer
+Mutex) の構造的競合 — c14s の責任ではなく c15 / per-shard sub-shard の領分。read-only
+adv-hot 16T で c14s/c13s = 0.78 の退行 (新規 EMPTY-lane 検出の SIMD overhead) は
+後続課題として残る。lock-free Path A 系の代表は c13s から c14s に更新。
