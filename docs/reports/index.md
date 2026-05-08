@@ -13,7 +13,7 @@
 | v0〜v3 系列 (linked-list + array) | v0-divergence, realistic-workload-bench, v3-bench, v3-profile |
 | orig 改善 (MaybeUninit) | sieve-orig-overhead-analysis |
 | 外部実装調査 | jedi-vs-orig |
-| 外部実装比較 (W-TinyLFU) | j8-vs-mini-moka-twitter |
+| 外部実装比較 (W-TinyLFU) | j8-vs-mini-moka-twitter, mokabench-arc-traces, external-lib-sweep |
 | 設計アイディア集 (living doc) | `../improvement-ideas.md` (旧 `2026-05-04-improvement-ideas.md`、`docs/` 直下に移動) |
 | j3 系列 (Map なし SIMD) | sieve-j3-bench |
 | j4 系列 (set-associative j3) | sieve-j4-set-associative, sieve-j4-crossover-and-shard-sweep, sieve-j4-pershard-vs-footprint |
@@ -367,3 +367,40 @@ get_heavy/lowskew と同根)、5% gate 違反なし。perf-gate と Twitter で
 sret threshold (16 byte) は ABI 設計のクリフ、niche-bearing 型での
 サイズ詰めは積極検討、const assert で固定化、3 段試行で各制約を
 独立に閉じる。
+
+### 2026-05-08-mokabench-arc-traces.md
+`research/src/bin/bench.rs` に **ARC paper trace** (`S3 / DS1 / OLTP / spc1likeread`)
+を扱う `--source arc` を追加。dataset / パーサ意味論の出典は **mokabench**
+(<https://github.com/moka-rs/mokabench>) と `cache-trace` submodule。mokabench
+本体の load generator は統合せず trace 形式だけ拝借し (理由: mokabench は cache
+実装を compile-time feature flag で差し替える構造で senba を載せるには fork が
+必要、既存 `bench.rs` driver で全 variant が直接 ARC を食えるほうが軽い)、
+`arc_from_path` で `start len` 行を `start..start+len` に展開、`.zst` は zstd で
+on-the-fly 展開。比較対象は **moka でなく mini-moka** (moka は background thread +
+adaptive window sizing + tokio runtime の overhead が乗り single-thread bench で
+速度差が水増しされるため)。スモーク結果: Zipf-1.0 で HR ±0.4pp 一致 / 速度 ~17.6×、
+**ARC OLTP cap=4000 で senba HR=51.7% vs mini-moka 45.7% (SIEVE が DB workload で
+W-TinyLFU を上回る既知パターンと整合)**、ARC S3 は cap=4000/16000 共に HR <1% で
+**両者とも壊滅** (working set が cap を遥かに超える scan-heavy では admission
+policy 差は誤差の範囲) — Twitter cluster 単独では見えない事実。**OLTP は perf-gate
+scenario 候補、S3 は signal が無く却下、DS1 / spc1likeread は未検証** (spc1likeread
+は split zst 連結処理が要追加工事)。
+
+### 2026-05-08-external-lib-sweep.md
+`mokabench-arc-traces` 基盤の上で **ARC paper trace 6 種 (OLTP / S3 / P3 / DS1 /
+ConCat / MergeP) + Zipf skew=1.0** を **senba::Cache (auto-shard via
+`Cache::new(cap)`) / sieve_orig (oracle) vs mini-moka / moka 0.12 (W-TinyLFU)**
+で一気に sweep。`Cache::new` は per-shard を 32–64 (= AVX2 batch サイズ ≒
+6-bit ID 上限) に収まるよう shards を自動選択するので senba::Cache に
+capacity ceiling は無く、auto は orig と HR ±0.3pp 一致。**HR は workload と
+cap で SIEVE / W-TinyLFU が反転**: OLTP cap=8000 で SIEVE +7.5pp / MergeP
+cap=1M で +5pp、対して DS1 cap=1M で W-TinyLFU +7pp / P3 cap=32k で +8.5pp /
+S3 cap=400k で +13pp、Zipf は ±0.4pp tie。**Throughput** は senba が
+single-thread 公平条件 (`mini_moka_unsync`) で 2–4× — `mini_moka::sync` /
+`moka` は multi-thread 用途の overhead (sync()/background thread/tokio) が
+乗るので single-thread 比較からは除外。
+副次発見: **Zipf cap=32k / ConCat cap=1M では senba < orig** — shard 分散の
+hand-walk 重複コストが SIMD find 利得を上回る帯があり別レポートで掘る。
+前リビジョンの「`senba_n128 cap=256` で HR collapse」は per-shard=2 強制の
+artifact で、`Cache::new(cap)` 経由なら起きない (ユーザは shards を選ばなくて良いし
+選ぶべきでもない)。次は OLTP/MergeP/Zipf 3 点 perf-gate 候補が follow-up。
