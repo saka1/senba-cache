@@ -439,3 +439,37 @@ c14s/c11s = 0.323 と c13s/c11s = 0.345 がほぼ同水準で、これは Path B
 Mutex) の構造的競合 — c14s の責任ではなく c15 / per-shard sub-shard の領分。read-only
 adv-hot 16T で c14s/c13s = 0.78 の退行 (新規 EMPTY-lane 検出の SIMD overhead) は
 後続課題として残る。lock-free Path A 系の代表は c13s から c14s に更新。
+
+### 2026-05-09-vtune-windows-orig-vs-senba.md
+`2026-05-08-external-lib-sweep.md` が提示した **cacheline dispersion 仮説**
+(shards 散逸で hot 集合が cacheline 局在を失う) を Windows native + VTune
+(Microarchitecture Exploration / Memory Access) で直接検証。観測装置として
+`research/src/bin/bench_vtune.rs` を新設 — Zipf を in-process 生成、Intel ITT API
+(`ittapi 0.5`) で collection 範囲をバイナリ自身が pause/resume、`cargo xwin` で
+MSVC ABI クロスビルドして `.pdb` 付きで Windows へ持ち込む構成。**計測方法論の
+教訓 2 つ**: (1) VTune は `-start-paused` 必須 — 無しだと warmup の早期サンプルが
+混入して wall-clock を artificial に "tied" に見せるバイアス、(2) **active 10s
+以上 (ops ≥ 180M)** の長 run でないと MUX < 0.95 になり L1/TLB 系 counter が
+undercount される (短 run で見逃した orig の TLB pressure が長 run で表面化)。
+clean run (cap=1M / keys=4M / skew=0.9 / 180M ops, `-start-paused`, MUX 0.95+) で
+**senba は orig 比 +12–16% 遅い** (uarch 16.1% / memaccess 12.2%、ops 倍増で
+variance 14.8pp → 3.9pp に収束)。Linux/WSL2 40% gap よりは小さいが Windows native
+でも構造的 gap が残る。Top-Down では cacheline dispersion 仮説は反証 (L1/L2/L3/DRAM
+の絶対値はほぼ一致)、ただし質的に対極 — **orig は latency-dominated** (Memory
+Latency 41.0% > BW 39.2%) **+ TLB pressure** (★新発見: L1 Bound 20.1% / DTLB
+Overhead 20.4% / Load STLB Miss 15.9%、すべて 4K bracket。`Box<Node>` × 1M が
+ucrt heap に散らばり STLB を miss させる)、**senba は bandwidth-dominated** (BW
+59.2% > Lat 22.5%) で `entries: Vec<Entry>` 連続 mapping のため TLB pressure 無し
+(L1 Bound 0.0%) 、代わりに SIMD 並列 probe による **L3 内部 queue 圧迫** (L3
+Latency 31.7% vs orig 19.4%)。両者 IPC は奇しくも 1.095 / 1.096 でほぼ完全一致、
+SIMD ILP の純利益は無く、senba の遅さは **instruction footprint +17% (load +42% /
+store +44%)** がそのまま cycle +16.5% に直結したもの。Linux/WSL2 40% gap の分解:
+**構造由来 12–16pp (今回特定)、OS/環境由来 24–28pp** で、後者の主犯候補は **Linux
+THP が orig の Box<Node> を 2M page promote して STLB miss を消している** 仮説
+(Windows でも見えている orig の弱点を Linux が OS 機能で解消している構図)。含意:
+auto-shard heuristic は Windows native でも +12–16% コスト、external-lib-sweep の
+検証案 1 (`Slot8`) と 2 (shards 上限) は **再検討候補に復帰**。新規検証案 4
+(`Cache::prefetch(&key)` API) と 5 (instruction footprint 削減) を追加。follow-up:
+bare Linux で `perf stat -e dTLB-load-misses` で THP 仮説確認、Windows Large Page
+で orig の TLB pressure 消す対照実験、GitHub Actions one-shot triage、VTune
+Per-allocation breakdown。

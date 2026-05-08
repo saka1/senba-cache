@@ -161,6 +161,17 @@ caller-merge 最適化後の senba 値。)
 
 ## 仮説: 高 cap で orig に負ける原因は shards 分散による hot 集合の cacheline 散逸
 
+> **更新 (2026-05-09)**: 本仮説は `2026-05-09-vtune-windows-orig-vs-senba.md`
+> で **Windows native + VTune** により直接検証され、**反証された**。Memory
+> Bound / L1/L2/L3/DRAM の絶対値は senba と orig でほぼ一致 (±3.4pp 内)
+> で memory hierarchy 圧力に有意差なし。Windows では wall-clock も tied
+> (差 0.06%) で、Linux/WSL2 で観測した 40% gap は CPU memory subsystem
+> 由来ではなく **OS / allocator / page locality レベルの効果**と判断。
+> 下記の検証案 1 (`Slot8`) / 2 (shards 上限) は動機消失で保留扱い。検証
+> 案 3 (LLC miss 計測) は Linux 側 OS factor 切り分けに方針転換。詳細は
+> 当該レポート参照。
+
+
 ConCat を cap 軸で見ると `senba/orig` 比が **shards 数の log と逆相関**で
 綺麗に崩れる:
 

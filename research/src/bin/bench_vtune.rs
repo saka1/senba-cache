@@ -42,15 +42,25 @@
 //! warmup と Zipf trace 生成、プロセス起動 / 終了は全部 collection 範囲外。
 //! 人間タイミングの揺れは無くなる。
 //!
-//! 推奨起動 (CLI):
+//! ### `-start-paused` は **必須** (推奨ではなく)
+//!
+//! 起動 (CLI):
 //!   vtune -collect uarch-exploration -start-paused -- \
 //!       bench_vtune.exe --variant senba --cap 1048576 ...
 //!
-//! `-start-paused` を付けると、最初の `ittapi::resume()` が呼ばれるまで
-//! データ収集自体が停止しているので、サンプル数の無駄が無い。GUI から
-//! 起動する場合は Configure Analysis の "Start Paused" を ON にする。
+//! GUI から起動する場合は Configure Analysis の "Start Paused" を ON にする。
+//!
+//! `-start-paused` 無しで起動すると、プロセス起動から最初の
+//! `ittapi::pause()` が VTune driver に届くまでの数百ms 〜 数秒、および
+//! warmup 区間の早期サンプル (cache empty で insert path 主体) が collection
+//! に混入する。warmup の重さは両 variant 共通なので measurement 区間の
+//! 差を希釈し、wall-clock が artificial に "tied" に見えるバイアスがかかる
+//! (`docs/reports/2026-05-09-vtune-windows-orig-vs-senba.md` 初版ドラフトの
+//! 誤読原因)。clean な比較が欲しければ `-start-paused` を必ず付ける。
+//!
 //! VTune が attach されていない場合は ITT call は no-op になるので、
-//! 通常の `cargo run` でも安全に動く。
+//! 通常の `cargo run` でも安全に動く (この場合 `-start-paused` の有無は
+//! 関係ない)。
 
 use std::time::Instant;
 
