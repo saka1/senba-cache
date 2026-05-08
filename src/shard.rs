@@ -7,8 +7,21 @@
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::mem::MaybeUninit;
+use std::num::NonZeroU16;
 
 use super::SlotSize;
+
+/// `find` returns `Option<(usize, NonZeroU16)>`. Wrapping the tag in
+/// `NonZeroU16` (live tags always have LIVE = 0x8000 set, so they are
+/// non-zero) lets niche optimization fold the Option's discriminant into
+/// the tag's all-zero pattern, keeping `sizeof(Option<(usize, NonZeroU16)>)
+/// == 16` so the value rides registers (`rax` + `rdx` on x86_64 SysV)
+/// instead of being returned via sret. See
+/// `docs/reports/2026-05-08-find-avx2-caller-merge.md` §5 OQ-1.
+const _FIND_RET_FITS_REGISTERS: () = assert!(
+    std::mem::size_of::<Option<(usize, NonZeroU16)>>() == 16,
+    "find return type must fit in 2 registers (16 byte) to avoid sret"
+);
 
 pub(crate) const EMPTY: u16 = 0;
 pub(crate) const LIVE: u16 = 0x8000;
@@ -169,6 +182,37 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
         let _: () = Self::_STORAGE_SIZE_OK;
         self.entries[id].as_mut_ptr() as *mut Entry<K, V>
     }
+
+    /// Hot-path helper: pointer to `Entry` via the byte offset already encoded in
+    /// `tag & ID_MASK` (= `id × S::SIZE`). Skips the `id_of(tag) → << ID_SHIFT`
+    /// shift round-trip that LLVM's InstCombine empirically refuses to fold.
+    /// See `docs/reports/2026-05-08-find-avx2-caller-merge.md` §3.3 (A3).
+    ///
+    /// # Safety
+    /// `tag` must be a live tag (LIVE bit set) read from `self.tags[..self.len]`.
+    /// `NonZeroU16` is the right type because live tags are always non-zero
+    /// (LIVE = 0x8000), and using it on the return path is what keeps `find`'s
+    /// `Option<(usize, NonZeroU16)>` 16-byte and avoids sret.
+    #[inline]
+    unsafe fn entry_ptr_from_tag(&self, tag: NonZeroU16) -> *const Entry<K, V> {
+        let _: () = Self::_SIZE_OK;
+        let _: () = Self::_STORAGE_SIZE_OK;
+        let off = (tag.get() & Self::ID_MASK) as usize;
+        debug_assert!(tag.get() & LIVE != 0);
+        debug_assert!(off < self.capacity * S::SIZE);
+        unsafe { (self.entries.as_ptr() as *const u8).add(off) as *const Entry<K, V> }
+    }
+
+    /// `&mut` variant of `entry_ptr_from_tag`. Same SAFETY contract.
+    #[inline]
+    unsafe fn entry_ptr_mut_from_tag(&mut self, tag: NonZeroU16) -> *mut Entry<K, V> {
+        let _: () = Self::_SIZE_OK;
+        let _: () = Self::_STORAGE_SIZE_OK;
+        let off = (tag.get() & Self::ID_MASK) as usize;
+        debug_assert!(tag.get() & LIVE != 0);
+        debug_assert!(off < self.capacity * S::SIZE);
+        unsafe { (self.entries.as_mut_ptr() as *mut u8).add(off) as *mut Entry<K, V> }
+    }
 }
 
 impl<K, V, S: SlotSize> Shard<K, V, S>
@@ -221,7 +265,12 @@ where
         LIVE | spread
     }
 
-    fn find<Q>(&self, key: &Q, needle: u16, has_avx2_bmi1: bool) -> Option<usize>
+    /// Returns `(pos, tag)` of the matching slot, with the tag wrapped in
+    /// `NonZeroU16` so the whole `Option` is 16 byte and rides registers
+    /// (no sret). Live tags are always non-zero (LIVE bit set), so the
+    /// `NonZeroU16::new_unchecked` calls below are sound at the type level.
+    #[inline]
+    fn find<Q>(&self, key: &Q, needle: u16, has_avx2_bmi1: bool) -> Option<(usize, NonZeroU16)>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
@@ -241,7 +290,7 @@ where
     }
 
     #[inline]
-    fn find_scalar<Q>(&self, key: &Q, needle: u16) -> Option<usize>
+    fn find_scalar<Q>(&self, key: &Q, needle: u16) -> Option<(usize, NonZeroU16)>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
@@ -252,7 +301,8 @@ where
                 // SAFETY: a live tag implies entries[id] is initialized (I5/I6).
                 let e = unsafe { &*self.entry_ptr(id) };
                 if e.key.borrow() == key {
-                    return Some(i);
+                    // SAFETY: scan match implies LIVE bit set, so t != 0.
+                    return Some((i, unsafe { NonZeroU16::new_unchecked(t) }));
                 }
             }
         }
@@ -269,8 +319,9 @@ where
     /// check; `Shard::find` performs it via the cached `has_avx2_bmi1` flag set in
     /// `Cache::new`.
     #[cfg(target_arch = "x86_64")]
+    #[inline]
     #[target_feature(enable = "avx2,bmi1")]
-    unsafe fn find_avx2<Q>(&self, key: &Q, needle: u16) -> Option<usize>
+    unsafe fn find_avx2<Q>(&self, key: &Q, needle: u16) -> Option<(usize, NonZeroU16)>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
@@ -324,8 +375,8 @@ where
 
                 while mask != 0 {
                     let bit = mask.trailing_zeros() as usize;
-                    let tag = *(chunk_byte_ptr.add(bit) as *const u16) as u32;
-                    let id_bytes = (tag & id_mask_u32) as usize;
+                    let tag = *(chunk_byte_ptr.add(bit) as *const u16);
+                    let id_bytes = (tag as u32 & id_mask_u32) as usize;
                     // live needle ⟹ tag live ⟹ entries[id] initialized (I6).
                     // id_bytes = id × S::SIZE and id < capacity ⟹ in bounds.
                     // Storage is #[repr(C)] with entry at offset 0 ⟹ Entry reachable directly.
@@ -333,7 +384,9 @@ where
                     let e = &*entry_ptr;
                     if e.key.borrow() == key {
                         let lane = bit >> 1;
-                        return Some(i + lane);
+                        // SAFETY: SCAN_MASK match against a needle that has LIVE set
+                        // ⟹ this tag has LIVE set ⟹ tag != 0.
+                        return Some((i + lane, NonZeroU16::new_unchecked(tag)));
                     }
                     mask = _blsr_u32(mask);
                     mask = _blsr_u32(mask);
@@ -359,10 +412,10 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = match self.find(key, needle, has_avx2_bmi1) {
-            Some(p) => {
+        let (pos, tag) = match self.find(key, needle, has_avx2_bmi1) {
+            Some(pt) => {
                 self.hits += 1;
-                p
+                pt
             }
             None => {
                 self.misses += 1;
@@ -370,9 +423,8 @@ where
             }
         };
         self.tags[pos] |= VISITED;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find.
-        let e = unsafe { &*self.entry_ptr(id) };
+        // SAFETY: tag came from a live slot in `find`.
+        let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some(&e.value)
     }
 
@@ -382,10 +434,10 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = match self.find(key, needle, has_avx2_bmi1) {
-            Some(p) => {
+        let (pos, tag) = match self.find(key, needle, has_avx2_bmi1) {
+            Some(pt) => {
                 self.hits += 1;
-                p
+                pt
             }
             None => {
                 self.misses += 1;
@@ -393,10 +445,9 @@ where
             }
         };
         self.tags[pos] |= VISITED;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find; the &mut self borrow makes the
-        // returned &mut V the only outstanding borrow into entries[id].
-        let e = unsafe { &mut *self.entry_ptr_mut(id) };
+        // SAFETY: tag came from a live slot in `find`; `&mut self` makes the
+        // returned `&mut V` the only outstanding borrow into the entry.
+        let e = unsafe { &mut *self.entry_ptr_mut_from_tag(tag) };
         Some(&mut e.value)
     }
 
@@ -408,10 +459,9 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find.
-        let e = unsafe { &*self.entry_ptr(id) };
+        let (_pos, tag) = self.find(key, needle, has_avx2_bmi1)?;
+        // SAFETY: tag came from a live slot in `find`.
+        let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some(&e.value)
     }
 
@@ -422,11 +472,10 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find; the &mut self borrow makes the
-        // returned &mut V the only outstanding borrow into entries[id].
-        let e = unsafe { &mut *self.entry_ptr_mut(id) };
+        let (_pos, tag) = self.find(key, needle, has_avx2_bmi1)?;
+        // SAFETY: tag came from a live slot in `find`; `&mut self` makes the
+        // returned `&mut V` the only outstanding borrow into the entry.
+        let e = unsafe { &mut *self.entry_ptr_mut_from_tag(tag) };
         Some(&mut e.value)
     }
 
@@ -443,10 +492,10 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = match self.find(key, needle, has_avx2_bmi1) {
-            Some(p) => {
+        let (pos, tag) = match self.find(key, needle, has_avx2_bmi1) {
+            Some(pt) => {
                 self.hits += 1;
-                p
+                pt
             }
             None => {
                 self.misses += 1;
@@ -454,9 +503,8 @@ where
             }
         };
         self.tags[pos] |= VISITED;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find.
-        let e = unsafe { &*self.entry_ptr(id) };
+        // SAFETY: tag came from a live slot in `find`.
+        let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some((&e.key, &e.value))
     }
 
@@ -472,10 +520,9 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
-        let id = Self::id_of(self.tags[pos]);
-        // SAFETY: pos was confirmed live by find.
-        let e = unsafe { &*self.entry_ptr(id) };
+        let (_pos, tag) = self.find(key, needle, has_avx2_bmi1)?;
+        // SAFETY: tag came from a live slot in `find`.
+        let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some((&e.key, &e.value))
     }
 
@@ -494,12 +541,11 @@ where
         F: FnOnce() -> V,
     {
         let needle = Self::needle_from_hash(hash);
-        if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
+        if let Some((pos, tag)) = self.find(&key, needle, has_avx2_bmi1) {
             self.hits += 1;
             self.tags[pos] |= VISITED;
-            let id = Self::id_of(self.tags[pos]);
-            // SAFETY: pos was confirmed live by find.
-            let e = unsafe { &*self.entry_ptr(id) };
+            // SAFETY: tag came from a live slot in `find`.
+            let e = unsafe { &*self.entry_ptr_from_tag(tag) };
             return &e.value;
         }
         self.misses += 1;
@@ -525,10 +571,9 @@ where
     ) -> Option<(K, V)> {
         self.insertions += 1;
         let needle = Self::needle_from_hash(hash);
-        if let Some(pos) = self.find(&key, needle, has_avx2_bmi1) {
-            let id = Self::id_of(self.tags[pos]);
-            // SAFETY: find confirmed the tag is live.
-            let e = unsafe { &mut *self.entry_ptr_mut(id) };
+        if let Some((pos, tag)) = self.find(&key, needle, has_avx2_bmi1) {
+            // SAFETY: tag came from a live slot in `find`.
+            let e = unsafe { &mut *self.entry_ptr_mut_from_tag(tag) };
             e.value = value;
             self.tags[pos] |= VISITED;
             return None;
@@ -622,8 +667,8 @@ where
         Q: Eq + ?Sized,
     {
         let needle = Self::needle_from_hash(hash);
-        let pos = self.find(key, needle, has_avx2_bmi1)?;
-        let removed_id = Self::id_of(self.tags[pos]);
+        let (pos, tag) = self.find(key, needle, has_avx2_bmi1)?;
+        let removed_id = Self::id_of(tag.get());
 
         // (1) Read Entry out of entries[removed_id]. After this, entries[removed_id]
         // is logically uninitialized.
