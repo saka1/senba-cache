@@ -20,7 +20,7 @@
 | j5 系列 (j4 の double-hash 排除) | sieve-j5-doublehash-ab, j5-pershard-pareto, j5-twitter-pareto, j5-vs-orig-2x-memfair |
 | j6 系列 (M2.1: visited を tag に同居) | sieve-j6-m21-twitter |
 | j7 系列 (M2.3: tag を u16 化、visited + 14-bit hash) | sieve-j7-m23-twitter, j7-twitter-pareto |
-| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext, find-avx2-avx512 |
+| j8 系列 (M5.3 + tag 内 ID embed + free_list 廃止) | sieve-j8-bench, j8-candidate-loop-analysis, j8-c-hoist, j8-twitter-pareto, find-avx2-frontier, find-avx2-pext, find-avx2-pdep-pext-revert, find-avx2-avx512, find-avx2-caller-merge |
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
 | 単一 shard testbed (c10 設計の出発点) | single-shard-baseline |
@@ -219,6 +219,21 @@ HR は c8/c9 完全一致 (両者 senba::Cache の shift-on-evict を継承)。p
 1T fast path を c9 から逆輸入する方向で別 design doc に起案。c10 候補として RwLock per
 shard / hot shard sub-shard 分割 / lock-free senba::Shard 化を §6 で提案。
 
+### 2026-05-08-find-avx2-pdep-pext-revert.md
+`find-avx2-pext.md` の **P3 (PDEP needle 構築)** と **P2 (PEXT で pair-mask →
+lane-mask + inner unroll ×2)** を順に投入し、両方とも採用基準を満たさず revert
+した試行 + 教訓レポート。P3 は asm レベルでは 7 → 4 命令 / dep chain 5 → 3 に短縮
+できたが perf-gate は 6 シナリオすべて criterion "within noise threshold"、後段の
+baseline 取り直しで同機械が ±2-3% 揺れることが判明し「improvement に見えた偶然
+の上振れ」と再評価。P2 は 3 シナリオで +3.5〜+4.9% の明確な regression。asm 確認
+で **(a) LLVM が `cmp1 → load p2` の hoist を出さず load 並列化が実現していない、
+(b) PEXT prelude を毎 chunk 払うが per_shard=64 の cand 分布上 unroll ×2 がほぼ
+発火しない**、の 2 点が原因と判明。前報机上見積が overestimate だった理由 (PEXT
+毎 chunk コスト / N_cand を全 chunk 平均と取り違え / LLVM hoist 期待) を §3 教訓
+として整理。再挑戦するなら B1 (SoA tag split) との比較を先、ないし `asm!` 直書きで
+LLVM hoist 限界を自前で潰してから perf-gate に進む順序を §4 に明記。code は HEAD
+に revert、本稿のみが本セッションの artifact。
+
 ### 2026-05-08-find-avx2-pext.md
 `find-avx2-frontier.md` §C2 で「Zen 1/2 で PEXT 激遅、non-portable 前提なら別議論」と
 棚上げした BMI2 PEXT/PDEP 採用案を、Zen 1/2 (2017〜2019) のシェア低下と CPUID family
@@ -258,3 +273,31 @@ B1 の最も強い相乗。PEXT 系 (P1/P2) は kmask が初めから lane-mask 
 配布形態は cargo feature `avx512-vl` / `avx512-zmm` の二段で、AVX-512 が無い CPU は
 ランタイム detect で AVX2 path に自動 fallback。本稿は解析ノート (実測なし)、推奨
 着手順は S1/S2/S3 + P3 → V1 → A2 → V2 と V5 の二択を prototype で詰める。
+
+### 2026-05-08-find-avx2-caller-merge.md
+`find-avx2-frontier.md` Tier-S の caller-merge 最適化を 3 試行で詰めて
+**採択した実測ノート**。**第 1 試行 S1+S2 は棄却** (find_avx2 が
+target_feature 制約で inline されず tuple 返りが sret 化、かつ LLVM が
+shift round-trip を畳まないため get_heavy_u64 +5.11%)。**第 2 試行
+A3+`#[inline]`** で `entry_ptr_from_tag(tag) = entries + (tag & ID_MASK)`
+を hit path 専用ヘルパとして追加し source 側 fold、asm 上 byte offset が
+1 op の `and rXd, 2016` に圧縮、perf も get_heavy +1.51% (gate 内) まで
+改善 — ただし sret は stable Rust の構造制約 (`#[inline(always)]` +
+`#[target_feature]` が E0658 で禁止) で残存。**第 3 試行 NonZeroU16 + A3
++ `#[inline]` で完全達成・採択**: live tag は LIVE bit (0x8000) 立ち
+⟹ 非ゼロを利用、`find` 返り型を `Option<(usize, NonZeroU16)>` に変更して
+niche optimization で 16 byte に抑え sret 解消。const assert
+`size_of::<Option<(usize, NonZeroU16)>>() == 16` を anchor。asm は
+`mov rdi, rbx; call find_avx2; test dx, dx; je miss; ...; and edx, 2016;
+add rax, rdx` で完全予測通り (sret なし、niche `test dx, dx`、shift
+round-trip なし)。perf-gate AB: insert_u64 −7.15% / mixed_u64 −10.14% /
+insert_string −3.22% / insert_u32_slot16 −9.24% の 4 シナリオ大勝、
+get_heavy_u64 +0.86% (noise 域) / mixed_lowskew_u64 +1.38% で 5% gate
+違反なし。Twitter trace cross-check (cluster016/018/019 × cap 4096/16384/32768)
+も実施済: HR 9 セル全完全一致、cluster016 (scan-heavy) で −2.82〜−9.25%
+の大勝、cluster018/019 で gate 内 +0.4〜+1.6% 退行 (perf-gate の
+get_heavy/lowskew と同根)、5% gate 違反なし。perf-gate と Twitter で
+方向が揃って採択維持。学び:
+sret threshold (16 byte) は ABI 設計のクリフ、niche-bearing 型での
+サイズ詰めは積極検討、const assert で固定化、3 段試行で各制約を
+独立に閉じる。
