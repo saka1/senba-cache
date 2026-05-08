@@ -33,6 +33,7 @@ use std::time::Instant;
 use senba_research::single_shard::SingleShard;
 use senba_research::single_shard::adapters::{
     C8SingleShard, C9SingleShard, C10sSingleShard, C11sSingleShard, C12sSingleShard,
+    C13sSingleShard,
 };
 use senba_research::single_shard::workload::{AdversarialHot, UniformDisjoint};
 use senba_research::workload::zipf::ZipfGen;
@@ -140,7 +141,7 @@ fn parse_args() -> Args {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_single_shard --variant {{c8,c9,c10s,c11s,c12s}} \
+                    "usage: bench_single_shard --variant {{c8,c9,c10s,c11s,c12s,c13s}} \
                      --workload {{zipf,adversarial-hot,uniform}} \
                      --op-mix {{read-only,read-heavy,gim}} \
                      --cap N --threads N --skew F --keys N \
@@ -162,8 +163,11 @@ fn parse_args() -> Args {
         "--warmup must be divisible by --threads"
     );
     assert!(
-        matches!(variant.as_str(), "c8" | "c9" | "c10s" | "c11s" | "c12s"),
-        "--variant must be c8|c9|c10s|c11s|c12s, got: {variant}"
+        matches!(
+            variant.as_str(),
+            "c8" | "c9" | "c10s" | "c11s" | "c12s" | "c13s"
+        ),
+        "--variant must be c8|c9|c10s|c11s|c12s|c13s, got: {variant}"
     );
     assert!(
         cap > 0 && cap <= 64,
@@ -460,6 +464,7 @@ fn main() {
             "c10s" => run_trial::<C10sSingleShard<u64, u64>>(&args),
             "c11s" => run_trial::<C11sSingleShard<u64, u64>>(&args),
             "c12s" => run_trial::<C12sSingleShard<u64, u64>>(&args),
+            "c13s" => run_trial::<C13sSingleShard<u64, u64>>(&args),
             other => panic!("unknown variant: {other}"),
         };
         emit(&args, trial, &r);

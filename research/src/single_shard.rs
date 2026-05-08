@@ -73,6 +73,7 @@ pub mod adapters {
     use crate::experimental::sieve_c10s;
     use crate::experimental::sieve_c11s;
     use crate::experimental::sieve_c12s;
+    use crate::experimental::sieve_c13s;
     use senba::Xxh3Build;
     use std::hash::{BuildHasher, Hash};
 
@@ -284,6 +285,60 @@ pub mod adapters {
 
         fn insert(&self, key: K, value: V) -> bool {
             let h = self.hasher.hash_one(key);
+            self.shard.insert(key, value, h).is_some()
+        }
+    }
+
+    /// c13s の内部 [`sieve_c13s::Shard`] を直接 wrap。c11s structural skeleton +
+    /// senba::Cache shift-on-evict + Path A lock-free CAS の合成変種。reader は
+    /// V: Clone seqlock-clone dance を踏むので `read` は `get` 後 closure 呼び出し。
+    pub struct C13sSingleShard<K, V> {
+        shard: sieve_c13s::Shard<K, V>,
+        hasher: Xxh3Build,
+    }
+
+    impl<K, V> C13sSingleShard<K, V>
+    where
+        K: Hash + Eq,
+        V: Clone,
+    {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                shard: sieve_c13s::Shard::new(capacity),
+                hasher: Xxh3Build,
+            }
+        }
+    }
+
+    impl<K, V> SingleShard<K, V> for C13sSingleShard<K, V>
+    where
+        K: Hash + Eq + Send + Sync,
+        V: Clone + Send + Sync,
+    {
+        fn new(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+
+        fn capacity(&self) -> usize {
+            self.shard.capacity()
+        }
+
+        fn len(&self) -> usize {
+            self.shard.len()
+        }
+
+        fn read<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+            let h = self.hasher.hash_one(key);
+            // c13s の get_by_hash は seqlock-clone dance で local owned V を返す。
+            // 一度 local に持って `f(&local)` を呼ぶ (V: Clone コストは bench V=u64 で
+            // trivial、production な V=String では Mutex 内 clone と同等)。
+            let v = self.shard.get_by_hash(key, h)?;
+            Some(f(&v))
+        }
+
+        fn insert(&self, key: K, value: V) -> bool {
+            let h = self.hasher.hash_one(&key);
+            // 戻り値の意味: C8/C10s/C11s/C12s と同じ契約 (evict あり = true / なし = false)
             self.shard.insert(key, value, h).is_some()
         }
     }
