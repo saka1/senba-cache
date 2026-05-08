@@ -30,13 +30,16 @@ use senba_research::experimental::sieve_orig::SieveCache as Orig;
 /// W-TinyLFU 比較用に `mini_moka::sync::Cache<u64,u64>` を `Cache<u64,u64>` に被せる
 /// thin wrapper。bench でのみ使うので bench.rs 内に閉じる。
 ///
-/// **重要**: mini-moka は read/write log を内部 buffer にためて amortize するため、
+/// **重要**: mini-moka sync は read/write log を内部 buffer にためて amortize するため、
 /// 明示的に `ConcurrentCacheExt::sync()` を呼ばないと CMSketch 更新と admission 決定が
 /// 反映されない。upstream の test code (sync/cache.rs `basic_single_thread`) が毎回
 /// sync() を呼んでいることから、決定的な HR を測るには get/insert 後に sync() が必須。
 /// 呼ばないと admission 判定が遅延し、新規 key が write buffer overflow で落ちて
 /// HR が崩壊する。本 adapter では HR の正しさを優先し、毎 op 後に sync() を呼ぶ。
 /// その分 ns/op は実態より悪化するが、HR が screening の gate なので許容する。
+///
+/// 単スレッド比較で sync overhead 抜きの「純 admission policy」評価が欲しい時は
+/// `MiniMokaUnsync` を使う (`mini_moka::unsync::Cache`)。
 ///
 /// 制約:
 /// - mini_moka の `insert` は `()` を返すため、追い出された (K,V) は取れない。
@@ -46,17 +49,22 @@ use senba_research::experimental::sieve_orig::SieveCache as Orig;
 ///   は `.is_some()` しか見ないので、ヒット時はダミー静的参照を返して整合させる。
 /// - `max_capacity` は重み合計の budget。default weighter は entry あたり 1 なので
 ///   おおむね entry 数 == capacity と見做せる。
-struct MiniMoka {
-    inner: mini_moka::sync::Cache<u64, u64>,
+struct MiniMokaSync<K> {
+    inner: mini_moka::sync::Cache<K, u64, senba::Xxh3Build>,
     cap: u64,
 }
 
 const MINI_MOKA_DUMMY: u64 = 0;
 
-impl senba_research::CacheImpl<u64, u64> for MiniMoka {
+impl<K> senba_research::CacheImpl<K, u64> for MiniMokaSync<K>
+where
+    K: std::hash::Hash + Eq + Send + Sync + Clone + 'static,
+{
     fn new(capacity: usize) -> Self {
         Self {
-            inner: mini_moka::sync::Cache::new(capacity as u64),
+            inner: mini_moka::sync::Cache::builder()
+                .max_capacity(capacity as u64)
+                .build_with_hasher(senba::Xxh3Build),
             cap: capacity as u64,
         }
     }
@@ -68,20 +76,66 @@ impl senba_research::CacheImpl<u64, u64> for MiniMoka {
         self.inner.sync();
         self.inner.entry_count() as usize
     }
-    fn get(&mut self, key: &u64) -> Option<&u64> {
+    fn get(&mut self, key: &K) -> Option<&u64> {
         use mini_moka::sync::ConcurrentCacheExt;
         let hit = self.inner.get(key).is_some();
         self.inner.sync();
         if hit { Some(&MINI_MOKA_DUMMY) } else { None }
     }
-    fn insert(&mut self, key: u64, value: u64) -> Option<(u64, u64)> {
+    fn insert(&mut self, key: K, value: u64) -> Option<(K, u64)> {
         use mini_moka::sync::ConcurrentCacheExt;
         self.inner.insert(key, value);
         self.inner.sync();
         None
     }
-    fn contains_key(&self, key: &u64) -> bool {
+    fn contains_key(&self, key: &K) -> bool {
         self.inner.contains_key(key)
+    }
+}
+
+/// `mini_moka::unsync::Cache` を `senba_research::CacheImpl` に被せる thin wrapper。
+/// `MiniMokaSync` と違い `&mut self` 版で内部 atomic / write log が無く、
+/// 単スレッド公平条件で senba::Cache (`&mut self` 単スレ) と直接突き合わせるための
+/// 駆動系。hasher は senba::Cache のデフォルトと同じ `senba::Xxh3Build` を
+/// 注入してハッシュ品質差を消す。
+///
+/// 制約:
+/// - `insert` は `()` 返しで追い出された (K,V) は取れない → CSV の evictions は 0 固定。
+/// - `unsync::Cache::contains_key` は `&mut self` だが trait は `&self` 要求のため
+///   bench drive 経路では呼ばれない (使うのは get/insert のみ)。trait 要求を満たすために
+///   `unimplemented!()` で stub する。実 bench は壊れない。
+struct MiniMokaUnsync<K> {
+    inner: mini_moka::unsync::Cache<K, u64, senba::Xxh3Build>,
+    cap: u64,
+}
+
+impl<K> senba_research::CacheImpl<K, u64> for MiniMokaUnsync<K>
+where
+    K: std::hash::Hash + Eq + 'static,
+{
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: mini_moka::unsync::Cache::builder()
+                .max_capacity(capacity as u64)
+                .build_with_hasher(senba::Xxh3Build),
+            cap: capacity as u64,
+        }
+    }
+    fn capacity(&self) -> usize {
+        self.cap as usize
+    }
+    fn len(&self) -> usize {
+        self.inner.entry_count() as usize
+    }
+    fn get(&mut self, key: &K) -> Option<&u64> {
+        self.inner.get(key)
+    }
+    fn insert(&mut self, key: K, value: u64) -> Option<(K, u64)> {
+        self.inner.insert(key, value);
+        None
+    }
+    fn contains_key(&self, _key: &K) -> bool {
+        unimplemented!("MiniMokaUnsync::contains_key not exercised by bench drive")
     }
 }
 
@@ -141,6 +195,9 @@ struct Args {
     path: Option<String>,
     capacities: Vec<usize>,
     variants: Vec<String>,
+    /// trace を何周流すか。warmup 込みで連続実行したい時の amortize 用。
+    /// default 1。
+    repeat: u32,
 }
 
 struct Stats {
@@ -253,6 +310,7 @@ fn drive_str<C: CacheImpl<String, u64>>(trace: &[String], cap: usize) -> Stats {
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut source = String::from("zipf");
+    let mut source_explicit = false;
     let mut skew = f64::NAN;
     let mut keys = 0u64;
     let mut seed = 0u64;
@@ -260,6 +318,8 @@ fn parse_args() -> Args {
     let mut path: Option<String> = None;
     let mut capacities: Vec<usize> = Vec::new();
     let mut variants: Vec<String> = Vec::new();
+    let mut arc_preset: Option<String> = None;
+    let mut repeat: u32 = 1;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -268,7 +328,10 @@ fn parse_args() -> Args {
                 .unwrap_or_else(|| panic!("expected value after {flag}"))
         };
         match flag.as_str() {
-            "--source" => source = val().clone(),
+            "--source" => {
+                source = val().clone();
+                source_explicit = true;
+            }
             "--skew" => skew = val().parse().expect("--skew is f64"),
             "--keys" => keys = val().parse().expect("--keys is u64"),
             "--seed" => seed = val().parse().expect("--seed is u64"),
@@ -287,9 +350,11 @@ fn parse_args() -> Args {
             "--variant" => {
                 variants = val().split(',').map(|s| s.trim().to_string()).collect();
             }
+            "--arc-preset" => arc_preset = Some(val().clone()),
+            "--repeat" => repeat = val().parse().expect("--repeat is u32 >= 1"),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench --source <zipf|file|twitter|twitter-string|libcachesim-csv> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0"
+                    "usage: bench --source <zipf|file|twitter|twitter-string|libcachesim-csv|arc> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0\n  --arc-preset <s3|oltp|ds1|p1..p14|s1|s2|concat|merge-p|merge-s>  ARC trace の path / capacity 配列を一括解決\n  --repeat <N>  trace を N 周流す (default 1)"
                 );
                 std::process::exit(0);
             }
@@ -297,8 +362,26 @@ fn parse_args() -> Args {
         }
     }
 
+    // --arc-preset 解決: 明示指定が無いフィールドだけ preset で埋める。
+    if let Some(name) = &arc_preset {
+        let (preset_path, preset_caps) =
+            arc_preset_lookup(name).unwrap_or_else(|| panic!("unknown --arc-preset name: {name}"));
+        if !source_explicit {
+            source = String::from("arc");
+        }
+        if path.is_none() {
+            path = Some(preset_path.to_string());
+        }
+        if capacities.is_empty() {
+            capacities = preset_caps.to_vec();
+        }
+    }
+
+    if repeat == 0 {
+        panic!("--repeat must be >= 1");
+    }
     if capacities.is_empty() {
-        panic!("--capacity is required");
+        panic!("--capacity (or --arc-preset) is required");
     }
     if variants.is_empty() {
         panic!("--variant is required");
@@ -313,7 +396,107 @@ fn parse_args() -> Args {
         path,
         capacities,
         variants,
+        repeat,
     }
+}
+
+/// mokabench の `TraceFile::default_capacities` (`external/mokabench/src/trace_file.rs`)
+/// の ARC 行を転記。trace は `external/mokabench/cache-trace/arc/<NAME>.lis.zst` に
+/// 配置済みの zstd 圧縮形式を直接読む。spc1likeread は split zst (`.zst.00`/...) で
+/// 連結 reader が必要なため preset から外す。
+fn arc_preset_lookup(name: &str) -> Option<(&'static str, &'static [usize])> {
+    let entry: (&'static str, &'static [usize]) = match name.trim().to_ascii_lowercase().as_str() {
+        "concat" => (
+            "external/mokabench/cache-trace/arc/ConCat.lis.zst",
+            &[200_000, 400_000, 3_200_000],
+        ),
+        "ds1" => (
+            "external/mokabench/cache-trace/arc/DS1.lis.zst",
+            &[1_000_000, 4_000_000, 8_000_000],
+        ),
+        "merge-p" | "mergep" => (
+            "external/mokabench/cache-trace/arc/MergeP.lis.zst",
+            &[400_000, 1_000_000, 3_200_000],
+        ),
+        "merge-s" | "merges" => (
+            "external/mokabench/cache-trace/arc/MergeS.lis.zst",
+            &[400_000, 1_000_000, 3_200_000],
+        ),
+        "oltp" => (
+            "external/mokabench/cache-trace/arc/OLTP.lis.zst",
+            &[256, 512, 1_000, 2_000],
+        ),
+        "p1" => (
+            "external/mokabench/cache-trace/arc/P1.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p2" => (
+            "external/mokabench/cache-trace/arc/P2.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p3" => (
+            "external/mokabench/cache-trace/arc/P3.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p4" => (
+            "external/mokabench/cache-trace/arc/P4.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p5" => (
+            "external/mokabench/cache-trace/arc/P5.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p6" => (
+            "external/mokabench/cache-trace/arc/P6.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p7" => (
+            "external/mokabench/cache-trace/arc/P7.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p8" => (
+            "external/mokabench/cache-trace/arc/P8.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p9" => (
+            "external/mokabench/cache-trace/arc/P9.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p10" => (
+            "external/mokabench/cache-trace/arc/P10.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p11" => (
+            "external/mokabench/cache-trace/arc/P11.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p12" => (
+            "external/mokabench/cache-trace/arc/P12.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p13" => (
+            "external/mokabench/cache-trace/arc/P13.lis.zst",
+            &[20_000, 160_000],
+        ),
+        "p14" => (
+            "external/mokabench/cache-trace/arc/P14.lis.zst",
+            &[80_000, 640_000],
+        ),
+        "s1" => (
+            "external/mokabench/cache-trace/arc/S1.lis.zst",
+            &[100_000, 800_000],
+        ),
+        "s2" => (
+            "external/mokabench/cache-trace/arc/S2.lis.zst",
+            &[100_000, 800_000],
+        ),
+        "s3" => (
+            "external/mokabench/cache-trace/arc/S3.lis.zst",
+            &[100_000, 400_000, 800_000],
+        ),
+        _ => return None,
+    };
+    Some(entry)
 }
 
 fn build_trace_string(args: &Args) -> Vec<String> {
@@ -364,6 +547,21 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 None => it.collect(),
             }
         }
+        // ARC paper trace (mokabench 同梱 `external/mokabench/cache-trace/arc/*.lis[.zst]`)。
+        // 各行 `start len` を `start..start+len` に展開して u64 key 列にする。
+        // 出典: mokabench (https://github.com/moka-rs/mokabench)、trace は
+        // cache-trace submodule (https://github.com/moka-rs/cache-trace)。
+        "arc" => {
+            let p = args
+                .path
+                .as_ref()
+                .expect("--path required for --source arc");
+            let it = file::arc_from_path(p).expect("open trace");
+            match args.len {
+                Some(n) => it.take(n).collect(),
+                None => it.collect(),
+            }
+        }
         // libCacheSim 同梱 CSV: `# time, object, size, next_access_vtime` 形式。
         // object 列が数値 u64 なので String hash を経由せず直接食う。
         "libcachesim-csv" => {
@@ -382,7 +580,16 @@ fn build_trace(args: &Args) -> Vec<u64> {
 }
 
 fn run_string_keys(args: &Args) {
-    let trace = build_trace_string(args);
+    let trace_once = build_trace_string(args);
+    let trace: Vec<String> = if args.repeat == 1 {
+        trace_once
+    } else {
+        let mut v = Vec::with_capacity(trace_once.len() * args.repeat as usize);
+        for _ in 0..args.repeat {
+            v.extend(trace_once.iter().cloned());
+        }
+        v
+    };
     println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
     for v in &args.variants {
         for &cap in &args.capacities {
@@ -402,6 +609,8 @@ fn run_string_keys(args: &Args) {
                 "senba_n512" => drive_senba_str::<senba::Slot32>(&trace, cap, 512),
                 "senba_n1024" => drive_senba_str::<senba::Slot32>(&trace, cap, 1024),
                 "senba_n2048" => drive_senba_str::<senba::Slot32>(&trace, cap, 2048),
+                "mini_moka" | "mini_moka_sync" => drive_str::<MiniMokaSync<String>>(&trace, cap),
+                "mini_moka_unsync" => drive_str::<MiniMokaUnsync<String>>(&trace, cap),
                 other => panic!("unknown variant for twitter-string: {other}"),
             };
             println!(
@@ -425,7 +634,17 @@ fn main() {
         run_string_keys(&args);
         return;
     }
-    let trace = build_trace(&args);
+    let trace_once = build_trace(&args);
+    // --repeat: trace を N 周分連結。default 1 なので clone コストはゼロ。
+    let trace: Vec<u64> = if args.repeat == 1 {
+        trace_once
+    } else {
+        let mut v = Vec::with_capacity(trace_once.len() * args.repeat as usize);
+        for _ in 0..args.repeat {
+            v.extend_from_slice(&trace_once);
+        }
+        v
+    };
 
     println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
     for v in &args.variants {
@@ -497,8 +716,12 @@ fn main() {
                 "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap),
                 "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap),
                 "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
-                // senba::Cache<u64, u64> (Slot32 default). per-shard <= 64 制約のため
-                // cap が大きいときは SHARDS を増やす必要がある (cap=30000 → n512 等)。
+                // senba::Cache<u64, u64> (Slot32 default)。`senba` は `Cache::new(cap)`
+                // が SHARDS を自動選択する canonical 経路 (next_pow2(ceil(cap/64)))。
+                // `senba_nNNN` は SHARDS を pin してスイープするための bench 専用
+                // variant — per-shard 上限は 64 (tag 内 6-bit ID) なので、変な N を
+                // 指定すると assert で落ちる / per-shard が小さすぎて HR が劣化する。
+                "senba" => drive::<Senba<u64, u64>>(&trace, cap),
                 "senba_n16" => drive_senba::<senba::Slot32>(&trace, cap, 16),
                 "senba_n32" => drive_senba::<senba::Slot32>(&trace, cap, 32),
                 "senba_n64" => drive_senba::<senba::Slot32>(&trace, cap, 64),
@@ -508,7 +731,10 @@ fn main() {
                 "senba_n1024" => drive_senba::<senba::Slot32>(&trace, cap, 1024),
                 "senba_n2048" => drive_senba::<senba::Slot32>(&trace, cap, 2048),
                 // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
-                "mini_moka" => drive::<MiniMoka>(&trace, cap),
+                // `mini_moka` は後方互換 alias (sync 実装に解決)。
+                "mini_moka" | "mini_moka_sync" => drive::<MiniMokaSync<u64>>(&trace, cap),
+                // 単スレ公平比較用: unsync 版 (内部 atomic / write log 無し)。
+                "mini_moka_unsync" => drive::<MiniMokaUnsync<u64>>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
                 "moka" => drive::<Moka>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
