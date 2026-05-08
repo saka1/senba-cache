@@ -159,6 +159,55 @@ caller-merge 最適化後の senba 値。)
    cap 内に収まる Zipf 大 cap / ConCat 1M では orig の単一 list-walk が
    軽い、という相反する力学。これは別レポートで掘る。
 
+## 仮説: 高 cap で orig に負ける原因は shards 分散による hot 集合の cacheline 散逸
+
+ConCat を cap 軸で見ると `senba/orig` 比が **shards 数の log と逆相関**で
+綺麗に崩れる:
+
+| cap    | shards | HR    | senba (Mops/s) | orig (Mops/s) | senba/orig |
+|-------:|-------:|------:|---------------:|--------------:|-----------:|
+| 100k   |  2,048 | 56%   | 28.3           | 25.5          | **111%** (勝ち) |
+| 400k   |  8,192 | 87%   | 16.8           | 22.9          | 73%        |
+| 1M     | 16,384 | 93%   | 13.5           | 23.4          | **58%**    |
+
+`Cache::new(cap)` は per-shard を 32–64 に保つために
+`shards = next_pow2(ceil(cap / 64))` で **shards を cap に線形比例**させる。
+ConCat のような **高 HR (working set が cap に収まる)** workload では、
+hot な部分集合は uniform hash で 16k shards に散らされる。1 op あたりの
+cache 動きを比較すると:
+
+- **senba**: `shards[shard_of_hash]` の random index (shards 配列 16k * sizeof(Shard))
+  → 該当 shard の `tags` 配列 → 一致した tag の `entries[id]` の **3 cacheline**
+- **orig**: HashMap bucket probe → `Box<Node>` の deref の **2 cacheline**
+
+orig は単一の HashMap + 単一の arena で、hot 集合が連続領域に固まるため
+2 nd / 3 rd access はキャッシュに残る。senba は shard の差で hot 集合が
+分散するので、hot key を再アクセスしても shard 別の cacheline を引き直す
+ことになる。orig が cap によらず ~23–25 Mops/s でフラットなのは、HR が
+上がるほど hot 集合が小さくなり L1/L2 に収まりやすくなる効果と整合する。
+
+これが正しいなら、miss-heavy 帯 (DS1 / P3 / S3 / MergeP) で senba が勝つ
+のは、そもそも cache に当たらない条件下では senba の SIMD probe が
+orig の HashMap probe より単純に速い、という別の力学。逆に hit-heavy 帯では
+cacheline 局在が支配変数になり senba の sharding が裏目に出る。
+
+### 検証案 (別レポート)
+
+1. **`Slot8` (256 ent/shard) ブラケット追加**: shards 数を 1/4 に減らせる。
+   cap=1M で 4,096 shards、senba 側のデータ構造 footprint も ~1/4。
+   AVX2 SIMD probe は 32-tag batch なので 256 ent/shard でも 8 batch
+   程度で済み、per-shard scan の伸びは支配的にはならない見込み。
+2. **shards 上限の導入**: `next_pow2(min(ceil(cap/64), MAX_SHARDS))` で
+   超過分は per-shard 容量で吸収する方向。per-shard 上限を 6-bit ID から
+   拡張する必要があり構造変更が大きい。
+3. **キャッシュミス計測**: `perf stat -e LLC-load-misses` で senba vs orig
+   を ConCat cap=1M で取り、3 cacheline / 2 cacheline 仮説の直接確認。
+
+仮説の裏付けが取れれば「cap が大きい時の shards 戦略」は library の
+公開 API 設計として再検討する価値あり (現状の `Cache::new` は
+per-shard を 32–64 に保つ heuristic で、cap が小さい〜中の sweet spot は
+押さえているが、cap=1M 帯で別の最適点があり得る)。
+
 ## Follow-up
 
 - **DS1 / S3 large cap 帯の signal を取り込んだ perf-gate**: 候補は

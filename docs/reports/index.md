@@ -400,9 +400,13 @@ single-thread 公平条件 (`mini_moka_unsync`) で 2–4× — `mini_moka::sync
 `moka` は multi-thread 用途の overhead (sync()/background thread/tokio) が
 乗るので single-thread 比較からは除外。
 副次発見: **working set が cap に収まる帯 (Zipf cap=32k / ConCat cap=1M /
-OLTP cap=8000) では senba < orig** — shard 分散の hand-walk 重複コストが
-SIMD find 利得を上回る帯があり別レポートで掘る。caller-merge (main
-38d39f3) 後でも hit-heavy 帯の優劣は変わらず、miss-heavy 帯は senba +5〜15%。
+OLTP cap=8000) では senba < orig**。ConCat を cap 軸で並べると `senba/orig`
+比が `shards` 数 (2k → 8k → 16k) と逆相関で崩れる (111% → 73% → 58%) ので、
+**hot 集合が uniform hash で shards に分散して cacheline 局在を失う**のが
+仮説の主因 (orig 2 cacheline vs senba 3 cacheline / op)。検証案は `Slot8`
+(256 ent/shard) で shards 数を 1/4 に圧縮 + perf stat で LLC miss 直接計測。
+caller-merge (main 38d39f3) 後でも hit-heavy 帯の優劣は変わらず、miss-heavy 帯
+(DS1/P3/S3/MergeP) は senba +5〜15%。
 前リビジョンの「`senba_n128 cap=256` で HR collapse」は per-shard=2 強制の
 artifact で、`Cache::new(cap)` 経由なら起きない (ユーザは shards を選ばなくて良いし
 選ぶべきでもない)。次は OLTP/MergeP/Zipf 3 点 perf-gate 候補が follow-up。
