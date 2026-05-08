@@ -4,3 +4,6 @@
 [submodule "external/rust-sieve-cache"]
 	path = external/rust-sieve-cache
 	url = https://github.com/jedisct1/rust-sieve-cache.git
+[submodule "external/mokabench"]
+	path = external/mokabench
+	url = https://github.com/moka-rs/mokabench.git
