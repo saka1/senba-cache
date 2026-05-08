@@ -350,6 +350,57 @@ fn c9_1shard_matches_orig_on_bundled_zipf() {
     }
 }
 
+/// **c12s は SIEVE と等価ではない** という研究結果を記録する負テスト。
+///
+/// 設計文書 `docs/reports/2026-05-08-c12s-cas-slot-claim-design.md` §3 では
+/// 「install-at-evicted-pos は SIEVE 等価」と仮説していたが、Phase 2 oracle 検証で
+/// **eviction stream / cache contents の双方で c12s ≠ sieve_orig** が判明した。
+///
+/// 原因: install-at-evicted-pos は新 entry を hand 直前の pos (= 次の sweep 対象位置)
+/// に置く。sieve_orig (linked list で head insert) と senba::Cache (shift-on-evict で
+/// tail insert) は「新 entry が tail 側にあり最後に sweep される」のに対し、c12s は
+/// 「新 entry が次の sweep 対象になる」 → 高 churn の zipf trace で頻繁に新 entry が
+/// 即 evict され、cache contents 自体が divergent になる。
+///
+/// 本テストは **divergent であること** を eviction stream の length-mismatch (実際は
+/// 同じだが、unconditional な assert で意図的に失敗させない) ではなく diff 件数 > 0 で
+/// 確認する形にしてある。**default では `#[ignore]`** で skip されるが、`cargo test
+/// --ignored` で実走できる。詳細は report 参照。
+#[test]
+#[ignore = "c12s install-at-evicted-pos is not SIEVE-equivalent — divergent eviction policy by design (see docs/reports/2026-05-08-c12s-cas-slot-claim.md §3)"]
+fn c12s_1shard_diverges_from_orig_on_synthetic_zipf() {
+    use senba_research::experimental::sieve_c12s::ConcurrentSieveCache as C12s;
+    let mut total_diff = 0usize;
+    let mut total_ops = 0usize;
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace: Vec<u64> = ZipfGen::new(skew, 10_000, 42).take(200_000).collect();
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: C12s<u64, u64, 1> = C12s::new(cap);
+        for k in &trace {
+            a.insert(*k, *k);
+            b.insert(*k, *k);
+        }
+        let mut diff = 0usize;
+        for &k in &trace {
+            if a.get(&k).copied() != b.get(&k) {
+                diff += 1;
+            }
+        }
+        eprintln!(
+            "[c12s vs orig] skew={skew} cap={cap}: diff={diff}/{} ({:.1}%)",
+            trace.len(),
+            100.0 * diff as f64 / trace.len() as f64
+        );
+        total_diff += diff;
+        total_ops += trace.len();
+    }
+    assert!(
+        total_diff > 0,
+        "c12s と orig が完全一致してしまった ({total_ops} ops 中 0 diff): \
+         install-at-evicted-pos 設計が変更されたか、テスト trace の特性が変わった"
+    );
+}
+
 /// 既存 trace ファイルでも 1-shard で完全一致を確認 (cap=64 まで)。
 #[cfg(feature = "external-traces")]
 #[test]

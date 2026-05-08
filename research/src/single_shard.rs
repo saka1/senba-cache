@@ -71,6 +71,8 @@ pub mod adapters {
     use crate::experimental::sieve_c8;
     use crate::experimental::sieve_c9;
     use crate::experimental::sieve_c10s;
+    use crate::experimental::sieve_c11s;
+    use crate::experimental::sieve_c12s;
     use senba::Xxh3Build;
     use std::hash::{BuildHasher, Hash};
 
@@ -184,6 +186,104 @@ pub mod adapters {
         fn insert(&self, key: K, value: V) -> bool {
             let h = self.hasher.hash_one(key);
             // C8SingleShard と同じ契約: evict あり = true / なし (空き or update) = false。
+            self.shard.insert(key, value, h).is_some()
+        }
+    }
+
+    /// c11s の内部 [`sieve_c11s::Shard`] を直接 wrap。c10s と同形 (conditional
+    /// visited set のみが差分)。
+    pub struct C11sSingleShard<K, V> {
+        shard: sieve_c11s::Shard<K, V>,
+        hasher: Xxh3Build,
+    }
+
+    impl<K, V> C11sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy,
+        V: Copy,
+    {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                shard: sieve_c11s::Shard::new(capacity),
+                hasher: Xxh3Build,
+            }
+        }
+    }
+
+    impl<K, V> SingleShard<K, V> for C11sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy + Send + Sync,
+        V: Copy + Send + Sync,
+    {
+        fn new(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+
+        fn capacity(&self) -> usize {
+            self.shard.capacity()
+        }
+
+        fn len(&self) -> usize {
+            self.shard.len()
+        }
+
+        fn read<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+            let h = self.hasher.hash_one(key);
+            let v = self.shard.get_by_hash(key, h)?;
+            Some(f(&v))
+        }
+
+        fn insert(&self, key: K, value: V) -> bool {
+            let h = self.hasher.hash_one(key);
+            self.shard.insert(key, value, h).is_some()
+        }
+    }
+
+    /// c12s の内部 [`sieve_c12s::Shard`] を直接 wrap。c11s と同形 (writer Mutex 完全
+    /// 排除 + install-at-evicted-pos のみが差分)。
+    pub struct C12sSingleShard<K, V> {
+        shard: sieve_c12s::Shard<K, V>,
+        hasher: Xxh3Build,
+    }
+
+    impl<K, V> C12sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy,
+        V: Copy,
+    {
+        pub fn new(capacity: usize) -> Self {
+            Self {
+                shard: sieve_c12s::Shard::new(capacity),
+                hasher: Xxh3Build,
+            }
+        }
+    }
+
+    impl<K, V> SingleShard<K, V> for C12sSingleShard<K, V>
+    where
+        K: Hash + Eq + Copy + Send + Sync,
+        V: Copy + Send + Sync,
+    {
+        fn new(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+
+        fn capacity(&self) -> usize {
+            self.shard.capacity()
+        }
+
+        fn len(&self) -> usize {
+            self.shard.len()
+        }
+
+        fn read<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+            let h = self.hasher.hash_one(key);
+            let v = self.shard.get_by_hash(key, h)?;
+            Some(f(&v))
+        }
+
+        fn insert(&self, key: K, value: V) -> bool {
+            let h = self.hasher.hash_one(key);
             self.shard.insert(key, value, h).is_some()
         }
     }
