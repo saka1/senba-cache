@@ -94,34 +94,38 @@ SIEVE の policy 性能を SIMD/sharding 越しでも保てていることが確
 
 | Workload | cap | senba | orig | mini_moka_unsync |
 |---|---:|---:|---:|---:|
-| OLTP | 1000 | **30.2** | 20.3 | 15.4 |
-| OLTP | 8000 | **28.6** | 23.8 | 12.2 |
-| P3 | 20k | **30.8** | 17.8 | 7.4 |
-| P3 | 32k | **29.2** | 16.9 | 6.8 |
-| S3 | 100k | **20.5** | 12.0 | 5.9 |
-| S3 | 400k | **9.95** | 8.4 | 4.9 |
-| DS1 | 100k | **22.7** | 12.4 | 6.4 |
-| DS1 | 1M | **7.0** | 5.9 | 3.9 |
-| ConCat | 1M | 13.2 | **24.2** | 6.8 |
-| MergeP | 1M | **7.8** | 7.5 | 3.9 |
-| Zipf | 4k | 43.3 | **44.3** | 15.8 |
-| Zipf | 32k | 40.9 | **65.4** | 12.9 |
+| OLTP | 1000 | **28.4** | 25.6 | 15.3 |
+| OLTP | 8000 | 29.2 | **32.9** | 13.1 |
+| P3 | 20k | **33.2** | 19.9 | 9.1 |
+| P3 | 32k | **31.7** | 17.1 | 7.3 |
+| S3 | 100k | **22.2** | 13.3 | 6.1 |
+| S3 | 400k | **11.2** | 8.7 | 5.2 |
+| DS1 | 100k | **24.3** | 12.8 | 6.6 |
+| DS1 | 1M | **7.9** | 6.3 | 4.0 |
+| ConCat | 1M | 13.5 | **23.4** | 7.9 |
+| MergeP | 1M | **8.2** | 7.7 | 4.0 |
+| Zipf | 4k | **36.5** | 33.0 | 19.4 |
+| Zipf | 32k | 44.5 | **62.0** | 11.6 |
 
-(数値は **Mops/s**, get-then-insert ループ全体を `Instant::now` で計測。)
+(数値は **Mops/s**, get-then-insert ループ全体を `Instant::now` で計測。
+caller-merge 最適化後の senba 値。)
 
 **読み取り**:
 
 - senba は **single-thread の `mini_moka_unsync` の 2–4×** を出す
   (W-TinyLFU の hot path に乗る write log / CMSketch 更新 vs senba の
   SIMD probe + tag/visited bit 操作の実装差)。
-- **Zipf 大 cap と ConCat 1M で orig が senba を上回る** — senba の
-  per-shard SIEVE state machine + AVX2 find に対し、orig は単一の
-  doubly-linked list + 単一 hand で hand-walk が短い (working set が
-  cap に収まれば list 長 ≈ live entries)。senba は shards 数だけ
+- **working set が cap に収まる帯で orig が senba を上回る** —
+  Zipf cap=32k (62.0 vs 44.5 Mops/s)、ConCat cap=1M (23.4 vs 13.5)、
+  OLTP cap=8000 (32.9 vs 29.2)。senba の per-shard SIEVE state machine +
+  AVX2 find に対し、orig は単一の doubly-linked list + 単一 hand で
+  hand-walk が短い (list 長 ≈ live entries)。senba は shards 数だけ
   state を分散するので、各 shard の hand-walk + SIMD probe の合計が
   単純な list-walk より重くなる帯がある。これは「SIMD で常勝」では
   ない実例で、orig を beat するには shard 内 hand walk の amortize
-  が要る (別レポート)。
+  が要る (別レポート)。caller-merge (38d39f3) で hit path が短くなり
+  miss-heavy 帯の senba は +5〜15% 改善したが、hit-heavy 帯では
+  list-walk の素朴な軽さが依然優位。
 
 ### Pareto plot
 
