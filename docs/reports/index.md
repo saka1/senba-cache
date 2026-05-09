@@ -473,3 +473,26 @@ auto-shard heuristic は Windows native でも +12–16% コスト、external-li
 bare Linux で `perf stat -e dTLB-load-misses` で THP 仮説確認、Windows Large Page
 で orig の TLB pressure 消す対照実験、GitHub Actions one-shot triage、VTune
 Per-allocation breakdown。
+
+### 2026-05-10-visited-bitmap.md
+SIEVE の VISITED ビットを `Shard::tags[i]: u16` から外して `Shard::visited: u64`
+の per-shard bitmap に追い出す。`MAX_PER_SHARD = 64` なので一語で足り、`hand`/`len`/
+`hits`/... が乗る制御 cache line に同居 (置き場コスト 0)。副次効果 3 点: (1)
+HASH_MASK が 8→9 bit (`0x3FFF`→`0x7FFF` から ID_MASK を引いた残り) で SCAN 偽陽性
+1/256→1/512、(2) `find_evict_pos` が O(len) `scan_evict` linear walk → O(1)
+bit-twiddle (`(!visited & live_mask & !below_hand).trailing_zeros()` 1 命令 +
+`&= !mask` clearing)、(3) `tags[pos] |= VISITED` (tags line dirty) → `visited |=
+1u64 << pos` (制御 line dirty、`hits += 1` で既 dirty)。代償は `insert` 退避と
+`remove` の `tags.copy_within` に並走する bitmap shift (`u128` 経由で pos==63 の
+corner 回避) と `retain` の `new_visited` 再構築。**perf-gate 6 シナリオ**: get_heavy
+−7.76% / mixed_lowskew −10.04% / mixed_u64 −3.05% (3 シナリオ improved)、insert_*
++1% (5% gate 内)。**Twitter 5 cluster × 3 cap × 3 run sweep (n=90)**: 15 セル中
+14 セルで improvement、平均 Δ −6.3%、median −5.9%、range −14.9% 〜 +0.1%
+(cluster006/65536 で −14.9%、cluster019 全 cap で −9% 級、cluster034 のみ ≤−1.2%
+で控えめだが退行はゼロ)。oracle 等価性は維持 (oracle.rs + oracle_cache_match.rs
+全 28 テスト pass、hits/misses/evictions が before/after 全 90 サンプルで bit-for-bit
+一致)。WSL2 環境バイアスは senba 単独 AB なのでほぼ乗らず。読み筋は read-heavy
+帯で偽陽性半減 + visited-set RMW の line 移動の合算、低 skew miss-heavy 帯で
+O(1) victim search が直接効く。**採択**。follow-up: `find_avx2` caller-merge の
+再評価 (HASH 9 bit 化で false-positive base が変わったので)、`AtomicU64` 化に
+よる並行 variant への流用検討、Slot8 復活案 (本件と直交、併用前提で再検討可能)。

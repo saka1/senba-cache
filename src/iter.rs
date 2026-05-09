@@ -185,6 +185,7 @@ where
                 }
                 sh.len = 0;
                 sh.hand = 0;
+                sh.visited = 0;
                 l
             })
             .collect();

@@ -2,23 +2,25 @@ use super::super::*;
 use super::TEST_SHARDS;
 
 /// Verifies bit-field exclusivity for Slot32 (default, Entry<u64,u64>=16).
-/// Shard<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x381f.
+/// Shard<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x781f.
+/// (HASH_MASK gained one bit vs the original layout when VISITED moved out
+/// of the tag into a per-shard u64 bitmap.)
 #[test]
 fn bit_layout_exclusivity_slot32() {
     type I = Shard<u64, u64, Slot32>;
     assert_eq!(I::ID_SHIFT, 5);
     assert_eq!(I::ID_MASK, 0x07e0);
-    assert_eq!(I::HASH_MASK, 0x381f);
+    assert_eq!(I::HASH_MASK, 0x781f);
     assert_eq!(I::SCAN_MASK, LIVE | I::HASH_MASK);
-    assert_eq!(I::SCAN_MASK, 0xb81f);
+    assert_eq!(I::SCAN_MASK, 0xf81f);
 
-    assert_eq!(LIVE | VISITED | I::ID_MASK | I::HASH_MASK, 0xFFFF);
-    assert_eq!(LIVE & VISITED, 0);
+    // After dropping VISITED, the only remaining status bit is LIVE; the
+    // 15-bit non-LIVE region is partitioned exactly by ID_MASK + HASH_MASK.
+    assert_eq!(LIVE | I::ID_MASK | I::HASH_MASK, 0xFFFF);
     assert_eq!(LIVE & I::ID_MASK, 0);
     assert_eq!(LIVE & I::HASH_MASK, 0);
-    assert_eq!(VISITED & I::ID_MASK, 0);
-    assert_eq!(VISITED & I::HASH_MASK, 0);
     assert_eq!(I::ID_MASK & I::HASH_MASK, 0);
+    assert_eq!(I::HASH_MASK.count_ones(), 9);
 
     // c-hoist invariant: embedding id into a tag gives `tag & ID_MASK = id × S::SIZE`.
     for id in 0..MAX_PER_SHARD {
@@ -32,7 +34,8 @@ fn bit_layout_slot16() {
     type I = Shard<u32, u32, Slot16>;
     assert_eq!(I::ID_SHIFT, 4);
     assert_eq!(I::ID_MASK, 0x03f0);
-    assert_eq!(I::HASH_MASK, 0x3c0f);
+    assert_eq!(I::HASH_MASK, 0x7c0f);
+    assert_eq!(I::HASH_MASK.count_ones(), 9);
 }
 
 #[test]
@@ -40,24 +43,27 @@ fn bit_layout_slot64() {
     type I = Shard<u64, u64, Slot64>;
     assert_eq!(I::ID_SHIFT, 6);
     assert_eq!(I::ID_MASK, 0x0fc0);
-    assert_eq!(I::HASH_MASK, 0x303f);
+    assert_eq!(I::HASH_MASK, 0x703f);
+    assert_eq!(I::HASH_MASK.count_ones(), 9);
 }
 
-/// Hash spread injectivity across all three brackets.
+/// Hash spread injectivity across all three brackets, now over the full 9-bit
+/// hash field (was 8 bits before the VISITED-bitmap refactor).
 #[test]
 fn needle_spread_is_injective_all_slots() {
     for slot_id in 0..3 {
         let mut seen = std::collections::HashSet::new();
-        for h in 0..=255u64 {
+        for h in 0..=511u64 {
+            // `needle_from_hash` reads bits [55, 64) of the input hash.
             let needle = match slot_id {
-                0 => Shard::<u64, u64, Slot16>::needle_from_hash(h << 56),
-                1 => Shard::<u64, u64, Slot32>::needle_from_hash(h << 56),
-                2 => Shard::<u64, u64, Slot64>::needle_from_hash(h << 56),
+                0 => Shard::<u64, u64, Slot16>::needle_from_hash(h << 55),
+                1 => Shard::<u64, u64, Slot32>::needle_from_hash(h << 55),
+                2 => Shard::<u64, u64, Slot64>::needle_from_hash(h << 55),
                 _ => unreachable!(),
             };
             assert!(seen.insert(needle), "slot {slot_id} hash {h} collides");
         }
-        assert_eq!(seen.len(), 256);
+        assert_eq!(seen.len(), 512);
     }
 }
 

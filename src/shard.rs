@@ -25,7 +25,6 @@ const _FIND_RET_FITS_REGISTERS: () = assert!(
 
 pub(crate) const EMPTY: u16 = 0;
 pub(crate) const LIVE: u16 = 0x8000;
-pub(crate) const VISITED: u16 = 0x4000;
 /// AVX2 one chunk = 32 bytes = 16 u16 lanes.
 const LANE: usize = 16;
 /// Structural upper bound for 6-bit entry_id. per_shard must not exceed this.
@@ -84,6 +83,20 @@ impl std::ops::DerefMut for AlignedTags {
     }
 }
 
+/// Shift the visited bitmap to mirror `tags.copy_within(pos+1..len, pos)`:
+/// bits at positions `[pos+1, 64)` move down by one to `[pos, 63)`, the
+/// original bit at `pos` is dropped, and the new bit at position `63` is 0
+/// (the source position 64 carried no bit). The `u128` intermediate sidesteps
+/// the `pos == 63` corner where `visited >> 64` would be UB on `u64`.
+#[inline]
+fn shift_visited_down_in_place(visited: &mut u64, pos: usize) {
+    debug_assert!(pos < 64);
+    let v = *visited as u128;
+    let low = v & ((1u128 << pos) - 1);
+    let high = (v >> (pos + 1)) << pos;
+    *visited = (low | high) as u64;
+}
+
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
 pub(crate) struct Shard<K, V, S: SlotSize> {
     pub(crate) capacity: usize,
@@ -102,6 +115,15 @@ pub(crate) struct Shard<K, V, S: SlotSize> {
     /// Number of currently live entries (= number of live tags = first index past
     /// the live region in `tags`).
     pub(crate) len: usize,
+    /// Per-slot VISITED bits, one per position in `tags[0..len]`. Bit `i` is set
+    /// iff the entry at `tags[i]` was promoted (hit) since its last sweep.
+    /// `MAX_PER_SHARD == 64` ⟹ a single `u64` suffices, and it rides this same
+    /// control cache line as `hand`/`len`/`hits`/... so the on-hit `|=` and the
+    /// `find_evict_pos` bit-twiddle pay no extra line.
+    /// Was previously `tag & VISITED` packed into the `u16` tag; promoting it
+    /// out reclaimed one bit for the hash field (8 → 9 bits) and turned the
+    /// SIEVE victim search from `O(len)` `scan_evict` into a single bit-find.
+    pub(crate) visited: u64,
     /// Per-shard observability counters. Plain `u64` rather than `AtomicU64`
     /// because every mutating op already requires `&mut self`; on x86 a plain
     /// `add [mem], 1` is one uop on a dependency chain disjoint from the
@@ -148,12 +170,14 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
     /// Mask covering the id field. Invariant: `tag & ID_MASK == id × S::SIZE`
     /// (= byte offset into the entries arena).
     pub(crate) const ID_MASK: u16 = ((MAX_PER_SHARD - 1) as u16) << Self::ID_SHIFT;
-    /// Mask covering the hash field. Always exactly 8 bits scattered:
-    /// the non-status field is 14 bits (`0x3FFF`) and `ID_MASK` consumes 6 of them
-    /// (because `MAX_PER_SHARD == 64`), leaving `14 - 6 = 8` bits for the hash regardless
-    /// of which `SlotSize` is in use.
-    pub(crate) const HASH_MASK: u16 = 0x3FFF & !Self::ID_MASK;
-    /// Comparison target for SIMD scans: LIVE | HASH_MASK (visited and id are masked out).
+    /// Mask covering the hash field. Always exactly 9 bits scattered:
+    /// the non-LIVE field is 15 bits (`0x7FFF`) and `ID_MASK` consumes 6 of them
+    /// (because `MAX_PER_SHARD == 64`), leaving `15 - 6 = 9` bits for the hash regardless
+    /// of which `SlotSize` is in use. (Was 8 bits when VISITED was packed into the tag;
+    /// promoting VISITED out to a per-shard bitmap reclaimed that bit for the hash.)
+    pub(crate) const HASH_MASK: u16 = 0x7FFF & !Self::ID_MASK;
+    /// Comparison target for SIMD scans: LIVE | HASH_MASK (id is masked out; VISITED
+    /// is no longer part of the tag and so doesn't need masking).
     pub(crate) const SCAN_MASK: u16 = LIVE | Self::HASH_MASK;
 
     /// Extracts the id (0..MAX_PER_SHARD) from a tag. Used by scalar path, drop, and evict.
@@ -242,6 +266,7 @@ where
             entries,
             hand: 0,
             len: 0,
+            visited: 0,
             hits: 0,
             misses: 0,
             insertions: 0,
@@ -249,20 +274,20 @@ where
         }
     }
 
-    /// Folds the top 8 bits of a 64-bit hash into the tag's hash field (same shape as j8).
+    /// Folds the top 9 bits of a 64-bit hash into the tag's hash field. The hash
+    /// field is split by ID_MASK: the low `ID_SHIFT` bits sit at `[0, ID_SHIFT)`
+    /// and the remaining bits sit at `[ID_SHIFT + 6, 15)` (just under the LIVE bit).
+    /// Since `ID_SHIFT ≤ 6` for every supported `SlotSize` and 9 hash bits never
+    /// exceeds `ID_SHIFT + (15 - (ID_SHIFT + 6)) = 9`, the spread is bijective for
+    /// all three brackets (Slot16/32/64).
     #[inline]
     pub(crate) fn needle_from_hash(hash: u64) -> u16 {
-        let h = (hash >> 56) as u8;
+        let h = ((hash >> 55) as u16) & 0x1FF;
         let s = Self::ID_SHIFT;
-        let spread = if s >= 8 {
-            h as u16
-        } else {
-            let low_mask: u8 = ((1u32 << s) - 1) as u8;
-            let low = (h & low_mask) as u16;
-            let high = ((h & !low_mask) as u16) << 6;
-            low | high
-        };
-        LIVE | spread
+        let low_mask: u16 = (1u16 << s) - 1;
+        let low = h & low_mask;
+        let high = (h & !low_mask) << 6;
+        LIVE | low | high
     }
 
     /// Returns `(pos, tag)` of the matching slot, with the tag wrapped in
@@ -422,7 +447,7 @@ where
                 return None;
             }
         };
-        self.tags[pos] |= VISITED;
+        self.visited |= 1u64 << pos;
         // SAFETY: tag came from a live slot in `find`.
         let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some(&e.value)
@@ -444,7 +469,7 @@ where
                 return None;
             }
         };
-        self.tags[pos] |= VISITED;
+        self.visited |= 1u64 << pos;
         // SAFETY: tag came from a live slot in `find`; `&mut self` makes the
         // returned `&mut V` the only outstanding borrow into the entry.
         let e = unsafe { &mut *self.entry_ptr_mut_from_tag(tag) };
@@ -502,7 +527,7 @@ where
                 return None;
             }
         };
-        self.tags[pos] |= VISITED;
+        self.visited |= 1u64 << pos;
         // SAFETY: tag came from a live slot in `find`.
         let e = unsafe { &*self.entry_ptr_from_tag(tag) };
         Some((&e.key, &e.value))
@@ -543,7 +568,7 @@ where
         let needle = Self::needle_from_hash(hash);
         if let Some((pos, tag)) = self.find(&key, needle, has_avx2_bmi1) {
             self.hits += 1;
-            self.tags[pos] |= VISITED;
+            self.visited |= 1u64 << pos;
             // SAFETY: tag came from a live slot in `find`.
             let e = unsafe { &*self.entry_ptr_from_tag(tag) };
             return &e.value;
@@ -575,7 +600,7 @@ where
             // SAFETY: tag came from a live slot in `find`.
             let e = unsafe { &mut *self.entry_ptr_mut_from_tag(tag) };
             e.value = value;
-            self.tags[pos] |= VISITED;
+            self.visited |= 1u64 << pos;
             return None;
         }
 
@@ -601,6 +626,10 @@ where
             // linked-list unlink. The freed entry id is reused for the new tag.
             let last = self.len - 1;
             self.tags.copy_within(pos + 1..self.len, pos);
+            // Mirror the same shift on the visited bitmap so bit `i` keeps
+            // tracking the (post-shift) tag at `tags[i]`. Bit `last` becomes 0,
+            // which is exactly what we want for the new entry written below.
+            shift_visited_down_in_place(&mut self.visited, pos);
 
             // Hand mirrors sieve_orig's `hand = victim.prev` — the SIEVE successor,
             // which is now at `pos` after the shift (or wraps to 0 if victim was
@@ -620,33 +649,54 @@ where
         evicted
     }
 
-    /// SIEVE victim search over `tags[0..len]`. Two clearing passes (hand→len then
-    /// 0→hand) cover the whole live region; if every tag was VISITED, both passes
-    /// return None but every VISITED bit is now cleared, so any position is a
-    /// valid victim — we pick `self.hand`.
+    /// SIEVE victim search over `tags[0..len]`, encoded as bit-twiddles on
+    /// `self.visited`. Two passes (hand→len then 0→hand) cover the whole live
+    /// region; if every position was visited, both passes find nothing but the
+    /// bitmap is now zeroed in `[0, len)`, so any position is a valid victim —
+    /// we pick `self.hand`.
+    ///
+    /// Per-shard `len ≤ MAX_PER_SHARD = 64`, so a single `u64` covers the
+    /// occupancy and `trailing_zeros` finds the first un-visited bit in a
+    /// single instruction. Each clearing pass becomes one `&= !mask`. The old
+    /// linear walk in `scan_evict` is gone.
     fn find_evict_pos(&mut self) -> usize {
         debug_assert!(self.len > 0 && self.len == self.capacity);
         if self.hand >= self.len {
             self.hand = 0;
         }
-        self.scan_evict(self.hand, self.len)
-            .or_else(|| self.scan_evict(0, self.hand))
-            .unwrap_or(self.hand)
-    }
+        let len = self.len;
+        let hand = self.hand;
+        // `len` is in `1..=64`; build a `len`-wide live mask without overflow.
+        let live_mask: u64 = if len >= 64 { !0u64 } else { (1u64 << len) - 1 };
+        // `hand < len ≤ 64` ⟹ `hand ≤ 63`, so `1 << hand` is well-defined.
+        let below_hand: u64 = (1u64 << hand) - 1; // bits in [0, hand)
+        let above_hand: u64 = live_mask & !below_hand; // bits in [hand, len)
 
-    fn scan_evict(&mut self, lo: usize, hi: usize) -> Option<usize> {
-        debug_assert!(lo <= hi && hi <= self.len);
-        for i in lo..hi {
-            let t = self.tags[i];
-            // I4': tags[0..len] are all LIVE, so no EMPTY-skip branch needed.
-            debug_assert!(t & LIVE != 0, "tags[0..len] must be LIVE under I4'");
-            if t & VISITED != 0 {
-                self.tags[i] = t & !VISITED;
-            } else {
-                return Some(i);
-            }
+        // Pass 1: first un-visited bit in [hand, len).
+        let high_search = !self.visited & above_hand;
+        if high_search != 0 {
+            let victim = high_search.trailing_zeros() as usize;
+            // Walked-over positions [hand, victim) were visited; clear them.
+            // (Bits at victim and beyond are untouched, mirroring `scan_evict`'s
+            // early-return semantics.)
+            let walked = ((1u64 << victim) - 1) & !below_hand;
+            self.visited &= !walked;
+            return victim;
         }
-        None
+        // [hand, len) all visited; clear that range of the bitmap.
+        self.visited &= !above_hand;
+
+        // Pass 2: first un-visited bit in [0, hand).
+        let low_search = !self.visited & below_hand;
+        if low_search != 0 {
+            let victim = low_search.trailing_zeros() as usize;
+            let walked = (1u64 << victim) - 1;
+            self.visited &= !walked;
+            return victim;
+        }
+        // All visited. Clear the rest and pick `hand` as the arbitrary victim.
+        self.visited &= !below_hand;
+        hand
     }
 
     /// Removes `key` and returns its value. Slow path: O(per_shard) shift + linear
@@ -676,10 +726,13 @@ where
         let entry = unsafe { std::ptr::read(self.entry_ptr(removed_id)) };
 
         // (2) Shift tags down, marking the new tail as EMPTY (preserves I4').
-        // After this, the live region is `tags[0..self.len - 1]`.
+        // After this, the live region is `tags[0..self.len - 1]`. Mirror the
+        // same shift on the visited bitmap; the bit at the new (now-out-of-range)
+        // position `last` is implicitly 0 because the source bit at `len` was 0.
         let last = self.len - 1;
         self.tags.copy_within(pos + 1..self.len, pos);
         self.tags[last] = EMPTY;
+        shift_visited_down_in_place(&mut self.visited, pos);
         self.len = last;
 
         // (3) Adjust hand for the shift. Tags at positions > pos shifted one
@@ -759,10 +812,16 @@ where
                 }
                 self.shard.len = 0;
                 self.shard.hand = 0;
+                self.shard.visited = 0;
             }
         }
         let guard = Guard { shard: self };
         let shard = &mut *guard.shard;
+
+        // Snapshot the visited bitmap; we accumulate the post-compaction view
+        // into `new_visited` and commit at the end. If `f` panics mid-loop we
+        // simply discard the local — the guard's Drop zeroes `shard.visited`.
+        let old_visited = shard.visited;
 
         // Pass 1: walk tags[0..old_len], decide keep/drop, compact survivors
         // into tags[0..write] in place. Each iteration is structured so that
@@ -770,6 +829,7 @@ where
         // currently being read — and that slot is left in a state the guard's
         // Drop can clean up uniformly (LIVE tag ⟹ initialized entry).
         let mut write = 0usize;
+        let mut new_visited: u64 = 0;
         let mut drops_before_hand = 0usize;
         for read in 0..old_len {
             let t = shard.tags[read];
@@ -782,6 +842,9 @@ where
                 f(&(*p).key, &mut (*p).value)
             };
             if keep {
+                if (old_visited >> read) & 1 != 0 {
+                    new_visited |= 1u64 << write;
+                }
                 if write != read {
                     shard.tags[write] = t;
                     shard.tags[read] = EMPTY;
@@ -801,10 +864,11 @@ where
             }
         }
 
-        // Commit new len + hand. The remaining tags[write..old_len] are
-        // already EMPTY (every iteration that increased write zeroed read,
+        // Commit new len + hand + visited bitmap. The remaining tags[write..old_len]
+        // are already EMPTY (every iteration that increased write zeroed read,
         // every drop iteration zeroed read), so I4' is preserved.
         shard.len = write;
+        shard.visited = new_visited;
         shard.hand = if old_hand >= old_len {
             0
         } else {
@@ -885,6 +949,7 @@ where
         }
         self.hand = 0;
         self.len = 0;
+        self.visited = 0;
     }
 }
 
@@ -920,6 +985,7 @@ where
         new.tags.copy_from_slice(&self.tags);
         new.hand = self.hand;
         new.len = self.len;
+        new.visited = self.visited;
         new.hits = self.hits;
         new.misses = self.misses;
         new.insertions = self.insertions;
