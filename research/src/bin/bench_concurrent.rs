@@ -44,6 +44,8 @@ use std::time::Instant;
 
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache;
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
+use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
+use senba_research::experimental::sieve_c15s::ConcurrentSieveCache as ConcurrentSieveC15S;
 use senba_research::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
@@ -72,6 +74,34 @@ impl<const S: usize> ConcCache for ConcurrentSieveCache<u64, u64, S> {
     #[inline]
     fn insert(&self, key: u64, value: u64) {
         let _ = ConcurrentSieveCache::insert(self, key, value);
+    }
+}
+
+impl<const S: usize> ConcCache for ConcurrentSieveC14S<u64, u64, S> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC14S::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC14S::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveC14S::insert(self, key, value);
+    }
+}
+
+impl<const S: usize, const B: u32> ConcCache for ConcurrentSieveC15S<u64, u64, S, B> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC15S::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC15S::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveC15S::insert(self, key, value);
     }
 }
 
@@ -227,8 +257,11 @@ fn parse_args() -> Args {
     );
     for v in &variants {
         assert!(
-            matches!(v.as_str(), "c8" | "c9" | "moka" | "mini_moka"),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka)"
+            matches!(
+                v.as_str(),
+                "c8" | "c9" | "moka" | "mini_moka" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4"
+            ),
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}})"
         );
     }
 
@@ -408,7 +441,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     // shards 列は moka/mini-moka では「N/A」相当 (内部 shard を独自管理)。
     // CSV を tidy に保つため、c8/c9 以外は 0 を入れる。集計時は variant でフィルタする想定。
-    let shards_col = if matches!(variant, "c8" | "c9") {
+    let shards_col = if matches!(
+        variant,
+        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4"
+    ) {
         args.shards
     } else {
         0
@@ -456,6 +492,10 @@ fn main() {
                 "c9" => run_trial::<ConcurrentSieveC9<u64, u64>>(&args),
                 "moka" => run_trial::<moka::sync::Cache<u64, u64>>(&args),
                 "mini_moka" => run_trial::<mini_moka::sync::Cache<u64, u64>>(&args),
+                "c14s" => run_c14s(&args),
+                "c15s_16" => run_c15s::<4>(&args),
+                "c15s_8" => run_c15s::<3>(&args),
+                "c15s_4" => run_c15s::<2>(&args),
                 other => panic!("unknown variant: {other}"),
             };
             emit(variant, trial, &args, &r);
@@ -477,4 +517,23 @@ fn run_c8(args: &Args) -> TrialResult {
         512 => run_trial::<ConcurrentSieveCache<u64, u64, 512>>(args),
         n => panic!("c8 shards={n} not in supported set (assert above should have caught this)"),
     }
+}
+
+/// c14s / c15s_* は SHARDS=64 固定設計。これより大きい shard 数は per-shard 容量が
+/// 1〜2 にまで縮んで SIEVE の hand サイクル統計が崩れるため、Phase 1 では 64 のみ
+/// 受け付ける (`docs/reports/2026-05-10-c15s-sloppy-visited.md` 参照)。
+fn run_c14s(args: &Args) -> TrialResult {
+    assert_eq!(
+        args.shards, 64,
+        "c14s requires --shards 64 (Phase 1 fixed design)"
+    );
+    run_trial::<ConcurrentSieveC14S<u64, u64, 64>>(args)
+}
+
+fn run_c15s<const SAMPLE_BITS: u32>(args: &Args) -> TrialResult {
+    assert_eq!(
+        args.shards, 64,
+        "c15s_* requires --shards 64 (Phase 1 fixed design)"
+    );
+    run_trial::<ConcurrentSieveC15S<u64, u64, 64, SAMPLE_BITS>>(args)
 }

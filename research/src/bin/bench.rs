@@ -23,6 +23,10 @@ use senba_research::CacheImpl;
 // use senba_research::experimental::sieve_j5::SieveCache as J5;
 // use senba_research::experimental::sieve_j6::SieveCache as J6;
 use senba::Cache as Senba;
+use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as C14sCache;
+use senba_research::experimental::sieve_c15s::{
+    ConcurrentSieveCache as C15sCache, reseed_for_test as c15s_reseed,
+};
 use senba_research::experimental::sieve_j7::SieveCache as J7;
 use senba_research::experimental::sieve_j8::SieveCache as J8;
 use senba_research::experimental::sieve_orig::SieveCache as Orig;
@@ -198,6 +202,10 @@ struct Args {
     /// trace を何周流すか。warmup 込みで連続実行したい時の amortize 用。
     /// default 1。
     repeat: u32,
+    /// c15s_* variant の TLS wyrand seed (sloppy gate 確率の deterministic 化)。
+    /// 単一 process 内では reseed_for_test() は最初の next_rand() 呼び出し前に
+    /// 効くため、main 先頭で呼んでおく。default 0 (= 既存 SEED_CTR 経路)。
+    rng_seed: u64,
 }
 
 struct Stats {
@@ -235,6 +243,62 @@ fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
 /// 具体型を直接構築する。`drive` と同じ計測ロジック。
 fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> Stats {
     let mut c = Senba::<u64, u64, S>::with_shards(cap, shards);
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    let mut evictions = 0u64;
+    let t0 = Instant::now();
+    for &k in trace {
+        if c.get(&k).is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+            if c.insert(k, k).is_some() {
+                evictions += 1;
+            }
+        }
+    }
+    Stats {
+        elapsed_ns: t0.elapsed().as_nanos(),
+        hits,
+        misses,
+        evictions,
+    }
+}
+
+/// c14s 専用 driver。`ConcurrentSieveCache` は `&self` API なので CacheImpl
+/// trait に乗せず直接駆動する (= mut state を持たない)。HR 集計のみが目的なので
+/// single-thread で十分。
+fn drive_conc_c14s<const SHARDS: usize>(trace: &[u64], cap: usize) -> Stats {
+    let c = C14sCache::<u64, u64, SHARDS>::new(cap);
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    let mut evictions = 0u64;
+    let t0 = Instant::now();
+    for &k in trace {
+        if c.get(&k).is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+            if c.insert(k, k).is_some() {
+                evictions += 1;
+            }
+        }
+    }
+    Stats {
+        elapsed_ns: t0.elapsed().as_nanos(),
+        hits,
+        misses,
+        evictions,
+    }
+}
+
+/// c15s 専用 driver。`SAMPLE_BITS` を const generic で受け、driver 側で `&self`
+/// 駆動。TLS RNG は呼び出し側 (main) で `c15s_reseed` 済み前提。
+fn drive_conc_c15s<const SHARDS: usize, const SAMPLE_BITS: u32>(
+    trace: &[u64],
+    cap: usize,
+) -> Stats {
+    let c = C15sCache::<u64, u64, SHARDS, SAMPLE_BITS>::new(cap);
     let mut hits = 0u64;
     let mut misses = 0u64;
     let mut evictions = 0u64;
@@ -320,6 +384,7 @@ fn parse_args() -> Args {
     let mut variants: Vec<String> = Vec::new();
     let mut arc_preset: Option<String> = None;
     let mut repeat: u32 = 1;
+    let mut rng_seed: u64 = 0;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -352,6 +417,7 @@ fn parse_args() -> Args {
             }
             "--arc-preset" => arc_preset = Some(val().clone()),
             "--repeat" => repeat = val().parse().expect("--repeat is u32 >= 1"),
+            "--rng-seed" => rng_seed = val().parse().expect("--rng-seed is u64"),
             "-h" | "--help" => {
                 eprintln!(
                     "usage: bench --source <zipf|file|twitter|twitter-string|libcachesim-csv|arc> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0\n  --arc-preset <s3|oltp|ds1|p1..p14|s1|s2|concat|merge-p|merge-s>  ARC trace の path / capacity 配列を一括解決\n  --repeat <N>  trace を N 周流す (default 1)"
@@ -397,6 +463,7 @@ fn parse_args() -> Args {
         capacities,
         variants,
         repeat,
+        rng_seed,
     }
 }
 
@@ -630,6 +697,11 @@ fn run_string_keys(args: &Args) {
 
 fn main() {
     let args = parse_args();
+    // c15s_* variant の TLS wyrand を deterministic に揃える。
+    // 0 (default) なら counter 初期化に任せる (= 既定の non-deterministic seed)。
+    if args.rng_seed != 0 {
+        c15s_reseed(args.rng_seed);
+    }
     if args.source == "twitter-string" {
         run_string_keys(&args);
         return;
@@ -737,6 +809,13 @@ fn main() {
                 "mini_moka_unsync" => drive::<MiniMokaUnsync<u64>>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
                 "moka" => drive::<Moka>(&trace, cap),
+                // c14s / c15s_* (並行 variant) の HR 計測 — single-thread で十分
+                // (HR は probabilistic だが thread 数に依存しない)。SHARDS=64 固定。
+                // c15s_* は TLS RNG を `--rng-seed` で deterministic 化する想定。
+                "c14s_n64" => drive_conc_c14s::<64>(&trace, cap),
+                "c15s_16_n64" => drive_conc_c15s::<64, 4>(&trace, cap),
+                "c15s_8_n64" => drive_conc_c15s::<64, 3>(&trace, cap),
+                "c15s_4_n64" => drive_conc_c15s::<64, 2>(&trace, cap),
                 other => panic!("unknown variant: {other}"),
             };
             println!(

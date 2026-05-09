@@ -512,3 +512,22 @@ contention を構造除去できる候補。進め方は (Phase 1) sloppy visite
 測る → (Phase 2) packed LongAdder で HR ロスゼロ版に置換 → (Phase 3) shard-affinity
 は中規模 Zipf 帯の保険札。Caffeine 流 sieve_cb は senba スコープ外なので別 lane。
 G2-α (entry-level seqlock) と直交、両乗せ可能。
+
+### 2026-05-10-c15s-sloppy-visited.md
+`write-contention-design-space.md` §7 Phase 1 の試行実装と判定。`sieve_c14s` から
+複製した `sieve_c15s` で reader hot path の `visited.fetch_or` を `1/(2^SAMPLE_BITS)`
+の TLS-RNG (自前 wyrand) gate で wrap、SAMPLE_BITS=4/3/2 (= 1/16, 1/8, 1/4) を
+Phase 1 判定基準に通す。**skew=0.0 16T throughput** (当初 sweep): c14s 比
+0.99–1.00× で動かず、ただし HR=1.95% で reader path がほぼ踏まれない workload
+mismatch だった。**skew=1.0 で再計測** (hot Zipf, HR=0.65): 1/16 で 0.91× (−9%)、
+1/4 でも 0.97× の **明確な regression**。HR は sample 率に sample 比例して下がる
+(1/16 で −0.7pp、Twitter 5 cluster × 3 cap × 5 seed では平均 −2.09pp / 最大 −4.72pp)
+ので **gate は確実に fire しており実装バグではない**。**REJECT × STOP の二重 NG**。
+構造的結論: **c11s の conditional load-then-fetch_or trick が既に reader 経路から
+書き込みを排除して visited line を MESI Shared 維持できており、reader load コストは
+~1 ns に圧縮済み**。これに対し TLS RNG draw は ~3 ns / call で gate コストが節約
+コストを上回って net 負けする。design doc §3 の「atomic load も MESI で 50–200 ns」
+という前提は c11s 構造下では成立しない、という反例。Phase 2 (packed LongAdder)
+の動機を再構成: reader 側はゼロコスト前提で writer Path A 側を ターゲットに、
+あるいは shard-affinity / Path B/C Mutex 競合に方向転換。c15s.rs は research
+artifact 残置、bench arm も Phase 2 と同居。
