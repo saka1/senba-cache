@@ -24,7 +24,7 @@
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
 | 単一 shard testbed (c10/c11/c12/c13 設計の出発点) | single-shard-baseline, c10s-vs-c8-baseline, c11s-conditional-set, c12s-cas-slot-claim-design, c12s-cas-slot-claim, c13s-sweep |
-| 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap |
+| 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -531,3 +531,21 @@ mismatch だった。**skew=1.0 で再計測** (hot Zipf, HR=0.65): 1/16 で 0.9
 の動機を再構成: reader 側はゼロコスト前提で writer Path A 側を ターゲットに、
 あるいは shard-affinity / Path B/C Mutex 競合に方向転換。c15s.rs は research
 artifact 残置、bench arm も Phase 2 と同居。
+
+### 2026-05-10-c14s-vtune-write-contention.md
+c14s @ 4 thread / Zipf skew=1.0 / cap=4096 / 80M ops を Windows native VTune で
+`uarch-exploration` + `memory-access` 両方計測した直接観測ノート。新設の自己完結
+ドライバ `bench_vtune_concurrent.rs` (c8/c9/c14s 対応、moka 系除外、ITT bracketing) で
+取得。**LLC Miss Count = 0 / DRAM Bound 0.2% / L3 Bound 21.9%** から、working set が
+L3 内で閉じているのに L3 が pipeline 1/5 を食う構造を観測 → **c2c bouncing が単独で
+wall-clock を削っている** ことが断定可能 (write-contention-design-space §3 の hot-line
+仮説の直接検証)。hot line は単一でなく **3 cluster** が同格 (絶対 mem stall): (1)
+`writer_evict_and_install` 内の writer state cluster 0.416s、(2) per-shard `AtomicU64`
+visited (`vbit`, CPI 3.18 / Memory Bound 39.6%) 0.276s、(3) per-shard `parking_lot::Mutex`
+word (lock+unlock 内部 35–46% Memory Bound) 0.251s。前回 single-thread 観測の暫定評価
+「Mutex は 8.7% で従」を **Mutex word そのものが core 間 bouncing 主因** に修正。
+read-side は完全に健康 (`scan_evict` Memory Bound 3.8%) — contention は 100% atomic
+write 経路に集中。c15s sloppy visited reject の量的根拠 (visited は全体の 1/3 で単独
+狙いでは届かない) も後付けで説明可能。次の variant 設計方針: **3 hot line を 1 cache
+line に co-locate** + **writer-side batching** が ROI 上位、read-side / shard-affinity は
+据え置き。
