@@ -2,8 +2,7 @@
 
 実験・調査ごとのレポート一覧。新しいレポートを追加したらこのファイルも更新する。
 
-各エントリは「何について書かれているか + さらっと結論」のみ。具体の数値・スコープ・
-反証・図表はリンク先に置く方針。
+各エントリは **「何の仮説を立てて、何をして、何を得たか」を 1 段落で** の方針。具体の数値・スコープ・反証・図表はリンク先に置く。1 段落 3〜5 行を上限とし、これを超える場合は要約しすぎ・分割しすぎを疑う。
 
 ## テーマ別マップ
 
@@ -33,559 +32,175 @@
 ## 一覧 (日付昇順)
 
 ### 2026-05-03-sieve-v0-divergence.md
-`sieve_v0` が `sieve_orig` と eviction 列で分岐する条件の調査。`evict_one` の hand wrap
-バグとして特定して修正、oracle 一致を回復。
+仮説: `sieve_v0` が orig と eviction 列で分岐するのは実装バグだろう。`evict_one` の hand wrap を追跡し、修正して oracle 一致を回復。
 
 ### 2026-05-03-realistic-workload-bench.md
-ベンチ条件を NSDI'24 論文準拠 (skew / cap sweep, 1M req trace) に整備し直して
-orig/v0/v1/v2 を再評価。orig が全条件で最速、v1 はむしろ退行、v2 は微改善という結論。
+ベンチ条件を NSDI'24 論文準拠 (skew / cap sweep, 1M req trace) に整備し直して orig/v0/v1/v2 を再評価。orig が全条件で最速、v1 はむしろ退行、v2 は微改善という結論。
 
 ### 2026-05-03-sieve-v3-bench.md
-v1 (bit-parallel scan) と v2 (Option 剥がし) を合流した v3 の AB。orig には届かず、
-2-pass 化は Zipf steady state では効かないと結論。
+仮説: v1 (bit-parallel scan) と v2 (Option 剥がし) を合流すれば orig を抜けるはず。AB の結果届かず、2-pass 化は Zipf steady state では効かないと結論。
 
 ### 2026-05-03-sieve-v3-profile.md
-v3 が orig に負ける原因の phase 別プロファイル分解 (samply + addr2line)。hit path RMW /
-eviction bookkeeping / compact が主因で、scan ブロック自体は支配的でないと判明。
+v3 が orig に負ける原因を phase 別に分解 (samply + addr2line)。hit path RMW / eviction bookkeeping / compact が主因で、scan ブロック自体は支配的でないと判明。
 
 ### improvement-ideas.md (living doc, 旧 `2026-05-04-improvement-ideas.md`)
 日付別レポートではなく改善案の倉庫。本体は `docs/improvement-ideas.md` を参照。
 
 ### 2026-05-04-jedi-vs-orig.md
-既存 Rust 実装 `jedisct1/rust-sieve-cache` の設計読解。`swap_remove` 由来で
-SIEVE oracle と一致せず CLOCK 寄りに縮退、と判定。
+既存 Rust 実装 `jedisct1/rust-sieve-cache` の設計読解。`swap_remove` 由来で SIEVE oracle と一致せず CLOCK 寄りに縮退、と判定して詳細 bench は見送り。
 
 ### 2026-05-04-sieve-orig-overhead-analysis.md
-C リファレンスと Rust ポートの差を機械語レベルで分析し、`Vec<MaybeUninit<Node>>` 化を実装。
-asm は期待通り改善するが bench はノイズ範囲、HashMap 支配下では埋もれると確認。
+仮説: C リファレンスと Rust ポートの差は機械語に出るはず。比較して `Vec<MaybeUninit<Node>>` 化を実装。asm は期待通り改善するが bench はノイズ範囲、HashMap 支配下では埋もれると確認。
 
 ### 2026-05-04-sieve-j3-bench.md
-外部 HashMap を廃止し tag 配列 AVX2 SIMD scan で lookup する `sieve_j3` の初回ベンチ。
-低 cap / 中 skew で orig 超え、cap が増えると線形 scan が破綻すると判明。
+仮説: 外部 HashMap を廃止し tag 配列 AVX2 SIMD scan で lookup すれば速くなる。低 cap / 中 skew で orig 超え、cap が増えると線形 scan が破綻すると判明。
 
 ### 2026-05-05-sieve-j4-set-associative.md
-j3 を set-associative 化した `sieve_j4` の初回ベンチ。per-shard ≥ 64 で hit ratio tax が消え、
-特定の cap/skew 帯で orig を上回る勝ち帯が出現。
+仮説: j3 を set-associative 化すれば cap スケール問題が解ける。per-shard ≥ 64 で hit ratio tax が消え、特定の cap/skew 帯で orig を上回る勝ち帯が出現。
 
 ### 2026-05-05-sieve-j4-crossover-and-shard-sweep.md
-j4 の cap 軸 sweep と SHARDS sweep で crossover と最適 shard 数を地図化。
-throughput と hit ratio が逆向きのトレードオフになることを示す。
+j4 の cap 軸 sweep と SHARDS sweep で crossover と最適 shard 数を地図化。throughput と hit ratio が逆向きのトレードオフになることを示す。
 
 ### 2026-05-05-sieve-j4-pershard-vs-footprint.md
-「per_shard と total footprint のどちらが支配変数か」を 3 sweep で切り分け。
-L1d 境界仮説 (H2) を棄却し、per_shard がほぼ単独支配と確定。
+仮説: per_shard と total footprint のどちらが支配変数か (H1 vs H2: L1d 境界)。3 sweep で切り分け、L1d 境界仮説 (H2) を棄却し per_shard がほぼ単独支配と確定。
 
 ### 2026-05-05-sieve-j5-doublehash-ab.md
-j4 の double-hash (shard 選択 + tag 計算で 2 回) を排除した `sieve_j5` の AB。
-Δ(j5−j4) を定常コストとして定量し、以降の比較基準を j4 → j5 に更新。
+仮説: j4 の double-hash (shard 選択 + tag 計算で 2 回) を排除すれば常時得。AB で Δ(j5−j4) を定常コストとして定量し、以降の比較基準を j4 → j5 に更新。
 
 ### 2026-05-05-j5-pershard-pareto.md
-per_shard × cap × skew の直積 sweep で hit ratio と throughput の Pareto を取り、
-sweet spot per_shard を確定。「shard 細分化で SIEVE が崩れる」直観は反証。
+per_shard × cap × skew の直積 sweep で hit ratio と throughput の Pareto を取り、sweet spot per_shard を確定。「shard 細分化で SIEVE が崩れる」直観は反証。
 
 ### 2026-05-05-j5-twitter-pareto.md
-Twitter trace 3 cluster での j5 vs orig 総決算 sweep。scan-heavy cluster で
-throughput と hit ratio の二重勝ちが出る、という新利得を示す。
+Twitter trace 3 cluster での j5 vs orig 総決算 sweep。scan-heavy cluster で throughput と hit ratio の二重勝ちが出る、という新利得を示す。
 
 ### 2026-05-05-j5-vs-orig-2x-memfair.md
-j5 の `order_cap = 2 * cap` を「memory hand-out のおかげ説」と疑い、orig に 2x cap を渡した
-worst-case ハンデで再測定。3 レジームに分離して memory advantage 仮説を切り分け。
+仮説: j5 の `order_cap = 2 × cap` は実は memory hand-out の利得を借りているのでは。orig に 2x cap を渡した worst-case ハンデで再測定し、3 レジームに分離して memory advantage 仮説を切り分け。
 
 ### 2026-05-05-sieve-j6-m21-twitter.md
-M2.1 (visited を tag バイトに同居させて Entry padding を消す) の `sieve_j6` を Twitter で AB。
-inline footprint は改善するが throughput は j5 より退行、hit-path 改善の事前予想は棄却。
+仮説 (M2.1): visited を tag バイトに同居させて Entry padding を消せば throughput も上がるはず。Twitter で AB → inline footprint は改善するが throughput は j5 より退行、事前予想は棄却。
 
 ### 2026-05-05-sieve-j7-m23-twitter.md
-M2.3 (tag を u16 化して live + visited + 14-bit hash を同居) の `sieve_j7` を Twitter で AB。
-j5/j6 を支配し、j6 の劣化主因が tag bit 数の不足だったと確定。
+仮説 (M2.3): tag を u16 化して live + visited + 14-bit hash を同居させれば j6 の劣化を解消できる。Twitter で AB → j5/j6 を支配し、j6 劣化主因が tag bit 数の不足だったと確定。
 
 ### 2026-05-05-j7-twitter-pareto.md
-j7 vs orig の Twitter 総決算 sweep (j5 sweep と同枠)。Pareto 支配セルが j5 sweep の倍に拡大、
-per_shard sweet spot が広がり j7 の優位を確認。
+j7 vs orig の Twitter 総決算 sweep (j5 sweep と同枠)。Pareto 支配セルが j5 sweep の倍に拡大、per_shard sweet spot が広がり j7 の優位を確認。
 
 ### 2026-05-05-sieve-j8-bench.md
-M5.3 + tag 内 entry_id embed + free_list 廃止の `sieve_j8` 初回検証。eviction 列は j7 と
-bit-exact 一致、throughput は j7 より退行するが per_shard=16 で全 cap orig 超え (sweet spot
-判明)。退行原因は inner candidate ループの dep chain 延長 + false-match 率増の 2 成分。
+仮説 (M5.3 + tag 内 entry_id embed + free_list 廃止): inline footprint を更に削れる。eviction 列は j7 と bit-exact 一致、throughput は j7 より退行するが per_shard=16 で全 cap orig 超え (sweet spot 判明)。退行原因は inner candidate ループの dep chain 延長 + false-match 率増の 2 成分。
 
 ### 2026-05-06-j8-candidate-loop-analysis.md
-j8 退行を inner candidate ループ単一構造として再解釈した解析ノート。命令レベル最適化
-(BLSR×2 + sizeof-aware bit layout) を併せて実装し、最退行 cell で大幅改善・sweet spot で
-orig 超え。
+j8 退行を inner candidate ループ単一構造として再解釈。命令レベル最適化 (BLSR×2 + sizeof-aware bit layout) を実装し、最退行 cell で大幅改善・sweet spot で orig 超え。
 
 ### 2026-05-06-j8-c-hoist.md
-chunk 先頭 byte pointer を outer に hoist する最適化 (c-hoist) を j8 に適用。inner ループから
-3 ops を追い出して大半の cell で改善、運用 sweet spot で 3 cap 全て orig を absolute 超え。
+仮説: chunk 先頭 byte pointer を outer に hoist すれば inner ループが軽くなる。j8 に適用、inner から 3 ops 追い出して大半の cell で改善、運用 sweet spot で 3 cap 全て orig を absolute 超え。
 
 ### 2026-05-06-j8-twitter-pareto.md
-j8 累積最適化 (M5.3 + tag-id embed + free_list 廃止 + BLSR×2 + sizeof-aware layout + c-hoist)
-を Twitter sweep に流して champion を選定したスナップショット。memory 利得を保ったまま
-3/4 cluster で throughput 勝ち。
+j8 累積最適化 (M5.3 + tag-id embed + free_list 廃止 + BLSR×2 + sizeof-aware layout + c-hoist) を Twitter sweep に流して champion を選定。memory 利得を保ったまま 3/4 cluster で throughput 勝ち。
 
 ### 2026-05-06-j8-vs-mini-moka-twitter.md
-`sieve_j8` と外部 W-TinyLFU 実装 (mini-moka 0.10 / moka 0.12) を Twitter trace + Zipf sweep
-で比較。Twitter では HR・ns/op どちらも j8 が支配、Zipf では W-TinyLFU が SIEVE と競合。
-「W-TinyLFU は Zipf-like で強く、non-Zipf 実 trace で脆い」という対比を示す。
+仮説: SIEVE と W-TinyLFU は workload で勝敗が分かれるはず。`sieve_j8` vs mini-moka 0.10 / moka 0.12 を Twitter trace + Zipf sweep で比較し、Twitter で j8 支配、Zipf で W-TinyLFU が競合、という対比を示す。
 
 ### 2026-05-06-c8-design.md
-`sieve_c8` (j8 並行版) の設計と第一手実装。**seqlock-via-tag** で reader を lock-free 化し
-parking_lot Mutex で writer 直列化。1T overhead は事前見積もりを上回るが 4T で線形に近い
-scaling を確認。
+`sieve_c8` (j8 並行版) の設計と第一手実装。**seqlock-via-tag** で reader を lock-free 化し parking_lot Mutex で writer 直列化。1T overhead は事前見積もりを上回るが 4T で線形に近い scaling を確認。
 
 ### 2026-05-06-st-twitter-5cluster.md
-cluster016 / cluster034 を加えた 5 cluster で orig / j8 / moka / mini-moka を ST 再測定。
-j8 の利得帯を Zipf ≤ 1.5 に拡張、退行は「Zipf ≥ 1.79 + 高 hit ratio」の構造特性と確定。
+cluster016 / cluster034 を加えた 5 cluster で orig / j8 / moka / mini-moka を ST 再測定。j8 の利得帯を Zipf ≤ 1.5 に拡張、退行は「Zipf ≥ 1.79 + 高 hit ratio」の構造特性と確定。
 
 ### 2026-05-06-c8-vs-moka-thread-sweep.md
-c8 / moka 0.12 / mini-moka 0.10 を同一 harness で並列比較。SHARDS=256 で c8 は near-linear
-scaling、moka 0.12 は thread 増で逆 regress、mini-moka はピーク後微減と整理。c8 の
-lock-free read + per-shard Mutex モデルが高並列で大幅優位。
+c8 / moka 0.12 / mini-moka 0.10 を同一 harness で並列比較。SHARDS=256 で c8 は near-linear scaling、moka 0.12 は thread 増で逆 regress、mini-moka はピーク後微減。c8 の lock-free read + per-shard Mutex モデルが高並列で大幅優位。
 
 ### 2026-05-06-senba-sievecache-design.md
-publishable な crate API として ST 版 `senba::Cache` を確定する設計ドキュメント (実装着手前)。
-`SlotSize` sealed trait による padding 自動化、任意 K, V の `remove` 対応、c-hoist trick の
-保持を確定。並行版・builder 化等は scope 外。
+publishable な crate API として ST 版 `senba::Cache` を確定する設計ドキュメント (実装着手前)。`SlotSize` sealed trait による padding 自動化、任意 K, V の `remove` 対応、c-hoist trick の保持を確定。並行版・builder 化等は scope 外。
 
 ### 2026-05-06-twitter-string-keys.md
-`senba::Cache` を String キーで Twitter trace に直接流す経路を bench に追加。HR は pre-hash
-版と完全一致、orig-string 比でも大幅高速と確認。
+`senba::Cache` を String キーで Twitter trace に直接流す経路を bench に追加。HR は pre-hash 版と完全一致、orig-string 比でも大幅高速と確認。
 
 ### 2026-05-06-senba-twitter-string-sweep.md
-`senba::Cache` を生 String キーのまま Twitter 5 cluster で sweep。全 cell で orig を支配し、
-scan-heavy cluster019 では HR でも勝つ二重勝ちを再現。
+`senba::Cache` を生 String キーのまま Twitter 5 cluster で sweep。全 cell で orig を支配し、scan-heavy cluster019 では HR でも勝つ二重勝ちを再現。
 
 ### 2026-05-06-sieve-c-vs-senba-twitter52.md
-libCacheSim の C リファレンス SIEVE と senba (`sieve_orig` / `senba::Cache`) を同一 trace
-・同一 cap で wall-clock 比較。HR は完全一致、wall-clock は senba が大幅速で、gap の大半は
-cachesim の harness (CSV パース + vtable + glib) 由来と分解。
+libCacheSim の C リファレンス SIEVE と senba (`sieve_orig` / `senba::Cache`) を同一 trace・同一 cap で wall-clock 比較。HR は完全一致、wall-clock は senba が大幅速で、gap の大半は cachesim の harness (CSV パース + vtable + glib) 由来と分解。
 
 ### 2026-05-06-sieve-cache-shift-on-evict.md
-`senba::Cache` から `compact` 経路と `tail` フィールドを撤去し shift-on-evict 化した refactor
-記録。`tags` 配列を半減、perf-gate 3 シナリオすべてで改善。途中で却下した素朴な in-place
-reuse が visited bit 絡みで oracle と発散する点もメモ。
+仮説: `compact` 経路と `tail` フィールドを撤去して shift-on-evict 化すれば `tags` 配列を半減できる。`senba::Cache` から撤去 → perf-gate 3 シナリオすべて改善。途中で却下した素朴な in-place reuse が visited bit 絡みで oracle と発散する点もメモ。
 
 ### 2026-05-06-api-comparison-moka-lru.md → `docs/api-comparison.md`
-**昇格済み**: `senba::Cache` を moka / lru / quick_cache / stretto と公開メソッド単位で
-横並び比較したドキュメント。欠落 API のチェックリストを兼ねるため living document として
-`docs/api-comparison.md` に移動。
+**昇格済み**: `senba::Cache` を moka / lru / quick_cache / stretto と公開メソッド単位で横並び比較したドキュメント。欠落 API のチェックリストを兼ねるため living document として `docs/api-comparison.md` に移動。
 
 ### 2026-05-07-inline-design-cache-vs-inner.md
-`Inner` を `inner.rs` に切り出した際の perf 退行をきっかけに、`Cache::op → Inner::op
-→ helper` の3層で `#[inline]` をどこに置くべきか整理。HashMap 流の「公開API は inline
-の thin wrapper、その奥の worker をアトム (non-inline)、アトム内部の小さい helper は
-inline」が正解で、perf-gate でも insert_string -4〜-9% の改善を確認。`Inner::*` に
-`#[inline]` を撒くのはコード肥大方向の bias で筋が悪い、という設計原則も明文化。
+仮説: `Inner` を `inner.rs` に切り出した際の perf 退行は `#[inline]` 配置の問題。`Cache::op → Inner::op → helper` の 3 層で配置を整理し、HashMap 流の「公開 API は inline thin wrapper、worker はアトム (non-inline)、内部 helper は inline」が正解と判明、perf-gate で insert_string −4〜−9% 改善。`Inner::*` に `#[inline]` を撒くのは筋が悪い、と原則化。
 
 ### 2026-05-08-sieve-c9-design.md
-`sieve_c9` (senba::Cache の最新 ST 実装 = j8 + shift-on-evict + AlignedTags を、
-per-shard `Mutex<Shard>` で wrap した並行版) の設計 + bench 比較計画。`V: Clone` で
-業界主流 (moka / quick_cache / jedisct1) に整合する API 形を取り、c8 (V: Copy +
-seqlock-via-tag) とは別アルゴリズムとして並走させる。本 spec は P1 (c9 設計確定) +
-P2 (bench harness 拡張 + sweep 計画確定) まで。正式版 `senba::concurrent::Cache`
-への昇格 (P3) はスコープアウト。
+`sieve_c9` (senba::Cache 最新 ST = j8 + shift-on-evict + AlignedTags を per-shard `Mutex<Shard>` wrap) の設計 + bench 比較計画。`V: Clone` で moka / quick_cache / jedisct1 と整合する API 形を取り、c8 (V: Copy + seqlock-via-tag) と別 algorithm として並走。本 spec は P1 (設計) + P2 (sweep 計画) まで、`senba::concurrent::Cache` 昇格はスコープアウト。
 
 ### 2026-05-07-aligned-tags-load.md
-`Shard::find_avx2` の SIMD load を `Vec<u16>` + `loadu` から `AlignedTags`
-(`Vec<TagsChunk>` + `repr(align(32))`) + `_mm256_load_si256` に切り替えた記録。
-Twitter trace で u64 -3.35% / String -4.39% (geomean、32 cells)。disasm 比較で
-LLVM が両 intrinsic を `vpand ymm, ymm, m256` に fold するため命令選択そのものは
-等価と判明、効果の正体は **glibc malloc の 16B 揃えで base mod 64 ∈ {16, 48} の
-50% で起きていた cache-line split の解消**。criterion `insert_string` だけは +5%
-退行 (シナリオ固有のヒープレイアウト依存 noise)、Twitter で逆方向に改善するため
-adopt。`debug_assert!` で alignment invariant を docs としてコードに刻むのと、
-将来 LLVM が memory-operand fold をやめた場合の保険として aligned intrinsic も
-維持。
+仮説: `find_avx2` の SIMD load を `Vec<u16>` + `loadu` から `AlignedTags` (`repr(align(32))` + `_mm256_load_si256`) に切り替えれば cache-line split が消える。Twitter trace で u64 −3.35% / String −4.39% (geomean、32 cells)。disasm 比較で命令選択は等価 (LLVM が `vpand m256` に fold) と判明、効果の正体は **glibc malloc 16B 揃えで base mod 64 ∈ {16, 48} の 50% で発生していた cache-line split の解消**。`debug_assert!` で alignment 不変条件を刻んで採択。
 
 ### 2026-05-08-find-avx2-frontier.md
-`find_avx2` 関数内側 (`j8-c-hoist` で BLSR×2 + bit layout + chunk hoist 適用済み) は最適に
-近いが、生 asm を読み直すと **caller との縫い目** で hit ごとに「`tags[pos]` の再 load
-+ shift round-trip 4 op」が発火していると判明。原因は (1) `find` が `Option<usize>` (=
-pos のみ) を返すため tag が SSA 的に消える、(2) `entry_ptr` が `entries[id]` の bounds
-check 経由で LLVM が `((tag & MASK) >> SHIFT) << SHIFT == tag & MASK` を畳めない、の
-2 つ。`find` を `Option<(pos, tag)>` 化 + `entry_ptr` を raw pointer 算術化で hit path
-−5〜−7 cy の机上見込み。同時に Slot16 monomorph 限定で `vpbroadcastd` がループ内
-再構築されている点と `Shard::len` が 2nd cache line に落ちている点も観測。本稿は解析
-ノート (実測なし) で、Tier-S 4 件 + Tier-A (inner unroll ×2 / 4-chunk specialization)
-+ Tier-B (SoA tag split) の着手順を提案。
+解析ノート (実測なし)。仮説: `find_avx2` 内側 (c-hoist 適用済) は最適に近いが、**caller との縫い目** で hit ごとに「`tags[pos]` 再 load + shift round-trip 4 op」が発火している。原因を `find` 返り型 (tag が SSA 的に消える) と `entry_ptr` の bounds check (LLVM が shift 簡約を畳めない) の 2 つに同定し、Tier-S 4 件 + Tier-A (inner unroll ×2 / 4-chunk specialization) + Tier-B (SoA tag split) の着手順を提案。
 
 ### 2026-05-08-c8-vs-c9-thread-sweep.md
-P2: c8 (lock-free seqlock + AtomicU16 visited) vs c9 (per-shard `Mutex<Shard>` wrap)
-vs moka 0.12 vs mini-moka 0.10 を 4 variant × 5 thread (1〜16) × 3 skew (0.7/1.0/1.2)
-× 2 op-mix (gim / read-heavy 95-5) で sweep。**結論は明確に c8 ベース**: 1T と低 skew
-では c9 が +8〜26% 上回る (uncontended Mutex < seqlock dance) が、scaling 側は skew で
-完全に分かれ、skew=1.2 / 16T では c8 92.5 Mops vs c9 10.6 Mops と **8.7x の差** が出る
-(c9 は 8T 以降で逆 scale)。read-heavy でも同形 (hot Mutex は reader も詰まらせる)。
-HR は c8/c9 完全一致 (両者 senba::Cache の shift-on-evict を継承)。p99 chunk latency も
-高 skew で c9 が c8 の 8-16x に劣化。P3 (`senba::concurrent::Cache`) は c8 を母体に、
-1T fast path を c9 から逆輸入する方向で別 design doc に起案。c10 候補として RwLock per
-shard / hot shard sub-shard 分割 / lock-free senba::Shard 化を §6 で提案。
+c8 vs c9 vs moka 0.12 vs mini-moka 0.10 を 4 variant × 5 thread × 3 skew × 2 op-mix で sweep。**結論は明確に c8 ベース**: 1T と低 skew では c9 が +8〜26% 上回るが skew=1.2 / 16T で c8 92.5 vs c9 10.6 Mops と **8.7× 差**、c9 は 8T 以降で逆 scale。HR は完全一致。c10 候補として RwLock per shard / hot shard sub-shard / lock-free senba::Shard 化を §6 で提案。
 
 ### 2026-05-08-find-avx2-pdep-pext-revert.md
-`find-avx2-pext.md` の **P3 (PDEP needle 構築)** と **P2 (PEXT で pair-mask →
-lane-mask + inner unroll ×2)** を順に投入し、両方とも採用基準を満たさず revert
-した試行 + 教訓レポート。P3 は asm レベルでは 7 → 4 命令 / dep chain 5 → 3 に短縮
-できたが perf-gate は 6 シナリオすべて criterion "within noise threshold"、後段の
-baseline 取り直しで同機械が ±2-3% 揺れることが判明し「improvement に見えた偶然
-の上振れ」と再評価。P2 は 3 シナリオで +3.5〜+4.9% の明確な regression。asm 確認
-で **(a) LLVM が `cmp1 → load p2` の hoist を出さず load 並列化が実現していない、
-(b) PEXT prelude を毎 chunk 払うが per_shard=64 の cand 分布上 unroll ×2 がほぼ
-発火しない**、の 2 点が原因と判明。前報机上見積が overestimate だった理由 (PEXT
-毎 chunk コスト / N_cand を全 chunk 平均と取り違え / LLVM hoist 期待) を §3 教訓
-として整理。再挑戦するなら B1 (SoA tag split) との比較を先、ないし `asm!` 直書きで
-LLVM hoist 限界を自前で潰してから perf-gate に進む順序を §4 に明記。code は HEAD
-に revert、本稿のみが本セッションの artifact。
+P3 (PDEP needle) と P2 (PEXT で pair-mask → lane-mask + inner unroll ×2) を投入、**両方 revert**。P3 は asm では 7 → 4 命令 / dep chain 5 → 3 だが perf-gate noise threshold 内、後段 baseline 取り直しで「improvement に見えた偶然の上振れ」と判定。P2 は 3 シナリオで +3.5〜+4.9% regression。原因は (a) LLVM が cmp 越し load 並列化を出さない、(b) per_shard=64 cand 分布で unroll ×2 がほぼ発火しない、の 2 点。再挑戦時の前提条件 (B1 比較先行 / `asm!` で hoist 強制 / calibration 2 回) を §4 に明記。
 
 ### 2026-05-08-find-avx2-pext.md
-`find-avx2-frontier.md` §C2 で「Zen 1/2 で PEXT 激遅、non-portable 前提なら別議論」と
-棚上げした BMI2 PEXT/PDEP 採用案を、Zen 1/2 (2017〜2019) のシェア低下と CPUID family
-check 1 個で fast path 専用に焼ける見通しが立ったことから解禁、机上検討まで進めたもの。
-hot path に効くのは 2 軸: **P2** (PEXT で pair-mask → lane-mask 圧縮 + inner unroll ×2)
-が per_shard=64 帯で −3〜−5 cy/scan、Path A の load 並列化と Path B の BLSR ×1 を同時に
-取れる本命。**P3** (`needle_from_hash` を PDEP 1 命令化) は依存関係ゼロでクリーン採用、
-call ごと −2〜−3 cy。runtime 検出は CPUID vendor + family check (AMD family ≥ 0x19 で
-fast PEXT) を推奨、起動コストゼロ。前報 Tier-S/A とは概ね直交、B1 (SoA tag split) とは
-P2 が排他で prototype 比較で決着。本稿は解析ノート (実測なし)、推奨着手順は
-S1/S2/S3 → P3 → A2 → P2 → (B1 vs P2 prototype 比較)。
+解析ノート (実測なし)。Zen 1/2 PEXT 激遅問題を CPUID family check で迂回する見通しが立ったため、棚上げしていた BMI2 PEXT/PDEP を解禁して机上検討。P2 (PEXT で pair-mask 圧縮 + unroll ×2) が per_shard=64 帯 −3〜−5 cy/scan の本命、P3 (`needle_from_hash` を PDEP 1 命令化) は依存関係ゼロでクリーン採用候補。Tier-S/A とは概ね直交、B1 (SoA tag split) とは P2 が排他。後続の pdep-pext-revert で実測投入され両方 revert された。
 
 ### 2026-05-08-single-shard-baseline.md
-新 testbed `bench_single_shard` (c8/c9 の **shard 内側 1 個だけ** を N thread で叩く) の
-baseline sweep + c10 設計向け方向付け。`SingleShard` trait + closure-based read を
-`research/src/single_shard.rs` に新設、c8 内部 `Shard` を pub 化して adapter wrap、c9 は
-`with_shards(cap, 1)` で単一 shard 化。3 workload 軸 (zipf×3 skew / adversarial-hot /
-uniform) × 3 op-mix × 5 threads × 2 variant = 150 trial。**uniform read-only 16T で c8
-352 Mops vs c9 5.25 Mops の 67x 差** (Mutex per shard は contention 無くても scaling
-殺す)、**adversarial-hot read-only で c8 も 16T で 31 Mops にプラトー** (visited bit
-`fetch_or` の cache-line ping-pong)、**gim 50/50 では c8 すら 1T < 2T** (writer Mutex
-coverage が広すぎ) など、c10 設計の attack 順位 (visited bit cache-line 分離 → writer
-lock-free claim → false sharing 排除) を定量化した baseline。HR は c8/c9 全 150 点で
-0.001 以下の差で一致、testbed 自体の正しさも自己検証済み。
+c10 設計向けに **shard 内側 1 個だけを N thread で叩く** testbed `bench_single_shard` を新設。3 workload × 3 op-mix × 5 threads × 2 variant = 150 trial で baseline 採取。**uniform read-only 16T で c8 352 vs c9 5.25 Mops の 67× 差** / **adv-hot read-only で c8 も 16T で 31 Mops にプラトー** (visited bit ping-pong) / **gim 50/50 では c8 すら 1T < 2T** (writer Mutex coverage 過大) を観測、c10 設計の attack 順位 (visited 分離 → writer lock-free claim → false sharing 排除) を定量化。
 
 ### 2026-05-08-c10s-vs-c8-baseline.md
-c10 lineage 第一案 `sieve_c10s` (= c8 から VISITED bit を tags 配列の外に分離して
-`Box<[AtomicU64]>` の bit-packed 別領域に出した shard variant) を testbed で c8 と直接
-比較。**read-only zipf-1.0 16T で c8 45 → c10s 92 Mops (+102%)、uniform で 342 → 597
-(+74%)** と reader 経路は 2x 改善 (仮説「tags 列を MESI Shared 維持にすれば AVX2 scan が
-cache miss を被らない」を支持)。ただし **read-heavy zipf 16T では -17〜-21% に regress** —
-c8 では fetch_or が tags 4 cache line に分散していたのが、c10s では visited 16 byte の
-1 line に集中するため hot key の ping-pong が顕在化、tag scan 清浄化の利得を上回る。
-HR は c8 と ±0.001 一致 (1 例外 = read-heavy adv-hot 16T で c10s が +11pp 高い、これは
-EMPTY 窓を短縮した副次効果)。実装上の落とし穴 1 件 (update 時 visited を reset でなく SET
-する仕様 = sieve_orig の `freq=1` 一致) と回帰 test を実装に同梱。c10 lineage の attack
-順位は (1) 単独では片側勝ちと判明したので、c10sw (visited per-entry padding) または
-c10w (writer Mutex CAS-claim) との合成が次の検証軸。
+仮説: tags 列を MESI Shared 維持にすれば AVX2 scan が cache miss を被らないはず。c8 から VISITED bit を `Box<[AtomicU64]>` 別領域に分離した `c10s` を testbed で比較し、**read-only zipf-1.0 16T で +102% / uniform で +74%** と reader 経路 2× 改善で仮説支持。ただし **read-heavy zipf 16T で −17〜−21% regress** — visited が 1 line に集中して hot key ping-pong が顕在化。c10s 単独では片側勝ち、c10sw / c10w との合成が次の検証軸と整理。
 
 ### 2026-05-08-c11s-conditional-set.md
-c10 lineage の追撃 `sieve_c11s` — c10s からの単一行 diff (reader hit を
-`fetch_or` から `if load == 0 { fetch_or }` に変える conditional visited set) を
-testbed で c8/c10s と並べて比較。x86 の `lock or` は値変化に関わらず必ず line を
-Modified に遷移させるので、zipf hot key のように visited=1 が定常状態の slot で
-全 reader が同 cache line を取り合う ping-pong が c10s の bottleneck だった、
-というのが仮説。**read-only adversarial-hot 16T で c8 35 → c10s 54 → c11s 594
-Mops (c8 比 +1587%、c10s 比 +999%)、read-only zipf-1.2 16T で 36 → 64 → 143 (c10s
-比 +121%)、read-only zipf-1.0 16T で 50 → 97 → 130 (c10s 比 +34%)** と、reader
-集中軸は c10s に対しても圧勝。1T overhead は adv-hot で +19% (load+branch <
-uncontested `lock or` cost)、zipf-1.2 で -10% の混在で許容範囲。HR は c8 と完全一致
-(zipf 全帯 ±0.01)、oracle 順序保持。**read-heavy zipf 16T は c10s の regression を
-解消できず** (c8 比 -18%、c10s 比 -8%) — reader 改善ではなく writer Mutex critical
-section が支配項であることを定量確認、c11w (writer CAS claim) との合成が次の必要軸。
-publishable surface 昇格は c11w 結果待ち。
+仮説: x86 `lock or` は値変化に関わらず line を Modified に遷移させるので、`fetch_or` を `if load == 0 { fetch_or }` に変えれば hot key ping-pong が消えるはず。c10s からの単一行 diff で `c11s` を作成、**read-only adv-hot 16T で c10s 比 +999% / zipf-1.2 16T で +121%** と reader 集中軸は圧勝、HR は c8 と完全一致。ただし **read-heavy zipf 16T は c10s の regression を解消できず** (writer Mutex critical section 支配)、c11w (writer CAS claim) との合成が次の必要軸。publishable surface 昇格は c11w 結果待ち。
 
 ### 2026-05-08-c12s-cas-slot-claim.md
-c11s 報告 §5「writer Mutex 律速を c11w / CAS-based slot claim で解く」の実装記録。
-**writer Mutex 完全排除** + `hand: AtomicUsize` + tag CAS で pos 所有権を確保 +
-`install-at-evicted-pos` で compaction を構造的に廃止する c12s variant。設計文書
-(`c12s-cas-slot-claim-design.md`) の主仮説 **「install-at-evicted-pos は SIEVE 外部
-等価」が崩壊**: 新 entry が hand 直前の pos に visited=0 で入る → 次 hand wrap で
-即 evict 候補 → 「保護期間が短い CLOCK 亜種」に変質し SIEVE algorithm そのものでは
-ない。oracle test (`research/tests/oracle.rs`) で eviction stream / cache contents
-双方が divergent。throughput 軸では **read-heavy zipf 16T で c8 比 +223% / c11s 比
-+269%** (c8 21.1 → c11s 18.4 → c12s 68.0 Mops)、p99 tail latency も c8/c11s の 1/3
-以下。一方 HR は SIEVE algorithm 喪失の signature として劣化 (read-heavy zipf-1.0
-で -10%、read-only zipf-0.7 で -72%)、これは tuning や workload 選択で救えない。
-**判定は不採用**: senba (= NSDI'24 SIEVE library) の仕様違反であり、throughput 3x
-は "fast non-SIEVE cache" であって "fast SIEVE cache" ではない。research artifact
-として `senba-research::experimental::sieve_c12s` に永続化、後続 lock-free 系変種が
-install-at-evicted-pos に手を出さないための reference として残す。次の attack
-vector は §5 (3) per-shard sub-sharding (構造的に SIEVE 等価が自明)。
+仮説: writer Mutex を完全排除して `hand: AtomicUsize` + tag CAS + install-at-evicted-pos で SIEVE 等価を保てるはず。実装 → 主仮説 **「install-at-evicted-pos が SIEVE 外部等価」が崩壊**: 新 entry が hand 直前 visited=0 で入る → 即 evict 候補で「保護期間が短い CLOCK 亜種」に変質、oracle 不一致。throughput は read-heavy zipf 16T で c8 比 +223% だが HR は read-only zipf-0.7 で −72%、SIEVE 仕様違反として **棄却**。後続 lock-free 系が同じ罠に落ちないための reference として artifact 残置、次案は per-shard sub-sharding (構造的に SIEVE 等価が自明)。
 
 ### 2026-05-08-c13s-sweep.md
-c12s 不採用 (install-at-evicted-pos が SIEVE 等価性破壊) を踏まえた再設計
-`sieve_c13s`。base を senba::Cache lineage (shift-on-evict) に切り替え、**Path A
-(= 既存 key の value 更新、eviction を起こさない経路) のみ lock-free CAS 化**、
-Path B/C (= warmup install / evict) は writer Mutex 配下に残す。Path A は SIEVE
-state machine を一切触らないので並行化しても順序保持が構造的に保証される。
-新 VERSION bit (0x4000) を Path A ごとに flip して reader seqlock cycle 検出。
-read-heavy 95/5 zipf 16T の主軸で **c11s 比 +43% (zipf-1.0)、+111% (zipf-1.2)**、
-HR は sieve_orig と ±0.005 一致。ただし **uniform read-heavy で c11s 比 -67%** の
-serious regression (Path A retry 空振り問題、新規 key write が必ず MAX_RETRY=4 を
-消費して escalate)、**read-heavy adversarial-hot で HR -0.26** (16T で hot key への
-Path A cycle が高頻度発生 → reader seqlock false-miss が API 表面で観測される) と
-2 つの不採用要因が残る。両方とも構造的問題ではなく実装 tunable で対処可能 (Path A
-MAX_RETRY=1 + find_lockfree AVX2 化 + reader bounded retry)。**判定は条件付き保留、
-c14s として再評価**。本変種は「Path A だけ lock-free で SIEVE 等価が両立する」初の
-正例として `senba_research::experimental::sieve_c13s` に永続化、c11s + Path A 単独
-の効果を切り分ける baseline として活用。
+c12s 棄却 (SIEVE 等価性破壊) を踏まえた再設計 `c13s`。仮説: Path A (= 既存 key の value 更新、eviction 起こさない経路) は SIEVE state machine を触らないので lock-free 化しても順序保持が自明。VERSION bit (0x4000) を Path A flip で reader seqlock 検出。**read-heavy zipf 16T で c11s 比 +43〜+111% / HR は orig と ±0.005 一致**。ただし uniform read-heavy で c11s 比 −67% (Path A retry 空振り) と adv-hot で HR −0.26 (reader false-miss) が残り、**c14s として再評価する条件付き保留**。
 
 ### 2026-05-08-find-avx2-avx512.md
-`find-avx2-frontier.md` Tier-C で「non-portable」と棚上げした AVX-512 を、server 用 CPU
-での実態的 ubiquity (Intel Xeon Skylake-X+ / Sapphire Rapids+、AMD EPYC Zen 4+) を踏まえ
-opt-in 経路として再評価。具体的な勝ち手 3 軸: **V1** (AVX-512 VL + kmask, 256-bit 幅)
-で `vpcmpeqw_mask` 直結により `vpmovmskb` (5 cy) と BLSR pair を一掃、per_shard=16 で
-−0.8 ns / per_shard=64 で −3 ns、**downclock 無し**。**V2** (zmm 512-bit) で per_shard=64
-が 4 chunks → 2 chunks に半減、更に −2 ns、ただし Skylake-X / Cascade Lake で
-downclock 懸念のため cargo feature `avx512-zmm` で opt-in。**V5** (V2 + B1 SoA tag split)
-で 64 u8 lane を 1 zmm shot 比較、per_shard=64 が outer ループ無しで完結、AVX-512 と
-B1 の最も強い相乗。PEXT 系 (P1/P2) は kmask が初めから lane-mask 形式なので **AVX-512
-経路では不要**、P3 (PDEP needle) と Tier-S (S1/S2/S3) は SIMD path 非依存で温存。
-配布形態は cargo feature `avx512-vl` / `avx512-zmm` の二段で、AVX-512 が無い CPU は
-ランタイム detect で AVX2 path に自動 fallback。本稿は解析ノート (実測なし)、推奨
-着手順は S1/S2/S3 + P3 → V1 → A2 → V2 と V5 の二択を prototype で詰める。
+解析ノート (実測なし)。仮説: AVX-512 は server で実態的に ubiquitous なので opt-in path として価値ある。具体勝ち手 3 軸を整理: **V1** (AVX-512 VL + kmask, 256-bit) で `vpmovmskb` + BLSR pair を一掃 / **V2** (zmm 512-bit) で chunk 数半減、downclock 注意 / **V5** (V2 + B1 SoA tag split) で per_shard=64 が outer ループ無し 1 zmm shot。PEXT 系 (P1/P2) は kmask が代替するので AVX-512 経路では不要。配布形態は cargo feature `avx512-vl` / `avx512-zmm` の二段 + runtime detect で AVX2 fallback。
 
 ### 2026-05-08-find-avx2-caller-merge.md
-`find-avx2-frontier.md` Tier-S の caller-merge 最適化を 3 試行で詰めて
-**採択した実測ノート**。**第 1 試行 S1+S2 は棄却** (find_avx2 が
-target_feature 制約で inline されず tuple 返りが sret 化、かつ LLVM が
-shift round-trip を畳まないため get_heavy_u64 +5.11%)。**第 2 試行
-A3+`#[inline]`** で `entry_ptr_from_tag(tag) = entries + (tag & ID_MASK)`
-を hit path 専用ヘルパとして追加し source 側 fold、asm 上 byte offset が
-1 op の `and rXd, 2016` に圧縮、perf も get_heavy +1.51% (gate 内) まで
-改善 — ただし sret は stable Rust の構造制約 (`#[inline(always)]` +
-`#[target_feature]` が E0658 で禁止) で残存。**第 3 試行 NonZeroU16 + A3
-+ `#[inline]` で完全達成・採択**: live tag は LIVE bit (0x8000) 立ち
-⟹ 非ゼロを利用、`find` 返り型を `Option<(usize, NonZeroU16)>` に変更して
-niche optimization で 16 byte に抑え sret 解消。const assert
-`size_of::<Option<(usize, NonZeroU16)>>() == 16` を anchor。asm は
-`mov rdi, rbx; call find_avx2; test dx, dx; je miss; ...; and edx, 2016;
-add rax, rdx` で完全予測通り (sret なし、niche `test dx, dx`、shift
-round-trip なし)。perf-gate AB: insert_u64 −7.15% / mixed_u64 −10.14% /
-insert_string −3.22% / insert_u32_slot16 −9.24% の 4 シナリオ大勝、
-get_heavy_u64 +0.86% (noise 域) / mixed_lowskew_u64 +1.38% で 5% gate
-違反なし。Twitter trace cross-check (cluster016/018/019 × cap 4096/16384/32768)
-も実施済: HR 9 セル全完全一致、cluster016 (scan-heavy) で −2.82〜−9.25%
-の大勝、cluster018/019 で gate 内 +0.4〜+1.6% 退行 (perf-gate の
-get_heavy/lowskew と同根)、5% gate 違反なし。perf-gate と Twitter で
-方向が揃って採択維持。学び:
-sret threshold (16 byte) は ABI 設計のクリフ、niche-bearing 型での
-サイズ詰めは積極検討、const assert で固定化、3 段試行で各制約を
-独立に閉じる。
+`find-avx2-frontier` Tier-S の caller-merge 最適化を 3 試行で詰めて **採択**。第 1 試行 (S1+S2) は sret 化と LLVM の shift round-trip 非畳みで棄却、第 2 試行 (A3+`#[inline]`) は perf gate 内まで改善するも sret 残存、**第 3 試行 (NonZeroU16 + A3 + `#[inline]`) で完全達成**: niche optimization で 16 byte に詰めて sret 解消、const assert で固定化。perf-gate AB は insert_u64 −7.15% / mixed_u64 −10.14% / insert_u32_slot16 −9.24% / insert_string −3.22% の 4 シナリオ大勝、5% gate 違反なし、Twitter cross-check も方向一致で採択維持。学び: sret threshold (16 byte) は ABI のクリフ、niche-bearing 型でのサイズ詰めを積極検討、3 段試行で各制約を独立に閉じる。
 
 ### 2026-05-08-mokabench-arc-traces.md
-`research/src/bin/bench.rs` に **ARC paper trace** (`S3 / DS1 / OLTP / spc1likeread`)
-を扱う `--source arc` を追加。dataset / パーサ意味論の出典は **mokabench**
-(<https://github.com/moka-rs/mokabench>) と `cache-trace` submodule。mokabench
-本体の load generator は統合せず trace 形式だけ拝借し (理由: mokabench は cache
-実装を compile-time feature flag で差し替える構造で senba を載せるには fork が
-必要、既存 `bench.rs` driver で全 variant が直接 ARC を食えるほうが軽い)、
-`arc_from_path` で `start len` 行を `start..start+len` に展開、`.zst` は zstd で
-on-the-fly 展開。比較対象は **moka でなく mini-moka** (moka は background thread +
-adaptive window sizing + tokio runtime の overhead が乗り single-thread bench で
-速度差が水増しされるため)。スモーク結果: Zipf-1.0 で HR ±0.4pp 一致 / 速度 ~17.6×、
-**ARC OLTP cap=4000 で senba HR=51.7% vs mini-moka 45.7% (SIEVE が DB workload で
-W-TinyLFU を上回る既知パターンと整合)**、ARC S3 は cap=4000/16000 共に HR <1% で
-**両者とも壊滅** (working set が cap を遥かに超える scan-heavy では admission
-policy 差は誤差の範囲) — Twitter cluster 単独では見えない事実。**OLTP は perf-gate
-scenario 候補、S3 は signal が無く却下、DS1 / spc1likeread は未検証** (spc1likeread
-は split zst 連結処理が要追加工事)。
+`bench.rs` に **ARC paper trace** (`S3 / DS1 / OLTP / spc1likeread`) の `--source arc` を追加 (dataset / パーサ意味論は mokabench から拝借、load generator 自体は統合せず軽く済ませた)。`.zst` は zstd で on-the-fly 展開、比較対象は overhead を避けるため moka でなく mini-moka。スモーク結果: Zipf-1.0 で HR ±0.4pp 一致 / 速度 ~17.6×、**ARC OLTP cap=4000 で senba HR 51.7% vs mini-moka 45.7%** (SIEVE が DB workload で勝つ既知パターンと整合)、ARC S3 は両者壊滅。OLTP は perf-gate scenario 候補、S3 却下、DS1 / spc1likeread 未検証。
 
 ### 2026-05-08-external-lib-sweep.md
-`mokabench-arc-traces` 基盤の上で **ARC paper trace 6 種 (OLTP / S3 / P3 / DS1 /
-ConCat / MergeP) + Zipf skew=1.0** を **senba::Cache (auto-shard via
-`Cache::new(cap)`) / sieve_orig (oracle) vs mini-moka / moka 0.12 (W-TinyLFU)**
-で一気に sweep。`Cache::new` は per-shard を 32–64 (= AVX2 batch サイズ ≒
-6-bit ID 上限) に収まるよう shards を自動選択するので senba::Cache に
-capacity ceiling は無く、auto は orig と HR ±0.3pp 一致。**HR は workload と
-cap で SIEVE / W-TinyLFU が反転**: OLTP cap=8000 で SIEVE +7.5pp / MergeP
-cap=1M で +5pp、対して DS1 cap=1M で W-TinyLFU +7pp / P3 cap=32k で +8.5pp /
-S3 cap=400k で +13pp、Zipf は ±0.4pp tie。**Throughput** は senba が
-single-thread 公平条件 (`mini_moka_unsync`) で 2–4× — `mini_moka::sync` /
-`moka` は multi-thread 用途の overhead (sync()/background thread/tokio) が
-乗るので single-thread 比較からは除外。
-副次発見: **working set が cap に収まる帯 (Zipf cap=32k / ConCat cap=1M /
-OLTP cap=8000) では senba < orig**。ConCat を cap 軸で並べると `senba/orig`
-比が `shards` 数 (2k → 8k → 16k) と逆相関で崩れる (111% → 73% → 58%) ので、
-**hot 集合が uniform hash で shards に分散して cacheline 局在を失う**のが
-仮説の主因 (orig 2 cacheline vs senba 3 cacheline / op)。検証案は `Slot8`
-(256 ent/shard) で shards 数を 1/4 に圧縮 + perf stat で LLC miss 直接計測。
-caller-merge (main 38d39f3) 後でも hit-heavy 帯の優劣は変わらず、miss-heavy 帯
-(DS1/P3/S3/MergeP) は senba +5〜15%。
-前リビジョンの「`senba_n128 cap=256` で HR collapse」は per-shard=2 強制の
-artifact で、`Cache::new(cap)` 経由なら起きない (ユーザは shards を選ばなくて良いし
-選ぶべきでもない)。次は OLTP/MergeP/Zipf 3 点 perf-gate 候補が follow-up。
+ARC paper trace 6 種 + Zipf を senba (auto-shard) / sieve_orig vs mini-moka / moka 0.12 で sweep。**HR は workload と cap で SIEVE / W-TinyLFU が反転** (OLTP cap=8000 で SIEVE +7.5pp、対 DS1 cap=1M で W-TinyLFU +7pp 等)、Throughput は senba が single-thread 公平条件で 2–4×。副次発見: **working set が cap に収まる帯で senba < orig**、ConCat の cap 軸で senba/orig 比が `shards` 数と逆相関で崩れる (111% → 73% → 58%) ため **「hot 集合が uniform hash で shards に分散して cacheline 局在を失う」cacheline dispersion 仮説**を提示。検証案として Slot8 (256 ent/shard) / shards 上限 / `perf stat` LLC miss 直接計測を follow-up に残す (※後続 vtune-windows-orig-vs-senba で本仮説は反証された)。
 
 ### 2026-05-08-c14s-design.md
-c13s sweep の不採用要因 2 点 (uniform read-heavy regression / adversarial-hot HR
-drop) を、構造変更ではなく 3 点の実装 tuning で潰す c14s の設計書。**(1) find_lockfree
-の AVX2 化** (c13s の scalar 64 scan が uniform write での pure overhead だった分の
-解消)、**(2) Path A の MAX_RETRY=1** (CAS 失敗時の即 Mutex escalate、c13s の retry
-loop が adversarial-hot で writer-vs-writer reload 競合を増やすだけだったため廃止)、
-**(3) reader bounded retry** (Path A cycle と reader seqlock validate が干渉した
-ときの false-miss 吸収)。SIEVE 等価性は Path A が引き続き state machine を触らない
-ため自明保持。c15 (entry-level seqlock = false-miss 自体を消す方向) は §7 に粗描き
-で残し、c14s は実装 tunable レベルでの暫定解として位置付け。**ERRATUM**: §2.3 の
-reader retry を "true/false miss を区別不可" とした前提が誤りで、実装では
-seqlock-fail + LIVE=0 観測の 2 点で racing 検出 → 条件付き retry に変更 (sweep
-report 参照)。
+c13s 不採用要因 2 点 (uniform read-heavy regression / adv-hot HR drop) を構造変更ではなく 3 点の実装 tuning で潰す c14s の設計書。(1) find_lockfree の AVX2 化 / (2) Path A MAX_RETRY=1 (CAS 失敗時即 Mutex escalate) / (3) reader bounded retry。SIEVE 等価性は Path A が state machine を触らないため自明保持。c15 (entry-level seqlock) は §7 に粗描き、c14s は実装 tunable レベルでの暫定解と位置付け。**ERRATUM**: §2.3 で reader retry を "true/false miss 区別不可" としたのは誤りで、実装では seqlock-fail + LIVE=0 観測で racing 検出して条件付き retry に変更 (sweep report 参照)。
 
 ### 2026-05-08-c14s-sweep.md
-c14s (c13s + AVX2 find_lockfree + MAX_RETRY=1 + reader bounded retry) の sweep
-評価。設計書 §2.3 が "true-miss と false-miss を区別不可" としていた前提が誤りで、
-初版実装は **無条件 4× retry** が miss-path を 4 倍化、uniform read-only 16T で
-c11s 比 -75% の壊滅的 regression を出した。samply で leaf 62% が `get_by_hash` の
-retry ループに集中していると同定、`try_candidate` の seqlock failure と scan 中の
-LIVE=0 lane 観測の 2 点を racing シグナルとして外に出し、racing 時のみ retry する
-形に修正。修正後 sweep で **§4 acceptance T2/T3/T4 はすべて pass**、特に
-adversarial-hot HR は c11s 0.871 / c13s 0.571 / **c14s 0.920** で c13s の SIEVE
-意味的精度劣化を完治した。**T1 (uniform read-heavy 16T) は依然 fail** だが
-c14s/c11s = 0.323 と c13s/c11s = 0.345 がほぼ同水準で、これは Path B/C (writer
-Mutex) の構造的競合 — c14s の責任ではなく c15 / per-shard sub-shard の領分。read-only
-adv-hot 16T で c14s/c13s = 0.78 の退行 (新規 EMPTY-lane 検出の SIMD overhead) は
-後続課題として残る。lock-free Path A 系の代表は c13s から c14s に更新。
+c14s sweep 評価。設計書 §2.3 の前提誤りで初版実装は無条件 4× retry が miss-path を 4 倍化、uniform read-only 16T で c11s 比 −75% の壊滅的 regression。samply で leaf 62% を retry ループに同定し、racing 観測時のみ retry する形に修正。**§4 acceptance T2/T3/T4 は pass**、特に adv-hot HR は c14s 0.920 で c13s の SIEVE 意味的劣化 (0.571) を完治。**T1 (uniform read-heavy 16T) は依然 fail** だが c14s/c11s = 0.323 と c13s/c11s = 0.345 がほぼ同水準で、Path B/C Mutex の構造的競合 = c14s 責任外。lock-free Path A の代表は c13s から c14s に更新。
 
 ### 2026-05-09-vtune-windows-orig-vs-senba.md
-`2026-05-08-external-lib-sweep.md` が提示した **cacheline dispersion 仮説**
-(shards 散逸で hot 集合が cacheline 局在を失う) を Windows native + VTune
-(Microarchitecture Exploration / Memory Access) で直接検証。観測装置として
-`research/src/bin/bench_vtune.rs` を新設 — Zipf を in-process 生成、Intel ITT API
-(`ittapi 0.5`) で collection 範囲をバイナリ自身が pause/resume、`cargo xwin` で
-MSVC ABI クロスビルドして `.pdb` 付きで Windows へ持ち込む構成。**計測方法論の
-教訓 2 つ**: (1) VTune は `-start-paused` 必須 — 無しだと warmup の早期サンプルが
-混入して wall-clock を artificial に "tied" に見せるバイアス、(2) **active 10s
-以上 (ops ≥ 180M)** の長 run でないと MUX < 0.95 になり L1/TLB 系 counter が
-undercount される (短 run で見逃した orig の TLB pressure が長 run で表面化)。
-clean run (cap=1M / keys=4M / skew=0.9 / 180M ops, `-start-paused`, MUX 0.95+) で
-**senba は orig 比 +12–16% 遅い** (uarch 16.1% / memaccess 12.2%、ops 倍増で
-variance 14.8pp → 3.9pp に収束)。Linux/WSL2 40% gap よりは小さいが Windows native
-でも構造的 gap が残る。Top-Down では cacheline dispersion 仮説は反証 (L1/L2/L3/DRAM
-の絶対値はほぼ一致)、ただし質的に対極 — **orig は latency-dominated** (Memory
-Latency 41.0% > BW 39.2%) **+ TLB pressure** (★新発見: L1 Bound 20.1% / DTLB
-Overhead 20.4% / Load STLB Miss 15.9%、すべて 4K bracket。`Box<Node>` × 1M が
-ucrt heap に散らばり STLB を miss させる)、**senba は bandwidth-dominated** (BW
-59.2% > Lat 22.5%) で `entries: Vec<Entry>` 連続 mapping のため TLB pressure 無し
-(L1 Bound 0.0%) 、代わりに SIMD 並列 probe による **L3 内部 queue 圧迫** (L3
-Latency 31.7% vs orig 19.4%)。両者 IPC は奇しくも 1.095 / 1.096 でほぼ完全一致、
-SIMD ILP の純利益は無く、senba の遅さは **instruction footprint +17% (load +42% /
-store +44%)** がそのまま cycle +16.5% に直結したもの。Linux/WSL2 40% gap の分解:
-**構造由来 12–16pp (今回特定)、OS/環境由来 24–28pp** で、後者の主犯候補は **Linux
-THP が orig の Box<Node> を 2M page promote して STLB miss を消している** 仮説
-(Windows でも見えている orig の弱点を Linux が OS 機能で解消している構図)。含意:
-auto-shard heuristic は Windows native でも +12–16% コスト、external-lib-sweep の
-検証案 1 (`Slot8`) と 2 (shards 上限) は **再検討候補に復帰**。新規検証案 4
-(`Cache::prefetch(&key)` API) と 5 (instruction footprint 削減) を追加。follow-up:
-bare Linux で `perf stat -e dTLB-load-misses` で THP 仮説確認、Windows Large Page
-で orig の TLB pressure 消す対照実験、GitHub Actions one-shot triage、VTune
-Per-allocation breakdown。
+external-lib-sweep の **cacheline dispersion 仮説**を Windows native + VTune で直接検証 (`bench_vtune.rs` を新設、ITT API で collection 範囲をバイナリ自身が制御)。計測方法論の教訓 2 つ: (1) `-start-paused` 必須、(2) active 10s 以上 (ops ≥ 180M) でないと MUX < 0.95 で TLB 系 counter 信頼不可。clean run で **senba は orig 比 +12–16% 遅い** (Linux/WSL2 40% gap よりは小さい)。Top-Down で **cacheline dispersion 仮説は反証** (L1/L2/L3/DRAM 絶対値ほぼ一致)、ただし質的に対極で **orig は latency-dominated + TLB pressure** (DTLB Overhead 20.4%、`Box<Node>` × 1M が STLB を miss)、**senba は bandwidth-dominated** (BW 59.2%) で TLB pressure 無し代わりに **L3 内部 queue 圧迫**。両者 IPC 1.10 で揃い、senba 遅さは **instruction footprint +17%** が cycle +16.5% に直結したもの。Linux 40% gap 内訳は構造由来 12–16pp + OS/環境由来 24–28pp で、後者は Linux THP が orig の Box<Node> を 2M page promote している仮説 (要 bare Linux 検証)。検証案 1 (Slot8) / 2 (shards 上限) は再検討候補に復帰、新規 4 (`Cache::prefetch` API) / 5 (instruction footprint 削減) を追加。
 
 ### 2026-05-10-visited-bitmap.md
-SIEVE の VISITED ビットを `Shard::tags[i]: u16` から外して `Shard::visited: u64`
-の per-shard bitmap に追い出す。`MAX_PER_SHARD = 64` なので一語で足り、`hand`/`len`/
-`hits`/... が乗る制御 cache line に同居 (置き場コスト 0)。副次効果 3 点: (1)
-HASH_MASK が 8→9 bit (`0x3FFF`→`0x7FFF` から ID_MASK を引いた残り) で SCAN 偽陽性
-1/256→1/512、(2) `find_evict_pos` が O(len) `scan_evict` linear walk → O(1)
-bit-twiddle (`(!visited & live_mask & !below_hand).trailing_zeros()` 1 命令 +
-`&= !mask` clearing)、(3) `tags[pos] |= VISITED` (tags line dirty) → `visited |=
-1u64 << pos` (制御 line dirty、`hits += 1` で既 dirty)。代償は `insert` 退避と
-`remove` の `tags.copy_within` に並走する bitmap shift (`u128` 経由で pos==63 の
-corner 回避) と `retain` の `new_visited` 再構築。**perf-gate 6 シナリオ**: get_heavy
-−7.76% / mixed_lowskew −10.04% / mixed_u64 −3.05% (3 シナリオ improved)、insert_*
-+1% (5% gate 内)。**Twitter 5 cluster × 3 cap × 3 run sweep (n=90)**: 15 セル中
-14 セルで improvement、平均 Δ −6.3%、median −5.9%、range −14.9% 〜 +0.1%
-(cluster006/65536 で −14.9%、cluster019 全 cap で −9% 級、cluster034 のみ ≤−1.2%
-で控えめだが退行はゼロ)。oracle 等価性は維持 (oracle.rs + oracle_cache_match.rs
-全 28 テスト pass、hits/misses/evictions が before/after 全 90 サンプルで bit-for-bit
-一致)。WSL2 環境バイアスは senba 単独 AB なのでほぼ乗らず。読み筋は read-heavy
-帯で偽陽性半減 + visited-set RMW の line 移動の合算、低 skew miss-heavy 帯で
-O(1) victim search が直接効く。**採択**。follow-up: `find_avx2` caller-merge の
-再評価 (HASH 9 bit 化で false-positive base が変わったので)、`AtomicU64` 化に
-よる並行 variant への流用検討、Slot8 復活案 (本件と直交、併用前提で再検討可能)。
+仮説: VISITED ビットを `Shard::tags[i]: u16` から外して `Shard::visited: u64` per-shard bitmap に出せば、(1) HASH bit 拡張で SCAN 偽陽性半減、(2) `find_evict_pos` が O(1) bit-twiddle 化、(3) tags line dirty を制御 line dirty に逃せる、の 3 点で勝てる。実装 → **perf-gate 6 シナリオ**: get_heavy −7.76% / mixed_lowskew −10.04% / mixed_u64 −3.05% (3 シナリオ improved)、insert_* +1% (gate 内)。Twitter 5 cluster × 3 cap × 3 run sweep で 14/15 セル improvement (平均 −6.3%)、oracle 等価性維持。**採択**。follow-up: caller-merge の HASH bit 化後再評価 / 並行 variant への流用 / Slot8 復活案との併用。
 
 ### 2026-05-10-write-contention-design-space.md
-並行 SIEVE における write contention 改善策の設計空間を整理した議論ノート。「hot-key
-だけが本丸」と再フォーカスし 4 点を導出: (1) 改善策は 4 系統 (直列化 / 空間分散 /
-decouple / 楽観的 retry) に分類でき、senba 文脈で各々の効きを地図化、(2) atomic
-は MESI で hardware level に直列化される (uncontended 5〜10 ns → cross-core 50〜200
-ns → NUMA 200〜500 ns)、lock-free の真の利得は「lock を消すこと」ではなく「cache
-line ownership を分散すること」、(3) shard-affinity (per-shard worker thread) は
-moderate Zipf には効くが hot-key には効かない (Mutex を worker に置換しても直列化
-は不変)、(4) **LongAdder 流 visited bitmap を 8-shard packing で 8× 圧縮** (SHARDS=
-256 / N_LANES=8 で naive padded 128 KB → packed 16 KB)、HR 副作用ゼロで write
-contention を構造除去できる候補。進め方は (Phase 1) sloppy visited (5 行) で効きを
-測る → (Phase 2) packed LongAdder で HR ロスゼロ版に置換 → (Phase 3) shard-affinity
-は中規模 Zipf 帯の保険札。Caffeine 流 sieve_cb は senba スコープ外なので別 lane。
-G2-α (entry-level seqlock) と直交、両乗せ可能。
+並行 SIEVE の write contention 改善策の設計空間を整理。「hot-key だけが本丸」と再フォーカスし、(1) 改善策 4 系統 (直列化 / 空間分散 / decouple / 楽観的 retry) の地図化、(2) **「atomic = 速い」は誤解で実態は MESI で hardware level に直列化される** (lock-free の真の利得は「lock を消す」ではなく「cache line ownership を分散する」)、(3) shard-affinity は moderate Zipf には効くが hot-key には効かない、(4) **LongAdder 流 visited bitmap を 8-shard packing で 8× 圧縮** (HR 副作用ゼロで write contention を構造除去できる候補) の 4 点を導出。進め方は Phase 1 sloppy (5 行) → Phase 2 packed LongAdder → Phase 3 shard-affinity の保険札。Caffeine 流 sieve_cb は senba スコープ外。
 
 ### 2026-05-10-c15s-sloppy-visited.md
-`write-contention-design-space.md` §7 Phase 1 の試行実装と判定。`sieve_c14s` から
-複製した `sieve_c15s` で reader hot path の `visited.fetch_or` を `1/(2^SAMPLE_BITS)`
-の TLS-RNG (自前 wyrand) gate で wrap、SAMPLE_BITS=4/3/2 (= 1/16, 1/8, 1/4) を
-Phase 1 判定基準に通す。**skew=0.0 16T throughput** (当初 sweep): c14s 比
-0.99–1.00× で動かず、ただし HR=1.95% で reader path がほぼ踏まれない workload
-mismatch だった。**skew=1.0 で再計測** (hot Zipf, HR=0.65): 1/16 で 0.91× (−9%)、
-1/4 でも 0.97× の **明確な regression**。HR は sample 率に sample 比例して下がる
-(1/16 で −0.7pp、Twitter 5 cluster × 3 cap × 5 seed では平均 −2.09pp / 最大 −4.72pp)
-ので **gate は確実に fire しており実装バグではない**。**REJECT × STOP の二重 NG**。
-構造的結論: **c11s の conditional load-then-fetch_or trick が既に reader 経路から
-書き込みを排除して visited line を MESI Shared 維持できており、reader load コストは
-~1 ns に圧縮済み**。これに対し TLS RNG draw は ~3 ns / call で gate コストが節約
-コストを上回って net 負けする。design doc §3 の「atomic load も MESI で 50–200 ns」
-という前提は c11s 構造下では成立しない、という反例。Phase 2 (packed LongAdder)
-の動機を再構成: reader 側はゼロコスト前提で writer Path A 側を ターゲットに、
-あるいは shard-affinity / Path B/C Mutex 競合に方向転換。c15s.rs は research
-artifact 残置、bench arm も Phase 2 と同居。
+仮説 (write-contention-design-space §7 Phase 1): reader visited を `1/(2^SAMPLE_BITS)` の TLS-RNG gate でサンプル化すれば atomic write traffic を減らして throughput が伸びる。`c14s` から `c15s` を派生 → skew=1.0 で 1/16 で 0.91× / 1/4 でも 0.97× の **明確な regression**、HR も sample 比例で低下 (Twitter で平均 −2.09pp)。**REJECT**。構造的結論: c11s の conditional load-then-fetch_or 構造下では reader load が ~1 ns に圧縮済で、TLS RNG draw ~3 ns / call が gate 節約コストを上回る。design doc §3 の「atomic load も MESI で 50–200 ns」前提は c11s 構造下では成立しない反例。Phase 2 (packed LongAdder) の動機を writer Path A 側 / shard-affinity 方向に再構成。
 
 ### 2026-05-10-c14s-vtune-write-contention.md
-c14s @ 4 thread / Zipf skew=1.0 / cap=4096 / 80M ops を Windows native VTune で
-`uarch-exploration` + `memory-access` 両方計測した直接観測ノート。新設の自己完結
-ドライバ `bench_vtune_concurrent.rs` (c8/c9/c14s 対応、moka 系除外、ITT bracketing) で
-取得。**LLC Miss Count = 0 / DRAM Bound 0.2% / L3 Bound 21.9%** から、working set が
-L3 内で閉じているのに L3 が pipeline 1/5 を食う構造を観測 → **c2c bouncing が単独で
-wall-clock を削っている** ことが断定可能 (write-contention-design-space §3 の hot-line
-仮説の直接検証)。hot line は単一でなく **3 cluster** が同格 (絶対 mem stall): (1)
-`writer_evict_and_install` 内の writer state cluster 0.416s、(2) per-shard `AtomicU64`
-visited (`vbit`, CPI 3.18 / Memory Bound 39.6%) 0.276s、(3) per-shard `parking_lot::Mutex`
-word (lock+unlock 内部 35–46% Memory Bound) 0.251s。前回 single-thread 観測の暫定評価
-「Mutex は 8.7% で従」を **Mutex word そのものが core 間 bouncing 主因** に修正。
-read-side は完全に健康 (`scan_evict` Memory Bound 3.8%) — contention は 100% atomic
-write 経路に集中。c15s sloppy visited reject の量的根拠 (visited は全体の 1/3 で単独
-狙いでは届かない) も後付けで説明可能。次の variant 設計方針: **3 hot line を 1 cache
-line に co-locate** + **writer-side batching** が ROI 上位、read-side / shard-affinity は
-据え置き。
+write-contention-design-space §3 hot-line 仮説の直接検証。c14s @ 4T / Zipf 1.0 / cap=4096 を Windows native VTune で計測 (新設の自己完結ドライバ `bench_vtune_concurrent.rs`)。**LLC Miss = 0 / DRAM Bound 0.2% / L3 Bound 21.9%** で working set が L3 内に閉じているのに L3 が pipeline 1/5 を食う → **c2c bouncing が単独で wall-clock を削っている** ことが断定。hot line は単一でなく **3 cluster** (writer state cluster 0.416s / visited 0.276s / Mutex word 0.251s) が同格。前回 single-thread 観測の「Mutex は 8.7% で従」を **Mutex word そのものが core 間 bouncing 主因** に修正。read-side は完全に健康 (`scan_evict` Memory Bound 3.8%)。次の variant 設計方針: (a) 3 hot line を 1 cache line に co-locate、(b) writer-side batching、が ROI 上位。
 
 ### 2026-05-10-c16s-design.md
-`c14s-vtune-write-contention.md` §8.1 の 1-day prototype として c16s を設計。c14s から
-派生し、per-shard struct layout だけを差し替える: `Mutex<WriterState{hand}>` + visited
-`AtomicU64` + len `AtomicUsize` を `#[repr(C, align(64))] struct ShardHot` に co-locate
-(3 hot line → 1 cache line)。per-shard cap ≤ 64 (6-bit ID 上限) を活用して visited を
-`Box<[AtomicU64]>` から単一 `AtomicU64` に縮退、`vbit` も word_idx 不要で `vbit_mask` に
-簡略化。残りロジック (Path A lock-free / Path B/C Mutex / AVX2 reader / SHARDS=64) は
-c14s と同型。AB は **bench_concurrent T=2,4,8,16 + bench_vtune_concurrent T=4** で
-c9/c14s/c16s 比較。合格 gate は (a) Mops +5% (T=4 skew=1.0 c14s 比) と (b) VTune の
-3 hot line のうち 2 つ以上で abs mem stall -30%、の同時成立。両方未達なら reject、
-片方のみは "explainability gap" として report 残し。reader bouncing 仮説 (visited fetch_or
-+ len.load が writer Mutex flip と同 line で衝突) が崩れたら次は A2 layout (writer/reader
-分離) を c17s 候補として持ち越す。スコープ外: writer batching (§8.2)、senba lib 取り込み、
-moderate skew sweep。
+c14s-vtune §8.1 の 1-day prototype として c16s を設計。c14s から派生し per-shard struct layout だけを差し替える: `Mutex<WriterState{hand}>` + visited `AtomicU64` + len `AtomicUsize` を `#[repr(C, align(64))] struct ShardHot` に co-locate (3 hot line → 1 cache line)。per-shard ≤ 64 を活用して visited を `Box<[AtomicU64]>` から単一 `AtomicU64` に縮退。残りロジック (Path A lock-free / Path B/C Mutex / AVX2 reader / SHARDS=64) は c14s と同型。合格 gate は (a) Mops +5% (T=4 c14s 比) と (b) VTune の 3 hot line のうち 2 つ以上で abs mem stall −30% の同時成立。reader bouncing 仮説が崩れたら次は A2 layout (writer/reader 分離) を c17s 候補で持ち越し。
 
 ### 2026-05-10-c16s-results.md
-c16s 設計 (上記) の Step 1–5 計測結果。**採用確定**、設計 §6 合否表 (a)✓/(b)✓
-位置に着地。Step 1 oracle PASS (全構成 diff=0)、Step 2 Mops AB T=4 で c16s 35.38 /
-c14s 32.79 = **+7.9%** (gate (a) ≥ +5% PASS、CV<0.013)、Step 3 thread sweep で
-c16s が T=2,4,8,16 全帯 c14s を上回り (+4.2/+6.5/+5.6/+3.2%) 異常パターン無し、
-Step 4 VTune memory-access で 3 hot line 全て -30% gate を超過 (writer state -39% /
-visited -65% / Mutex -49%、当初想定の 2/3 を上回る 3/3)、Step 5 uarch-exploration
-で Memory Bound P-core 23.0% → 16.5%、CPI 0.526 → 0.449、Retiring 29.1% → 35.7%
-と全方向で改善、LLC Miss=0 のままなので transfer 削減は L3 内で完結 (DRAM 起因なし)。
-副次効果として `writer_find` mem stall -50%、`find_get_avx2` -25% (reader 側悪化なし、
-仮説 2 が定量確認)。次の design space は §8.2 writer batching が筆頭、A2 layout
-分離 / shard-affinity は優先度低に再評価。
+c16s の Step 1–5 計測結果。**採用確定**、合否表 (a)✓/(b)✓ 着地。Step 1 oracle PASS、Step 2 Mops AB T=4 で **+7.9%** (gate +5% PASS、CV<0.013)、Step 3 thread sweep で T=2,4,8,16 全帯 c14s を上回り、Step 4 VTune memory-access で 3 hot line 全て −30% gate 超過 (writer state −39% / visited −65% / Mutex −49% で当初想定 2/3 を上回る 3/3)、Step 5 uarch で Memory Bound 23.0% → 16.5% / CPI 0.526 → 0.449 / Retiring 29.1% → 35.7% と全方向改善、LLC Miss=0 のままなので transfer 削減は L3 内で完結。副次効果: `writer_find` mem stall −50%、`find_get_avx2` −25% (reader 側悪化なし、仮説 2 が定量確認)。次の design space は §8.2 writer batching が筆頭。
 
 ### 2026-05-10-c13s-c16s-path-a-cas-back.md
-c13s/c14s/c15s/c16s 共通 flake (`concurrent_invariants_under_zipf` の "shard X で id 重複")
-の root cause と修正。Path A 最終 store-back が **unconditional** だったため、Path C の
-shift loop が `tags[pos]` を別 id で上書きした後に Path A の遅延 store が VERSION 反転 tag
-で再上書き → `tags[pos-1]` (id I_a) と `tags[pos]` (Path A の I_a) が重複。
-修正: store を CAS (`EMPTY → T_a ^ VERSION`) に変更、CAS 失敗時は visited も含めて何もしない
-(`entries[id]` 更新は shift 後の position 経由で残る、Path C は entries[evict_id] のみ書き換え)。
-debug soak: c16s 5/134 → 0/200、c13s 2/60 → 0/100、c14s 1/60 → 0/100、c15s 0/60 → 0/100。
-quality gates clean、senba lib 非関与なので perf-gate 対象外。c11s/c12s は Path A 無し or
-shift 無しで対象外。別件として Path A vs writer_update_in_place の entries[id] 2 重書き
-race が残存 (id 重複は引き起こさないので本テストでは検出不可、別 test 設計が要る)。
+c13s/c14s/c15s/c16s 共通 flake (`concurrent_invariants_under_zipf` の "shard X で id 重複") の root cause と修正。Path A 最終 store-back が unconditional だったため、Path C shift loop が `tags[pos]` を別 id で上書きした後に Path A の遅延 store が VERSION 反転 tag で再上書き → tag 重複が発生。修正: store を CAS (`EMPTY → T_a ^ VERSION`) に変更、CAS 失敗時は visited も含めて何もしない (entries[id] 更新は shift 後の position 経由で残る)。debug soak: c16s 5/134 → 0/200、c13s 2/60 → 0/100、c14s 1/60 → 0/100、c15s 0/60 → 0/100。別件として Path A vs writer_update_in_place の `entries[id]` 2 重書き race が残存 (id 重複は引き起こさないので本テストでは検出不可、別 test 設計が要る)。
