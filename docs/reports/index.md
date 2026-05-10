@@ -577,3 +577,15 @@ visited -65% / Mutex -49%、当初想定の 2/3 を上回る 3/3)、Step 5 uarch
 副次効果として `writer_find` mem stall -50%、`find_get_avx2` -25% (reader 側悪化なし、
 仮説 2 が定量確認)。次の design space は §8.2 writer batching が筆頭、A2 layout
 分離 / shard-affinity は優先度低に再評価。
+
+### 2026-05-10-c13s-c16s-path-a-cas-back.md
+c13s/c14s/c15s/c16s 共通 flake (`concurrent_invariants_under_zipf` の "shard X で id 重複")
+の root cause と修正。Path A 最終 store-back が **unconditional** だったため、Path C の
+shift loop が `tags[pos]` を別 id で上書きした後に Path A の遅延 store が VERSION 反転 tag
+で再上書き → `tags[pos-1]` (id I_a) と `tags[pos]` (Path A の I_a) が重複。
+修正: store を CAS (`EMPTY → T_a ^ VERSION`) に変更、CAS 失敗時は visited も含めて何もしない
+(`entries[id]` 更新は shift 後の position 経由で残る、Path C は entries[evict_id] のみ書き換え)。
+debug soak: c16s 5/134 → 0/200、c13s 2/60 → 0/100、c14s 1/60 → 0/100、c15s 0/60 → 0/100。
+quality gates clean、senba lib 非関与なので perf-gate 対象外。c11s/c12s は Path A 無し or
+shift 無しで対象外。別件として Path A vs writer_update_in_place の entries[id] 2 重書き
+race が残存 (id 重複は引き起こさないので本テストでは検出不可、別 test 設計が要る)。

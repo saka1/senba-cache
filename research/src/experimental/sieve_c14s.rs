@@ -541,13 +541,28 @@ where
             //   明示の `drop(...)` は不要 (Rust 自動 drop で OK)。
 
             fence(Ordering::Release);
-            // tag を flipped VERSION で復帰: HASH/ID/LIVE は同値、VERSION のみ flip。
-            // reader の `t1 == t2` 検査が cycle を必ず検出する。
+            // tag を flipped VERSION で CAS 復帰。CAS 失敗 = Path C の shift が `tags[pos]` を
+            // 奪った (= `EMPTY` を別 id の next_tag で上書きした)。この場合 `entries[id]` への
+            // 更新は失われない: Path C は entries[evict_id] のみを書き換え、shift は tags の
+            // id 並びを 1 つ詰めるだけなので、`entries[id]` (= 元 `expected_tag` の id 部位) は
+            // shift 後 `tags[pos-k]` 経由で参照される。`unconditional store` を使うと shift
+            // 後の `tags[pos] = T_(a+1)` を `T_a ^ VERSION` で上書きし、`tags[pos-1]` (= 同 id
+            // I_a を持つ) と重複してしまう (concurrent_invariants_under_zipf flake の root cause)。
             let new_tag = expected_tag ^ VERSION;
-            self.tags[pos].store(new_tag, Ordering::Release);
-            // visited SET (sieve_orig の `freq=1` と一致、c11s `writer_update_in_place` と同形)。
-            let (w, b) = Self::vbit(pos);
-            self.visited[w].fetch_or(b, Ordering::Relaxed);
+            let cas_back = self.tags[pos].compare_exchange(
+                EMPTY,
+                new_tag,
+                Ordering::Release,
+                Ordering::Acquire,
+            );
+            if cas_back.is_ok() {
+                // visited SET (sieve_orig の `freq=1` と一致、c11s `writer_update_in_place` と同形)。
+                let (w, b) = Self::vbit(pos);
+                self.visited[w].fetch_or(b, Ordering::Relaxed);
+            }
+            // CAS 失敗時は visited を `pos` に立てない: その slot は今 別 id を指しており、
+            // I_a の visited は shift 後の位置で表現されるべき。立ててしまうと別 entry が
+            // visited と誤認される (sweep で 1 周損する程度の semantic ノイズ、UB ではない)。
             // partial-moved old_entry が scope 末で `old_entry.value` を drop する。
             // ↓ 明示的に drop して timing をはっきりさせる (Path A 完了後、即時 drop)。
             drop(old_entry.value);
