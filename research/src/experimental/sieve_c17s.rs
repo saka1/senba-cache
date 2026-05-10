@@ -34,6 +34,23 @@
 //! `SCAN_MASK = LIVE | HASH_MASK` は ID を除外。VERSION bit 不在のため reader needle
 //! 比較は LIVE + HASH 9 bit 一致で false-positive collision rate が c16s 比 1/2。
 //!
+//! # `V: !Copy` (e.g. `String`) でも健全
+//!
+//! c14s/c16s の reader は seqlock-via-tag だったため、`ManuallyDrop<Entry>` の
+//! `ptr::read` の **前** に writer 進行を検知して escape する仕組みがなく、
+//! 半上書き state の Drop で alloc 破壊 (`free(): unaligned chunk`) を起こす
+//! 設計上の制約があった (= `V: Copy` 限定)。
+//!
+//! c17s は **entry version の load を `ptr::read` の前** に置き、v1 が奇数
+//! (= writer 進行中) なら ptr::read 自体スキップして Retry / Miss を返す。
+//! 半上書き Entry は手元に来ないので ManuallyDrop の drop 経路も発火せず、
+//! `String` 等の非 Copy V でも `bench_concurrent --variant c17s --value
+//! string --op-mix read-heavy` を含む全条件で stable に走る (実測根拠:
+//! `docs/reports/2026-05-11-cseries-string-baseline.md`)。
+//!
+//! これが c17s を library 化候補に位置付ける主要な correctness 根拠であり、
+//! c14s/c16s の Mops 上の利点だけでは置き換えられない構造差分。
+//!
 //! # Path A 同時実行排他
 //!
 //! tag CAS が無いので、entry version の `compare_exchange(v_even, v_even + 1)` が排他

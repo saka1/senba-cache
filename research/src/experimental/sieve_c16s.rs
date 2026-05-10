@@ -7,6 +7,19 @@
 //! 全 pos を表現でき、`vbit(pos) → (word_idx, mask)` は `vbit_mask(pos) → mask`
 //! に縮退する。Path A / Path B/C のロジックは c14s と同型。
 //!
+//! # ⚠ 健全性は `V: Copy` 限定 (c14s 同様)
+//!
+//! reader の seqlock-via-tag は c14s と同じ構造 (tag を v1/v2、間に
+//! `ptr::read<ManuallyDrop<Entry>>` を挟む)。`ptr::read` の **前** に writer
+//! 進行を検知して escape する仕組みがないため、`V: !Copy` で writer と並走
+//! すると半上書きされた entry header (e.g. `String` の (ptr, len, cap)) が
+//! reader の ManuallyDrop drop 経路で `free(壊れた ptr)` に到達して abort
+//! する。`V: Copy` (Drop なし) でのみ健全。
+//!
+//! 詳細・再現条件・root cause は `sieve_c14s` の module doc と
+//! `docs/reports/2026-05-11-cseries-string-baseline.md` §5 を参照。
+//! library 化候補は entry-level seqlock の `sieve_c17s` が引き継ぐ。
+//!
 //! 設計の一次資料: `docs/reports/2026-05-10-c16s-design.md`。
 //! 動機 (3-line picture / Mops 改善 ROI 上位案) は
 //! `docs/reports/2026-05-10-c14s-vtune-write-contention.md` §8.1。

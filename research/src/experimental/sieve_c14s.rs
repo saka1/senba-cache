@@ -1,5 +1,26 @@
 //! `sieve_c14s`: c14s の 3 点 tuning。SIEVE 等価性 / API 表面 / shard 構造は不変。
 //!
+//! # ⚠ 健全性は `V: Copy` 限定
+//!
+//! 本 variant の reader は **seqlock-via-tag** (tag を v1/v2 にして atomic load
+//! → ptr::read entry → tag 再 load 一致確認) で entry を保護するが、`ptr::read`
+//! の **前** に「writer 進行中なら escape する」ガードがない。writer が Path A
+//! で同 slot を書き換え中だと、半上書きされた `ManuallyDrop<Entry<K, V>>` が
+//! reader の手元に来てしまう。
+//!
+//! `V: Copy` (Drop なし) ならゴミ bit を読んでも 5 の tag 再 load で seqlock
+//! fail → Retry / Miss に乗るだけで UB に至らない。**`V: !Copy` の場合は
+//! ManuallyDrop の drop 経路で壊れた header (e.g. `String` の (ptr, len, cap))
+//! を `Drop::drop` に通してしまい、`free(壊れた ptr)` で alloc 破壊 → SIGABRT
+//! に至る** (`free(): unaligned chunk detected in tcache 2` 等)。
+//!
+//! 実験的に再現可: `bench_concurrent --variant c14s --value string --op-mix
+//! read-heavy` を T ≥ 4 で回すと数百ミリ秒で abort する。詳細と root cause は
+//! `docs/reports/2026-05-11-cseries-string-baseline.md` §5。
+//!
+//! 本 variant は research artifact 扱いで **`V: Copy`** (= 整数値・小さい POD)
+//! 専用。library 化候補は entry-level seqlock の `sieve_c17s` が引き継ぐ。
+//!
 //! 1. **find_lockfree AVX2 化** — Path A の scan を c11s reader と同形の SIMD
 //!    (16-lane × 4 chunk) にして uniform write の overhead を縮める
 //! 2. **MAX_RETRY = 1** — Path A の CAS 失敗時に即 Mutex escalate (retry loop 廃止)
