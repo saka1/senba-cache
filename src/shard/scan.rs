@@ -238,3 +238,29 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
         hand
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Slot16, Slot32, Slot64};
+
+    /// Hash spread injectivity across all three brackets, over the full 9-bit
+    /// hash field (was 8 bits before the VISITED-bitmap refactor).
+    #[test]
+    fn needle_spread_is_injective_all_slots() {
+        for slot_id in 0..3 {
+            let mut seen = std::collections::HashSet::new();
+            for h in 0..=511u64 {
+                // `needle_from_hash` reads bits [55, 64) of the input hash.
+                let needle = match slot_id {
+                    0 => Shard::<u64, u64, Slot16>::needle_from_hash(h << 55),
+                    1 => Shard::<u64, u64, Slot32>::needle_from_hash(h << 55),
+                    2 => Shard::<u64, u64, Slot64>::needle_from_hash(h << 55),
+                    _ => unreachable!(),
+                };
+                assert!(seen.insert(needle), "slot {slot_id} hash {h} collides");
+            }
+            assert_eq!(seen.len(), 512);
+        }
+    }
+}

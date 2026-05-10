@@ -386,3 +386,55 @@ impl<K, V, S: SlotSize> Drop for Shard<K, V, S> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Slot16, Slot32, Slot64, SlotSize};
+
+    /// Bit-field exclusivity for Slot32 (default, Entry<u64,u64>=16).
+    /// Shard<u64, u64, Slot32>: ID_SHIFT = 5, ID_MASK = 0x07e0, HASH_MASK = 0x781f.
+    /// (HASH_MASK gained one bit vs the original layout when VISITED moved out
+    /// of the tag into a per-shard u64 bitmap.)
+    #[test]
+    fn bit_layout_exclusivity_slot32() {
+        type I = Shard<u64, u64, Slot32>;
+        assert_eq!(I::ID_SHIFT, 5);
+        assert_eq!(I::ID_MASK, 0x07e0);
+        assert_eq!(I::HASH_MASK, 0x781f);
+        assert_eq!(I::SCAN_MASK, LIVE | I::HASH_MASK);
+        assert_eq!(I::SCAN_MASK, 0xf81f);
+
+        // After dropping VISITED, the only remaining status bit is LIVE; the
+        // 15-bit non-LIVE region is partitioned exactly by ID_MASK + HASH_MASK.
+        assert_eq!(LIVE | I::ID_MASK | I::HASH_MASK, 0xFFFF);
+        assert_eq!(LIVE & I::ID_MASK, 0);
+        assert_eq!(LIVE & I::HASH_MASK, 0);
+        assert_eq!(I::ID_MASK & I::HASH_MASK, 0);
+        assert_eq!(I::HASH_MASK.count_ones(), 9);
+
+        // c-hoist invariant: embedding id into a tag gives `tag & ID_MASK = id × S::SIZE`.
+        for id in 0..MAX_PER_SHARD {
+            let tag_id_field = (id as u16) << I::ID_SHIFT;
+            assert_eq!((tag_id_field & I::ID_MASK) as usize, id * Slot32::SIZE);
+        }
+    }
+
+    #[test]
+    fn bit_layout_slot16() {
+        type I = Shard<u32, u32, Slot16>;
+        assert_eq!(I::ID_SHIFT, 4);
+        assert_eq!(I::ID_MASK, 0x03f0);
+        assert_eq!(I::HASH_MASK, 0x7c0f);
+        assert_eq!(I::HASH_MASK.count_ones(), 9);
+    }
+
+    #[test]
+    fn bit_layout_slot64() {
+        type I = Shard<u64, u64, Slot64>;
+        assert_eq!(I::ID_SHIFT, 6);
+        assert_eq!(I::ID_MASK, 0x0fc0);
+        assert_eq!(I::HASH_MASK, 0x703f);
+        assert_eq!(I::HASH_MASK.count_ones(), 9);
+    }
+}

@@ -46,8 +46,6 @@ pub use iter::{Drain, Iter, IterMut, Keys, Values};
 pub use slot::{Slot16, Slot32, Slot64, SlotSize};
 pub use stats::Stats;
 
-#[cfg(test)]
-pub(crate) use shard::LIVE;
 pub(crate) use shard::{EMPTY, Entry, MAX_PER_SHARD, Shard};
 
 // ---------------- Public type Cache ----------------

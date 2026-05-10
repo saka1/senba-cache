@@ -1,13 +1,23 @@
-//! Unit tests for `senba::Cache`. Split by topic to mirror the module layout:
-//! `slot.rs` covers the `SlotSize` machinery, `stats.rs` the `Stats` counters,
-//! `iter.rs` the iterator types (`Iter` / `IterMut` / `Keys` / `Values` /
-//! `Drain`), and `cache.rs` everything else (insert / get / remove / peek /
-//! retain / clear / oracle parity / clone / Debug / Extend / borrow lookup /
-//! custom hasher / drop counts / SIMD-vs-oracle parity).
+//! Unit tests for `senba::Cache`. Split by **public-API topic** rather than by
+//! internal module — most tests exercise `Cache` end-to-end, and the public
+//! surface is the natural axis for a reader looking up "how does retain
+//! behave?" or "what does peek_mut do?". Genuinely white-box tests
+//! (bit-layout constants, `needle_from_hash` injectivity) live co-located
+//! inside `src/shard/` instead.
 
-mod cache;
+mod clear;
+mod clone_debug;
+mod construction;
+mod eviction;
+mod extend;
+mod get_or_insert;
+mod insert_get;
 mod iter;
-mod slot;
+mod layout;
+mod peek;
+mod remove;
+mod retain;
+mod slot_sizes;
 mod stats;
 
 /// Reference value used by tests that historically assumed the 8-shard default.

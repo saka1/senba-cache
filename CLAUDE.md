@@ -37,7 +37,7 @@ After any code change: `cargo fmt --all` → `cargo clippy --workspace --all-tar
 
 ### Performance regression check (`research/benches/sieve_cache_perf.rs`)
 
-Run when senba library files (`src/lib.rs`, `src/shard.rs`, `src/iter.rs`, `src/slot.rs`, `src/stats.rs`, `src/hash.rs`) change in ways that could plausibly reach the compiled `Cache` hot path (layout, dispatch, new branches in `find` / `insert` / `evict_one_returning_id`):
+Run when senba library files (`src/lib.rs`, `src/shard/`, `src/iter.rs`, `src/slot.rs`, `src/stats.rs`, `src/hash.rs`) change in ways that could plausibly reach the compiled `Cache` hot path (layout, dispatch, new branches in `find` / `insert` / `evict_one_returning_id`):
 
 ```bash
 cargo bench -p senba-research --bench sieve_cache_perf -- --save-baseline before
@@ -69,7 +69,7 @@ uv run --project scripts python scripts/<name>.py
 `Cargo.toml`'s `package.include` allowlists the crates.io payload to:
 
 - `src/lib.rs` — public types (`Cache`, `Drain`, `Stats`, `SlotSize`, `Slot16/32/64`) + sibling-module re-exports
-- `src/shard.rs` — per-shard SIEVE state machine, SIMD `find`, evict / insert / remove
+- `src/shard/` — per-shard SIEVE state machine, SIMD `find`, evict / insert / remove (split into `mod` / `scan` / `state` / `lookup`)
 - `src/iter.rs` — `Iter` / `IterMut` / `Keys` / `Values` / `Drain`
 - `src/slot.rs` — `SlotSize` sealed trait
 - `src/stats.rs` — `Stats`
