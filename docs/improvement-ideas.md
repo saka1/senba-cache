@@ -51,7 +51,8 @@
 | 1 | **§B.1 S4** Slot16 monomorph の `vpbroadcastd` chunk 内再構築の reg-alloc 是正 | Slot16 限定 −4 cy | find-avx2-frontier §S4 |
 | 2 | **§B.1 A2** `len == MAX_PER_SHARD` 専用 4-chunk specialize | chunk 間 branch 3 個削減 | find-avx2-frontier §A2 |
 | 3 | **§D.4 G3-ζ** sub-sharding | T1 uniform read-heavy 16T fail を 1/K 化 | improvement-ideas §G3-ζ |
-| 4 | **§F.2 calibration runs** | perf-gate 自己分散の常時計測 (revert 教訓 T4) | find-avx2-pdep-pext-revert §3 |
+| 4 | **§E.5 α** warmup 分岐に `unlikely` + `#[cold]` outline | hot path layout straight-line 化 (constant fold は出ない、footprint 中立) | improvement-ideas §E.5 |
+| 5 | **§F.2 calibration runs** | perf-gate 自己分散の常時計測 (revert 教訓 T4) | find-avx2-pdep-pext-revert §3 |
 
 (S3 = Shard フィールド並び替え + capacity field 削除は **採択済**、§I 参照: shard-layout-s3-capacity-removal)
 
@@ -65,6 +66,7 @@
 | **§D.3 writer batching** | per-shard 単位で transfer cost を amortize | c14s-vtune §8.2, c16s-results §9 |
 | **§D.5 packed LongAdder visited** | reader visited contention を 8× 圧縮 (HR 副作用ゼロ) | write-contention-design-space §6 |
 | **§E.1 Slot8 ブラケット** | 大 cap で shards を 1/4 圧縮 → instruction footprint / L3 queue 圧迫の直撃緩和 | external-lib-sweep §検証案1, vtune-windows §6 |
+| **§E.5 γ** full-state outlined specialization (`insert_full` / `find_evict_pos_full`) | const fold cascade で hot path 全域から `len` 依存 load / 分岐除去 (机上 5–15%) | improvement-ideas §E.5 |
 
 ### 賭け / 大改修 (2 週間〜)
 
@@ -354,6 +356,44 @@ senba の load +42% / store +44% のうち、削れる成分の精査:
 
 両者 IPC 1.10 で揃っているので命令数 −10pp で cycle −10pp (vtune-windows §6 検証案 5)。
 
+### E.5 full-state specialization (`len == MAX_PER_SHARD` 専用 path)
+
+steady-state (insert ≫ remove) では `len == cap` が常時成立する。この不変条件で **constant propagation cascade** を引き出し、hot path 全域から `len` 依存の分岐 / load を消す案。§B.1 A2 (chunk 数固定) の発展系で、`find_avx2` だけでなく `insert` / `find_evict_pos` まで full 専用 path に分岐させる。
+
+const fold される箇所:
+
+| 場所 | 一般 path | full 仮定 |
+|---|---|---|
+| `find_avx2` chunk 数 | `ceil(len/16)` | `4` (= §B.1 A2) |
+| `find_evict_pos` bounds | `len` | `cap` 定数 |
+| `hand` wrap | `if hand >= len` | `& (cap-1)` (power-of-two AND) |
+| shift-on-evict 長 | `len - pos - 1` | `cap - pos - 1` |
+| visited mask | `live & !visited` | `!visited` |
+| Path A 後の install 分岐 | `if len < cap { install_empty } else { evict_then_install }` | 常に evict-install |
+
+完全 branchless 化が出るのは `find_avx2_full` (4 chunk OR-merge + `tzcnt` 一発、早期 exit 放棄) と `find_evict_pos_full` (visited bitmap の `tzcnt` ベース) のみ。shift-on-evict は `pos` が runtime なので shift 長 dynamic、branchless にはならない。
+
+#### 段階
+
+| 段階 | 内容 | 期待 | 静的 binary 増 |
+|---|---|---|---|
+| α | hot path の warmup 分岐に `unlikely` + warmup 関数を `#[cold]` で outline | LLVM の layout 整形のみ、constant fold は出ない | 中立 (warmup を別 page に逃すだけ) |
+| β | `find_avx2_full` (= §B.1 A2 そのもの) | chunk 数 const、chunk 間 branch 削除 | +1 関数 |
+| γ | `insert_full` / `find_evict_pos_full` を outline、`Shard::is_full()` で dispatch | const fold が hot path 全域に cascade | +2〜3 関数 |
+
+#### 論点
+
+- **dynamic L1I working set**: α で warmup 関数は再ロードされず自然枯死、specialize 前と steady-state working set はほぼ同じ。むしろ steady-state code が straight-line で密になり縮む可能性すらある
+- **静的 binary size**: γ で確実に増加。senba は cache library として caller の hot path に inline される前提なので、**`#[cold]` + outline で full 版だけが caller 側 inline 対象になる形を厳守** — caller 側 I-cache を warmup コードで圧迫しない
+- **§E.4 (命令数削減) との方向対立**: E.4 が「同じ動作を細い命令列に」なのに対し γ は「同じ動作を 2 本の太い命令列に分ける」。footprint cost の符号が逆なので、両者は AB で総合 ROI を比較する関係。α 単独は E.4 と互換 (footprint 中立)
+- **transition cost**: warmup → full の遷移は per-shard で `len == cap` が初成立した 1 回のみ。dispatch は `if shard.len == MAX_PER_SHARD` の 1 cmp、predicted-taken でほぼ free
+- **remove-heavy workload**: per-shard が warmup と full を頻繁に行き来し dispatch ミス + outline cold path 復活。SIEVE 想定の典型 workload (insert ≫ remove) ではないので許容範囲
+- **vtune-windows §6 で観測された +17% instruction footprint との関係**: vtune-windows は静的 footprint 寄りの観測。γ は α/β と違い静的 footprint を増やす方向 = vtune-windows の主因仮説と正面衝突。先に α + β を試して β で頭打ちなら γ に進む順が筋
+
+#### 期待値と判断
+
+机上 5–15% / op、ただし constant fold が cascade するかは LLVM 機嫌依存で実測必須。**第一手は α の `unlikely` hint だけ入れて vtune の front-end bound / I-cache miss 変化を観測**、β は §B.1 A2 として独立着手、γ は α/β の結果次第で go/no-go 判断。
+
 ---
 
 ## §F. 計測軸の拡張
@@ -407,6 +447,9 @@ Zipf cap=32k と ConCat 1M で senba < orig になるのは shard 分散の over
 - §B.2 OQ-V1〜V5 (avx512 §7): V1 が実機で latency 3 cy / 1 uop に乗るか、V2 downclock 実測、AlignedTags `align(32)` → `align(64)` 変更コスト、V5 の false-match 倍増 vs chunk 数 1 化の損益、AVX10 互換
 - §B.3 OQ-4 B1 SoA split の false-match 倍増 (1/256→1/128) が S1+S2 改善幅を相殺するか
 - §E.1 Slot8 採用時の per-shard 6-bit ID 制約緩和の波及範囲
+- §E.5 α 単独で constant fold が hot path 全域に cascade するか (LLVM 機嫌依存、`unlikely` だけで warmup branch が末尾追放されるか asm 確認要)
+- §E.5 γ の静的 binary size 増加が library 利用者にどこまで許容されるか — caller の hot path への inline 戦略 (`#[cold]` outlined だけが inline 対象になるか) を含めた実測必要
+- §E.5 dispatch を per-call (`if shard.len == MAX_PER_SHARD`) にするか per-shard state flag (warmup 完了で関数ポインタ書き換え) にするか — 後者は indirect branch + BTB 汚染のリスク
 - §F.2 WSL2 confound の本丸: Linux THP が `Box<Node>` を 2M page promote している仮説の直接確認
 
 ---
