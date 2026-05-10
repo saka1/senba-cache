@@ -185,6 +185,43 @@ impl senba_research::CacheImpl<u64, u64> for Moka {
         self.inner.contains_key(key)
     }
 }
+/// `lru::LruCache<K,u64>` を `senba_research::CacheImpl` に被せる thin wrapper。
+/// ハッシャは senba::Xxh3Build を `with_hasher` で注入して mini-moka / senba と
+/// hash cost を揃える。`push` を使うことで evicted (K,V) を取れるので CSV の
+/// evictions 列はちゃんと意味を持つ (mini-moka 系と違う点)。
+struct LruAdapter<K> {
+    inner: lru::LruCache<K, u64, senba::Xxh3Build>,
+    cap: usize,
+}
+
+impl<K> senba_research::CacheImpl<K, u64> for LruAdapter<K>
+where
+    K: std::hash::Hash + Eq,
+{
+    fn new(capacity: usize) -> Self {
+        let cap_nz = std::num::NonZeroUsize::new(capacity).expect("capacity > 0");
+        Self {
+            inner: lru::LruCache::with_hasher(cap_nz, senba::Xxh3Build),
+            cap: capacity,
+        }
+    }
+    fn capacity(&self) -> usize {
+        self.cap
+    }
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn get(&mut self, key: &K) -> Option<&u64> {
+        self.inner.get(key)
+    }
+    fn insert(&mut self, key: K, value: u64) -> Option<(K, u64)> {
+        self.inner.push(key, value)
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.inner.contains(key)
+    }
+}
+
 // use senba_research::experimental::sieve_v0::SieveCache as V0;
 // use senba_research::experimental::sieve_v3::SieveCache as V3;
 use senba_research::workload::file;
@@ -678,6 +715,7 @@ fn run_string_keys(args: &Args) {
                 "senba_n2048" => drive_senba_str::<senba::Slot32>(&trace, cap, 2048),
                 "mini_moka" | "mini_moka_sync" => drive_str::<MiniMokaSync<String>>(&trace, cap),
                 "mini_moka_unsync" => drive_str::<MiniMokaUnsync<String>>(&trace, cap),
+                "lru" => drive_str::<LruAdapter<String>>(&trace, cap),
                 other => panic!("unknown variant for twitter-string: {other}"),
             };
             println!(
@@ -807,6 +845,8 @@ fn main() {
                 "mini_moka" | "mini_moka_sync" => drive::<MiniMokaSync<u64>>(&trace, cap),
                 // 単スレ公平比較用: unsync 版 (内部 atomic / write log 無し)。
                 "mini_moka_unsync" => drive::<MiniMokaUnsync<u64>>(&trace, cap),
+                // 単スレ baseline: jeromefroe/lru-rs。Xxh3Build 注入済み。
+                "lru" => drive::<LruAdapter<u64>>(&trace, cap),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
                 "moka" => drive::<Moka>(&trace, cap),
                 // c14s / c15s_* (並行 variant) の HR 計測 — single-thread で十分

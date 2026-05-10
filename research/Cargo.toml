@@ -28,6 +28,9 @@ mini-moka = "0.10"
 # moka 0.12+ は adaptive window sizing が入っており、scan-heavy で window を広げる。
 # mini-moka との比較で「default tuning がボトルネックか / W-TinyLFU 系全般の性質か」を切り分ける。
 moka = { version = "0.12", default-features = false, features = ["sync"] }
+# 単スレ pareto baseline 用 LRU 実装 (jeromefroe/lru-rs)。`with_hasher` で
+# Xxh3Build を差し替えて hash cost を senba / mini-moka と揃える。
+lru = "0.12"
 # c8 (並行 j8) で writer 直列化に使う。std::sync::Mutex より uncontended が速く
 # (~12 ns vs ~25 ns)、PoisonError も持たない。read path は lock-free なので
 # writer 競合域でだけ効く。
