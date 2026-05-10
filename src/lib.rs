@@ -160,7 +160,7 @@ where
     /// Total number of entries the cache can hold across all shards. Set at
     /// construction and never changes.
     pub fn capacity(&self) -> usize {
-        self.shards.iter().map(|s| s.capacity).sum()
+        self.shards.iter().map(|s| s.capacity()).sum()
     }
 
     /// Number of live entries currently held across all shards.

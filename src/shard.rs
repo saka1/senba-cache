@@ -98,32 +98,54 @@ fn shift_visited_down_in_place(visited: &mut u64, pos: usize) {
 }
 
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
+///
+/// **Layout (`#[repr(C)]`, locked by `_LAYOUT_OK` const-eval below).** Field
+/// order is chosen so the read-side hot path (`tags.ptr`, `entries.ptr`, `len`,
+/// `visited`) is fully on cache line 1; `hand` (touched only on evict / new
+/// insert) and the four observability counters live on line 2.
+///
+/// | offset | field    | size | line |
+/// |-------:|----------|-----:|-----:|
+/// | 0      | tags     |   24 | 1    |
+/// | 24     | entries  |   24 | 1    |
+/// | 48     | len      |    8 | 1    |
+/// | 56     | visited  |    8 | 1    |
+/// | 64     | hand     |    8 | 2    |
+/// | 72..   | counters | 4×8  | 2    |
+///
+/// Total = 104 B. `capacity` is intentionally **not** a field: it equals
+/// `entries.len()` (set in `new`, never resized) and is exposed via
+/// `Shard::capacity()` whose load lives on the same line as `entries.ptr`.
+#[repr(C)]
 pub(crate) struct Shard<K, V, S: SlotSize> {
-    pub(crate) capacity: usize,
     /// Parallel array #1: tag array. Size = `round_up(capacity, LANE).max(LANE)`.
     /// Under I4' there are never holes in `tags[0..len]`, so no slack past `capacity`
     /// is needed — the LANE-aligned remainder beyond `len` is permanent EMPTY pad.
     /// Stored as `Vec<TagsChunk>` so the start address is 32-byte aligned (each
     /// chunk = one AVX2 lane); derefs as `&[u16]` for the scalar paths.
     pub(crate) tags: AlignedTags,
-    /// Parallel array #2: entries arena. Size = `capacity` (no slack).
+    /// Parallel array #2: entries arena. Size = `capacity` (no slack), set in
+    /// `new` via `resize_with` and never resized afterwards. `entries.len()` is
+    /// therefore the per-shard capacity (see `Shard::capacity()`).
     /// Indexed by the 6-bit id embedded in each tag.
     /// `sizeof(S::Storage<Entry<K, V>>) == S::SIZE` is guaranteed by `_STORAGE_SIZE_OK`.
     pub(crate) entries: Vec<MaybeUninit<S::Storage<Entry<K, V>>>>,
-    /// SIEVE hand cursor (`0..=len`), sweeping over `tags[0..len]`.
-    pub(crate) hand: usize,
     /// Number of currently live entries (= number of live tags = first index past
     /// the live region in `tags`).
     pub(crate) len: usize,
     /// Per-slot VISITED bits, one per position in `tags[0..len]`. Bit `i` is set
     /// iff the entry at `tags[i]` was promoted (hit) since its last sweep.
-    /// `MAX_PER_SHARD == 64` ⟹ a single `u64` suffices, and it rides this same
-    /// control cache line as `hand`/`len`/`hits`/... so the on-hit `|=` and the
-    /// `find_evict_pos` bit-twiddle pay no extra line.
+    /// `MAX_PER_SHARD == 64` ⟹ a single `u64` suffices.
     /// Was previously `tag & VISITED` packed into the `u16` tag; promoting it
     /// out reclaimed one bit for the hash field (8 → 9 bits) and turned the
     /// SIEVE victim search from `O(len)` `scan_evict` into a single bit-find.
+    /// Co-located with `len` on cache line 1 so the on-hit `|=` and the
+    /// `find_evict_pos` bit-twiddle pay no extra line beyond the find scan.
     pub(crate) visited: u64,
+    /// SIEVE hand cursor (`0..=len`), sweeping over `tags[0..len]`. Only touched
+    /// on evict / new-entry insert, so it sits on line 2 — find-only callers
+    /// (`get` / `contains`) never load this line.
+    pub(crate) hand: usize,
     /// Per-shard observability counters. Plain `u64` rather than `AtomicU64`
     /// because every mutating op already requires `&mut self`; on x86 a plain
     /// `add [mem], 1` is one uop on a dependency chain disjoint from the
@@ -163,6 +185,29 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
         std::mem::align_of::<TagsChunk>() == 32,
         "senba::Cache: TagsChunk must be 32-byte aligned for vmovdqa"
     );
+
+    /// Const-eval: read-side hot path (`tags`, `entries`, `len`, `visited`)
+    /// must fit on cache line 1 (`offset < 64`), and `hand` must be on line 2.
+    /// This is the load-bearing cache-layout contract for `Shard` — see the
+    /// struct doc table above. `Vec<MaybeUninit<S::Storage<...>>>` is 24 B
+    /// (ptr/len/cap) for any `K, V, S` so the tail offsets are independent of
+    /// the type parameters.
+    const _LAYOUT_OK: () = {
+        assert!(std::mem::offset_of!(Self, tags) == 0);
+        assert!(std::mem::offset_of!(Self, entries) == 24);
+        assert!(std::mem::offset_of!(Self, len) == 48);
+        assert!(std::mem::offset_of!(Self, visited) == 56);
+        assert!(std::mem::offset_of!(Self, hand) == 64);
+    };
+
+    /// Per-shard capacity. Equals `entries.len()` because `entries` is sized to
+    /// `capacity` in `new` and never resized. The load shares cache line 1
+    /// with `tags.ptr` and `entries.ptr`, so callers on the hot path pay no
+    /// extra line.
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Bit position of the id field (6 bits) within a tag.
     /// Chosen as `log2(S::SIZE)` so that `id << ID_SHIFT == id × S::SIZE`.
@@ -223,7 +268,7 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
         let _: () = Self::_STORAGE_SIZE_OK;
         let off = (tag.get() & Self::ID_MASK) as usize;
         debug_assert!(tag.get() & LIVE != 0);
-        debug_assert!(off < self.capacity * S::SIZE);
+        debug_assert!(off < self.capacity() * S::SIZE);
         unsafe { (self.entries.as_ptr() as *const u8).add(off) as *const Entry<K, V> }
     }
 
@@ -234,7 +279,7 @@ impl<K, V, S: SlotSize> Shard<K, V, S> {
         let _: () = Self::_STORAGE_SIZE_OK;
         let off = (tag.get() & Self::ID_MASK) as usize;
         debug_assert!(tag.get() & LIVE != 0);
-        debug_assert!(off < self.capacity * S::SIZE);
+        debug_assert!(off < self.capacity() * S::SIZE);
         unsafe { (self.entries.as_mut_ptr() as *mut u8).add(off) as *mut Entry<K, V> }
     }
 }
@@ -248,6 +293,7 @@ where
         let _: () = Self::_SIZE_OK;
         let _: () = Self::_STORAGE_SIZE_OK;
         let _: () = Self::_TAGSCHUNK_ALIGN_OK;
+        let _: () = Self::_LAYOUT_OK;
 
         assert!(capacity > 0, "capacity must be > 0");
         assert!(
@@ -261,12 +307,11 @@ where
         let mut entries = Vec::with_capacity(capacity);
         entries.resize_with(capacity, MaybeUninit::uninit);
         Self {
-            capacity,
             tags: AlignedTags::zeroed(order_cap),
             entries,
-            hand: 0,
             len: 0,
             visited: 0,
+            hand: 0,
             hits: 0,
             misses: 0,
             insertions: 0,
@@ -608,7 +653,7 @@ where
         // steady state evicts at the SIEVE-chosen position, shifts the tail down,
         // and writes the new tag at `tags[len-1]` (the head end). Both paths end
         // with `tags[0..len]` contiguously LIVE, so no compaction is ever needed.
-        let (evicted, write_pos, entry_id) = if self.len < self.capacity {
+        let (evicted, write_pos, entry_id) = if self.len < self.capacity() {
             let pos = self.len;
             let id = self.len as u16;
             self.len += 1;
@@ -660,7 +705,7 @@ where
     /// single instruction. Each clearing pass becomes one `&= !mask`. The old
     /// linear walk in `scan_evict` is gone.
     fn find_evict_pos(&mut self) -> usize {
-        debug_assert!(self.len > 0 && self.len == self.capacity);
+        debug_assert!(self.len > 0 && self.len == self.capacity());
         if self.hand >= self.len {
             self.hand = 0;
         }
@@ -980,7 +1025,7 @@ where
             ));
         }
 
-        let mut new = Shard::<K, V, S>::new(self.capacity);
+        let mut new = Shard::<K, V, S>::new(self.capacity());
         // tags arrays have identical length (both = round_up(capacity, LANE).max(LANE)).
         new.tags.copy_from_slice(&self.tags);
         new.hand = self.hand;
