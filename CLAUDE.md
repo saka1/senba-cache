@@ -45,7 +45,7 @@ cargo bench -p senba-research --bench sieve_cache_perf -- --save-baseline before
 cargo bench -p senba-research --bench sieve_cache_perf -- --baseline before
 ```
 
-The bench has 6 scenarios covering `SlotSize` × op-mix × skew (full list in the bench file header). Treat **>5% regression on any scenario** as a commit-blocker. If the perf-gate and a Twitter cross-check (`research/src/bin/bench --source twitter`) disagree, the regression is likely scenario-specific layout noise — see `docs/reports/2026-05-07-aligned-tags-load.md` for an example.
+The bench has 8 scenarios covering `SlotSize` × op-mix × skew × value-type (full list in the bench file header). Treat **>5% regression on any scenario** as a commit-blocker. If the perf-gate and a Twitter cross-check (`research/src/bin/bench --source twitter`) disagree, the regression is likely scenario-specific layout noise — see `docs/reports/2026-05-07-aligned-tags-load.md` for an example.
 
 Skipping is fine for changes that demonstrably cannot reach the compiled hot path (doc / test / clippy fixes). The perf-gate is the **stable contract for `senba::Cache`** and is intentionally separated from `research/benches/micro.rs` (the experimental playground, freely rewritten as variants come and go); editing the perf-gate invalidates prior saved baselines.
 

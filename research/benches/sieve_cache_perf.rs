@@ -8,13 +8,13 @@
 //! Design constraints (intentionally narrow — see `benches/micro.rs` for the
 //! experimental playground that gets rewritten freely):
 //!
-//! - **Small scenario set**, so the whole run fits in ~25–30s.
+//! - **Small scenario set**, so the whole run fits in ~35–40s.
 //! - **Fixed seeds and trace lengths**, so two runs on the same machine are
 //!   directly comparable via `--save-baseline` / `--baseline`.
 //! - **Public API only** (`Cache<K, V, S>`). No probing into `Shard`,
 //!   no module-private tricks. If a refactor breaks the public path, this
 //!   bench notices.
-//! - **Six code paths covered**:
+//! - **Eight code paths covered**:
 //!     1. insert-only on `u64,u64,Slot32` — the hot warm-up + eviction loop.
 //!     2. mixed 50/50 get+insert on `u64,u64,Slot32` — exercises the SIMD
 //!        `find` path and the visited-bit set.
@@ -28,6 +28,15 @@
 //!     6. mixed 50/50 at Zipf skew 0.7 on `u64,u64,Slot32` — eviction-
 //!        dominant regime where cache-layout effects on `tags[]` are most
 //!        visible (low locality, many distinct keys).
+//!     7. insert-only on `u64,String,Slot32` — Slot32-natural string-cache
+//!        workload (8B key + 24B `String` header fits the 32B stride
+//!        exactly). Isolates Slot32 entry footprint + drop-on-eviction
+//!        cost from scenario 3's Slot64 stride, so library-level Slot32
+//!        regressions on common string-value caches are caught directly.
+//!     8. get-heavy 90/10 on `u64,String,Slot32` — read-dominant Slot32-
+//!        natural counterpart to scenario 7. `find_avx2` SIMD scan plus
+//!        `String` clone on hits — closest perf-gate proxy for real-world
+//!        Slot32 read paths.
 //!
 //! Usage (also documented in CLAUDE.md):
 //!
@@ -73,7 +82,8 @@ fn perf_group<'a>(
     // Tuned for low-variance regression checking, not exploration. The numbers
     // below were picked so that running the bench twice back-to-back with no
     // code change reports "within noise threshold" on all three scenarios on a
-    // typical WSL2 / x86_64 dev machine. Total runtime ≈ 25–30s.
+    // typical WSL2 / x86_64 dev machine. Total runtime ≈ 35–40s with eight
+    // scenarios.
     //
     // - `sample_size(60)`: 2× the criterion default at this measurement_time,
     //   roughly halving the CI width on the median (sqrt(N) scaling).
@@ -271,6 +281,66 @@ fn bench_mixed_lowskew_u64(c: &mut Criterion) {
     g.finish();
 }
 
+/// Scenario 7: insert-only on `Cache<u64, String, Slot32, 8>`.
+/// Slot32-natural workload: `(u64, String)` fits the 32B stride exactly
+/// (8B key + 24B `String` header), so this is the layout most real
+/// string-cache deployments hit. Exercises drop-on-eviction at Slot32
+/// stride — complements scenario 3 (Slot64) by isolating the "Slot32 +
+/// heavy value" cost from the Slot64 stride.
+fn bench_insert_u64_string(c: &mut Criterion) {
+    let mut g = perf_group(c, "sieve_cache_perf/insert_u64_string");
+    let int_trace = zipf_trace();
+    let trace: Vec<(u64, String)> = int_trace.iter().map(|&k| (k, format!("v{k:08}"))).collect();
+    g.throughput(Throughput::Elements(trace.len() as u64));
+    g.bench_with_input(BenchmarkId::from_parameter(CAP_STR), &trace, |b, trace| {
+        b.iter_batched(
+            || Cache::<u64, String, Slot32>::with_shards(CAP_STR, 8),
+            |mut c| {
+                for (k, v) in trace {
+                    c.insert(black_box(*k), v.clone());
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+}
+
+/// Scenario 8: 90% get / 10% insert on `Cache<u64, String, Slot32, 8>`.
+/// Read-heavy on the Slot32-natural string-cache layout: `find_avx2`
+/// SIMD scan plus `String` clone on hits. Pre-warmed so steady-state
+/// reads dominate. Closest perf-gate proxy for real-world Slot32 read
+/// paths — regressions in Slot32 entry footprint that scenario 5
+/// (Slot32 Copy values) misses surface here via the value-clone path.
+fn bench_get_heavy_u64_string(c: &mut Criterion) {
+    let mut g = perf_group(c, "sieve_cache_perf/get_heavy_u64_string");
+    let int_trace = zipf_trace();
+    let trace: Vec<(u64, String)> = int_trace.iter().map(|&k| (k, format!("v{k:08}"))).collect();
+    g.throughput(Throughput::Elements(trace.len() as u64));
+    g.bench_with_input(BenchmarkId::from_parameter(CAP_STR), &trace, |b, trace| {
+        b.iter_batched(
+            || {
+                let mut c = Cache::<u64, String, Slot32>::with_shards(CAP_STR, 8);
+                for (k, v) in trace.iter().take(CAP_STR * 2) {
+                    c.insert(*k, v.clone());
+                }
+                c
+            },
+            |mut c| {
+                for (i, (k, v)) in trace.iter().enumerate() {
+                    if i % 10 == 0 {
+                        c.insert(black_box(*k), v.clone());
+                    } else {
+                        black_box(c.get(k));
+                    }
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+}
+
 criterion_group!(
     perf,
     bench_insert_u64,
@@ -279,5 +349,7 @@ criterion_group!(
     bench_insert_u32_slot16,
     bench_get_heavy_u64,
     bench_mixed_lowskew_u64,
+    bench_insert_u64_string,
+    bench_get_heavy_u64_string,
 );
 criterion_main!(perf);
