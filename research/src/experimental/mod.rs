@@ -4,6 +4,7 @@
 //! is [`sieve_orig`]. This module collects the historical / exploratory
 //! variants kept around for benchmark and design comparison.
 
+pub mod concurrent_test_suite;
 pub mod sieve_c10s;
 pub mod sieve_c11s;
 pub mod sieve_c12s;
@@ -47,4 +48,32 @@ pub trait CacheImpl<K, V> {
     fn insert(&mut self, key: K, value: V) -> Option<(K, V)>;
 
     fn contains_key(&self, key: &K) -> bool;
+}
+
+/// Shared interface for the concurrent SIEVE variants
+/// (`sieve_c14s` / `sieve_c15s` / `sieve_c16s` and successors). Mirrors
+/// [`CacheImpl`] but for `&self` interior-mutability designs that return
+/// `Option<V>` (clone) instead of `Option<&V>`. Used by
+/// [`crate::experimental::concurrent_test_suite`] to drive variant-agnostic
+/// scenarios.
+///
+/// `Send + Sync` is required so that future multi-threaded harness scenarios
+/// (`Arc<Self>` fanned out across `std::thread::scope`) can be added without
+/// changing the bound. The current 8 scenarios are single-threaded.
+pub trait ConcurrentCacheImpl<K, V>: Send + Sync
+where
+    K: std::hash::Hash + Eq + Copy + Send + Sync + 'static,
+    V: Copy + Send + Sync + 'static,
+{
+    fn with_capacity(capacity: usize) -> Self
+    where
+        Self: Sized;
+    fn capacity(&self) -> usize;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn contains_key(&self, key: &K) -> bool;
+    fn get(&self, key: &K) -> Option<V>;
+    fn insert(&self, key: K, value: V) -> Option<(K, V)>;
 }

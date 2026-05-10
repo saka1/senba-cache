@@ -1101,48 +1101,28 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    const TEST_SHARDS: usize = DEFAULT_SHARDS;
-
-    #[test]
-    fn cache_initially_empty() {
-        let cache: ConcurrentSieveCache<i32, i32> = ConcurrentSieveCache::new(TEST_SHARDS * 4);
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.capacity(), TEST_SHARDS * 4);
-        assert!(cache.is_empty());
+    impl crate::experimental::ConcurrentCacheImpl<u64, u64> for ConcurrentSieveCache<u64, u64> {
+        fn with_capacity(capacity: usize) -> Self {
+            Self::new(capacity)
+        }
+        fn capacity(&self) -> usize {
+            self.capacity()
+        }
+        fn len(&self) -> usize {
+            self.len()
+        }
+        fn contains_key(&self, key: &u64) -> bool {
+            self.contains_key(key)
+        }
+        fn get(&self, key: &u64) -> Option<u64> {
+            self.get(key)
+        }
+        fn insert(&self, key: u64, value: u64) -> Option<(u64, u64)> {
+            self.insert(key, value)
+        }
     }
 
-    #[test]
-    fn insert_then_get() {
-        let cache: ConcurrentSieveCache<i32, i32> = ConcurrentSieveCache::new(TEST_SHARDS * 4);
-        assert!(cache.insert(1, 10).is_none());
-        assert_eq!(cache.get(&1), Some(10));
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn get_missing_returns_none() {
-        let cache: ConcurrentSieveCache<i32, i32> = ConcurrentSieveCache::new(TEST_SHARDS * 4);
-        cache.insert(1, 10);
-        assert_eq!(cache.get(&2), None);
-    }
-
-    #[test]
-    fn contains_key_reflects_insertions() {
-        let cache: ConcurrentSieveCache<i32, i32> = ConcurrentSieveCache::new(TEST_SHARDS * 4);
-        assert!(!cache.contains_key(&1));
-        cache.insert(1, 10);
-        assert!(cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-    }
-
-    #[test]
-    fn insert_existing_key_updates_value() {
-        let cache: ConcurrentSieveCache<i32, i32> = ConcurrentSieveCache::new(TEST_SHARDS * 4);
-        cache.insert(1, 10);
-        assert!(cache.insert(1, 20).is_none());
-        assert_eq!(cache.get(&1), Some(20));
-        assert_eq!(cache.len(), 1);
-    }
+    crate::concurrent_suite!(ConcurrentSieveCache<u64, u64>);
 
     #[test]
     fn evicts_oldest_when_full_and_unvisited() {
@@ -1176,34 +1156,6 @@ mod tests {
         cache.get(&2);
         let evicted = cache.insert(3, 30);
         assert_eq!(evicted, Some((1, 10)));
-    }
-
-    #[test]
-    fn total_capacity_is_respected_under_churn() {
-        let cap = TEST_SHARDS * 16;
-        let cache: ConcurrentSieveCache<u64, u64> = ConcurrentSieveCache::new(cap);
-        for k in 0..10_000u64 {
-            cache.insert(k, k);
-            assert!(cache.len() <= cap);
-        }
-        assert_eq!(cache.len(), cap);
-    }
-
-    #[test]
-    fn churn_keeps_a_full_capacity_set() {
-        let cap = TEST_SHARDS * 16;
-        let cache: ConcurrentSieveCache<u64, u64> = ConcurrentSieveCache::new(cap);
-        for k in 0..50_000u64 {
-            cache.insert(k, k * 3);
-        }
-        assert_eq!(cache.len(), cap);
-        let mut alive = 0;
-        for k in 0..50_000u64 {
-            if cache.get(&k) == Some(k * 3) {
-                alive += 1;
-            }
-        }
-        assert_eq!(alive, cap);
     }
 
     #[test]
@@ -1403,20 +1355,6 @@ mod tests {
             if let Some(v) = cache.get(&k) {
                 assert_eq!(v, k, "key {k} の value が破壊されている");
             }
-        }
-    }
-
-    /// 直後の self-get で確実に hit する (release ordering の確認)。
-    #[test]
-    fn self_insert_self_get_visibility() {
-        let cache: ConcurrentSieveCache<u64, u64, 8> = ConcurrentSieveCache::new(256);
-        for k in 0..200u64 {
-            cache.insert(k, k * 17);
-            assert_eq!(
-                cache.get(&k),
-                Some(k * 17),
-                "直後の self-get で miss: k={k}"
-            );
         }
     }
 
