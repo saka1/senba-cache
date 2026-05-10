@@ -55,6 +55,7 @@ use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c15s::ConcurrentSieveCache as ConcurrentSieveC15S;
 use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as ConcurrentSieveC16S;
 use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
+use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
 use senba_research::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
@@ -156,6 +157,23 @@ where
     #[inline]
     fn insert(&self, key: u64, value: V) {
         let _ = ConcurrentSieveC17S::insert(self, key, value);
+    }
+}
+
+impl<V, const S: usize> ConcCache<V> for ConcurrentSieveC18S<u64, V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC18S::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC18S::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = ConcurrentSieveC18S::insert(self, key, value);
     }
 }
 
@@ -375,8 +393,9 @@ fn parse_args() -> Args {
                     | "c15s_4"
                     | "c16s"
                     | "c17s"
+                    | "c18s"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s)"
         );
     }
     // c8 は V: Copy を要求するため string 値と組み合わせ不可。早期に弾く。
@@ -569,7 +588,7 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     // CSV を tidy に保つため、c8/c9 以外は 0 を入れる。集計時は variant でフィルタする想定。
     let shards_col = if matches!(
         variant,
-        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s"
+        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s" | "c18s"
     ) {
         args.shards
     } else {
@@ -636,6 +655,7 @@ fn main() {
                 ("c14s", v) => run_c14s(&args, v),
                 ("c16s", v) => run_c16s(&args, v),
                 ("c17s", v) => run_c17s(&args, v),
+                ("c18s", v) => run_c18s(&args, v),
                 ("c15s_16", v) => run_c15s::<4>(&args, v),
                 ("c15s_8", v) => run_c15s::<3>(&args, v),
                 ("c15s_4", v) => run_c15s::<2>(&args, v),
@@ -699,6 +719,20 @@ fn run_c17s(args: &Args, v: ValueKind) -> TrialResult {
     match v {
         ValueKind::U64 => run_trial::<u64, ConcurrentSieveC17S<u64, u64, 64>>(args),
         ValueKind::String => run_trial::<String, ConcurrentSieveC17S<u64, String, 64>>(args),
+    }
+}
+
+/// c18s も SHARDS=64 固定 (Phase 1 設計)。c17s から `Entry::version` を別配列に逃がして
+/// Slot16 復帰、`path_c_epoch` を ShardHot から ReaderState に移動 (G2-α-2、
+/// `docs/reports/2026-05-12-c18s-design.md`)。
+fn run_c18s(args: &Args, v: ValueKind) -> TrialResult {
+    assert_eq!(
+        args.shards, 64,
+        "c18s requires --shards 64 (Phase 1 fixed design)"
+    );
+    match v {
+        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC18S<u64, u64, 64>>(args),
+        ValueKind::String => run_trial::<String, ConcurrentSieveC18S<u64, String, 64>>(args),
     }
 }
 
