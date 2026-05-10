@@ -1,0 +1,34 @@
+[07:19:39] FAILED (rc=134): c14s T=4 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:19:39] FAILED (rc=134): c16s T=4 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:19:53] FAILED (rc=134): c14s T=8 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:19:53] FAILED (rc=134): c16s T=8 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:19:56] FAILED (rc=134): c14s T=16 op_mix=gim skew=1.0 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+c14s,0,gim,string,1,100000,16,4096,64,40000000,896206372,44.6326,0.7196,304.97,840.43,0.0105
+  [c14s] trial 0 per-thread Mops: [2.819, 2.790, 2.796, 2.901, 2.794, 2.829, 2.884, 2.835, 2.827, 2.824, 2.813, 2.845, 2.858, 2.836, 2.814, 2.821]
+free(): unaligned chunk detected in tcache 2
+---
+[07:19:57] FAILED (rc=134): c16s T=16 op_mix=gim skew=1.0 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:20:00] FAILED (rc=134): c14s T=16 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
+[07:20:01] FAILED (rc=134): c16s T=16 op_mix=read-heavy skew=1.4 value=string
+variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv
+free(): unaligned chunk detected in tcache 2
+---
