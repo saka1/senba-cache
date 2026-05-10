@@ -47,6 +47,7 @@ use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSi
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
 use senba_research::experimental::sieve_c15s::ConcurrentSieveCache as ConcurrentSieveC15S;
 use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as ConcurrentSieveC16S;
+use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
@@ -103,6 +104,20 @@ impl<const S: usize> ConcCache for ConcurrentSieveC16S<u64, u64, S> {
     #[inline]
     fn insert(&self, key: u64, value: u64) {
         let _ = ConcurrentSieveC16S::insert(self, key, value);
+    }
+}
+
+impl<const S: usize> ConcCache for ConcurrentSieveC17S<u64, u64, S> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC17S::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC17S::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveC17S::insert(self, key, value);
     }
 }
 
@@ -282,8 +297,9 @@ fn parse_args() -> Args {
                     | "c15s_8"
                     | "c15s_4"
                     | "c16s"
+                    | "c17s"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s)"
         );
     }
 
@@ -465,7 +481,7 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     // CSV を tidy に保つため、c8/c9 以外は 0 を入れる。集計時は variant でフィルタする想定。
     let shards_col = if matches!(
         variant,
-        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s"
+        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s"
     ) {
         args.shards
     } else {
@@ -516,6 +532,7 @@ fn main() {
                 "mini_moka" => run_trial::<mini_moka::sync::Cache<u64, u64>>(&args),
                 "c14s" => run_c14s(&args),
                 "c16s" => run_c16s(&args),
+                "c17s" => run_c17s(&args),
                 "c15s_16" => run_c15s::<4>(&args),
                 "c15s_8" => run_c15s::<3>(&args),
                 "c15s_4" => run_c15s::<2>(&args),
@@ -561,6 +578,16 @@ fn run_c16s(args: &Args) -> TrialResult {
         "c16s requires --shards 64 (Phase 1 fixed design)"
     );
     run_trial::<ConcurrentSieveC16S<u64, u64, 64>>(args)
+}
+
+/// c17s も SHARDS=64 固定 (Phase 1 設計)。entry-level seqlock + tag VERSION bit 削除で
+/// G2-α-1 (`docs/reports/2026-05-11-c17s-design.md`)。
+fn run_c17s(args: &Args) -> TrialResult {
+    assert_eq!(
+        args.shards, 64,
+        "c17s requires --shards 64 (Phase 1 fixed design)"
+    );
+    run_trial::<ConcurrentSieveC17S<u64, u64, 64>>(args)
 }
 
 fn run_c15s<const SAMPLE_BITS: u32>(args: &Args) -> TrialResult {

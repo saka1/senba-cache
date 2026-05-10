@@ -84,6 +84,7 @@ use senba_research::experimental::sieve_c8::ConcurrentSieveCache as ConcurrentSi
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
 use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as ConcurrentSieveC16S;
+use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::workload::zipf::ZipfGen;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,7 @@ enum Variant {
     C9,
     C14s,
     C16s,
+    C17s,
 }
 
 impl Variant {
@@ -101,7 +103,8 @@ impl Variant {
             "c9" => Variant::C9,
             "c14s" => Variant::C14s,
             "c16s" => Variant::C16s,
-            other => panic!("--variant must be c8|c9|c14s|c16s, got: {other}"),
+            "c17s" => Variant::C17s,
+            other => panic!("--variant must be c8|c9|c14s|c16s|c17s, got: {other}"),
         }
     }
     fn as_str(self) -> &'static str {
@@ -110,6 +113,7 @@ impl Variant {
             Variant::C9 => "c9",
             Variant::C14s => "c14s",
             Variant::C16s => "c16s",
+            Variant::C17s => "c17s",
         }
     }
 }
@@ -162,7 +166,7 @@ fn parse_args() -> Args {
             "--shards" => shards = val().parse().expect("--shards usize"),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_vtune_concurrent --variant {{c8,c9,c14s,c16s}} \
+                    "usage: bench_vtune_concurrent --variant {{c8,c9,c14s,c16s,c17s}} \
                      --threads N --cap N --keys N --skew F --warmup N --ops N \
                      --seed N [--shards N]\n\
                      defaults: variant=c14s threads=4 cap=4096 keys=100000 \
@@ -207,6 +211,12 @@ fn parse_args() -> Args {
         assert_eq!(
             shards, 64,
             "c16s requires --shards 64 (Phase 1 fixed design)"
+        );
+    }
+    if matches!(variant, Variant::C17s) {
+        assert_eq!(
+            shards, 64,
+            "c17s requires --shards 64 (Phase 1 fixed design)"
         );
     }
     // c8 / c9 / c14s は全部 6-bit entry ID で per-shard ≤ 64。
@@ -289,6 +299,20 @@ impl<const S: usize> ConcCache for ConcurrentSieveC16S<u64, u64, S> {
     #[inline]
     fn insert(&self, key: u64, value: u64) {
         let _ = ConcurrentSieveC16S::insert(self, key, value);
+    }
+}
+
+impl<const S: usize> ConcCache for ConcurrentSieveC17S<u64, u64, S> {
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveC17S::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveC17S::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveC17S::insert(self, key, value);
     }
 }
 
@@ -408,6 +432,7 @@ fn main() {
         Variant::C9 => run::<ConcurrentSieveC9<u64, u64>>(&args),
         Variant::C14s => run::<ConcurrentSieveC14S<u64, u64, 64>>(&args),
         Variant::C16s => run::<ConcurrentSieveC16S<u64, u64, 64>>(&args),
+        Variant::C17s => run::<ConcurrentSieveC17S<u64, u64, 64>>(&args),
     };
 
     let total = s.hits + s.misses;
