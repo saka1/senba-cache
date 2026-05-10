@@ -24,7 +24,7 @@
 | c8 系列 (j8 並行版: read lock-free + write per-shard Mutex) | c8-design, c8-vs-moka-thread-sweep |
 | c9 系列 (senba::Cache 並行版: per-shard Mutex<Shard> wrap、V: Clone) | c9-design, c8-vs-c9-thread-sweep |
 | 単一 shard testbed (c10/c11/c12/c13 設計の出発点) | single-shard-baseline, c10s-vs-c8-baseline, c11s-conditional-set, c12s-cas-slot-claim-design, c12s-cas-slot-claim, c13s-sweep |
-| 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention |
+| 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention, c16s-design, c16s-results |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -564,3 +564,16 @@ c9/c14s/c16s 比較。合格 gate は (a) Mops +5% (T=4 skew=1.0 c14s 比) と (
 + len.load が writer Mutex flip と同 line で衝突) が崩れたら次は A2 layout (writer/reader
 分離) を c17s 候補として持ち越す。スコープ外: writer batching (§8.2)、senba lib 取り込み、
 moderate skew sweep。
+
+### 2026-05-10-c16s-results.md
+c16s 設計 (上記) の Step 1–5 計測結果。**採用確定**、設計 §6 合否表 (a)✓/(b)✓
+位置に着地。Step 1 oracle PASS (全構成 diff=0)、Step 2 Mops AB T=4 で c16s 35.38 /
+c14s 32.79 = **+7.9%** (gate (a) ≥ +5% PASS、CV<0.013)、Step 3 thread sweep で
+c16s が T=2,4,8,16 全帯 c14s を上回り (+4.2/+6.5/+5.6/+3.2%) 異常パターン無し、
+Step 4 VTune memory-access で 3 hot line 全て -30% gate を超過 (writer state -39% /
+visited -65% / Mutex -49%、当初想定の 2/3 を上回る 3/3)、Step 5 uarch-exploration
+で Memory Bound P-core 23.0% → 16.5%、CPI 0.526 → 0.449、Retiring 29.1% → 35.7%
+と全方向で改善、LLC Miss=0 のままなので transfer 削減は L3 内で完結 (DRAM 起因なし)。
+副次効果として `writer_find` mem stall -50%、`find_get_avx2` -25% (reader 側悪化なし、
+仮説 2 が定量確認)。次の design space は §8.2 writer batching が筆頭、A2 layout
+分離 / shard-affinity は優先度低に再評価。

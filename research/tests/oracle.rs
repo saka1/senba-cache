@@ -391,6 +391,46 @@ fn c13s_1shard_matches_orig_on_synthetic_zipf() {
     );
 }
 
+/// **c16s は SIEVE 等価**: c14s と同型のロジック (Path A lock-free / Path B/C
+/// Mutex 配下 shift-on-evict) で、変更箇所は per-shard layout (`ShardHot` への
+/// hot field 集約 + visited word index 縮退) のみ。state machine は不変なので
+/// `sieve_orig` と eviction stream / cache contents が一致する。
+///
+/// 設計詳細は `docs/reports/2026-05-10-c16s-design.md` 参照。
+#[test]
+fn c16s_1shard_matches_orig_on_synthetic_zipf() {
+    use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as C16s;
+    let mut total_diff = 0usize;
+    let mut total_ops = 0usize;
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace: Vec<u64> = ZipfGen::new(skew, 10_000, 42).take(200_000).collect();
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: C16s<u64, u64, 1> = C16s::new(cap);
+        for k in &trace {
+            a.insert(*k, *k);
+            b.insert(*k, *k);
+        }
+        let mut diff = 0usize;
+        for &k in &trace {
+            if a.get(&k).copied() != b.get(&k) {
+                diff += 1;
+            }
+        }
+        eprintln!(
+            "[c16s vs orig] skew={skew} cap={cap}: diff={diff}/{} ({:.4}%)",
+            trace.len(),
+            100.0 * diff as f64 / trace.len() as f64
+        );
+        total_diff += diff;
+        total_ops += trace.len();
+    }
+    assert_eq!(
+        total_diff, 0,
+        "c16s が sieve_orig と divergent ({total_ops} ops 中 {total_diff} diff): \
+         per-shard layout 変更が SIEVE 不変条件を破っている (= 設計通りでない)"
+    );
+}
+
 /// **c12s は SIEVE と等価ではない** という研究結果を記録する負テスト。
 ///
 /// 設計文書 `docs/reports/2026-05-08-c12s-cas-slot-claim-design.md` §3 では
