@@ -511,6 +511,47 @@ fn c18s_1shard_matches_orig_on_synthetic_zipf() {
     );
 }
 
+/// **r1 (WAYS=1) は SIEVE 等価**: shard 間 routing に thread affinity を導入した r-series
+/// 1st variant。単シャード機構は c17s を 100% 継承し、外側 routing が
+/// `shard_of(hash, tls) = (hash & set_mask)*ways + (tls & way_mask)` に拡張される。
+/// `ways=1` のとき `set_mask = SHARDS-1, way_mask=0` で c17s の `(hash & (SHARDS-1))` と
+/// bit-for-bit 等価になり、`sieve_orig` と eviction stream / cache contents が完全一致する。
+/// `ways>=2` では同一 key を別 thread が触ると別 shard に行く構造のため oracle は
+/// `ways=1` 限定 (設計 `docs/reports/2026-05-12-r1-design.md` §4.7)。
+#[test]
+fn r1_ways1_matches_orig_on_synthetic_zipf() {
+    use senba_research::experimental::sieve_r1::ConcurrentSieveR1 as R1;
+    let mut total_diff = 0usize;
+    let mut total_ops = 0usize;
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace: Vec<u64> = ZipfGen::new(skew, 10_000, 42).take(200_000).collect();
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: R1<u64, u64, 1> = R1::with_ways(cap, 1);
+        for k in &trace {
+            a.insert(*k, *k);
+            b.insert(*k, *k);
+        }
+        let mut diff = 0usize;
+        for &k in &trace {
+            if a.get(&k).copied() != b.get(&k) {
+                diff += 1;
+            }
+        }
+        eprintln!(
+            "[r1(ways=1) vs orig] skew={skew} cap={cap}: diff={diff}/{} ({:.4}%)",
+            trace.len(),
+            100.0 * diff as f64 / trace.len() as f64
+        );
+        total_diff += diff;
+        total_ops += trace.len();
+    }
+    assert_eq!(
+        total_diff, 0,
+        "r1 (ways=1) が sieve_orig と divergent ({total_ops} ops 中 {total_diff} diff): \
+         routing 拡張が ways=1 サニティを破っている (= set_mask/way_mask の計算 bug)"
+    );
+}
+
 /// **c12s は SIEVE と等価ではない** という研究結果を記録する負テスト。
 ///
 /// 設計文書 `docs/reports/2026-05-08-c12s-cas-slot-claim-design.md` §3 では

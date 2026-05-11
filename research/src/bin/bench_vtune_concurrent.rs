@@ -86,6 +86,7 @@ use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as ConcurrentSieveC16S;
 use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
+use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
 use senba_research::workload::zipf::ZipfGen;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,9 +97,12 @@ enum Variant {
     C16s,
     C17s,
     C18s,
+    R1 { ways: usize },
 }
 
 impl Variant {
+    /// `r1` variant は `r1@ways=N` (N = power of two, 1..=SHARDS) で受け取る。
+    /// 単に `r1` と書いた場合は `ways=1` (= c17s 等価ルーティング) と解釈する。
     fn parse(s: &str) -> Self {
         match s {
             "c8" => Variant::C8,
@@ -107,7 +111,20 @@ impl Variant {
             "c16s" => Variant::C16s,
             "c17s" => Variant::C17s,
             "c18s" => Variant::C18s,
-            other => panic!("--variant must be c8|c9|c14s|c16s|c17s|c18s, got: {other}"),
+            "r1" => Variant::R1 { ways: 1 },
+            other if other.starts_with("r1@ways=") => {
+                let ways: usize = other["r1@ways=".len()..]
+                    .parse()
+                    .expect("r1@ways=<N>: N must be a usize");
+                assert!(
+                    ways.is_power_of_two(),
+                    "r1@ways=<N>: N must be a power of two, got {ways}"
+                );
+                Variant::R1 { ways }
+            }
+            other => {
+                panic!("--variant must be c8|c9|c14s|c16s|c17s|c18s|r1[@ways=N], got: {other}")
+            }
         }
     }
     fn as_str(self) -> &'static str {
@@ -118,6 +135,7 @@ impl Variant {
             Variant::C16s => "c16s",
             Variant::C17s => "c17s",
             Variant::C18s => "c18s",
+            Variant::R1 { .. } => "r1",
         }
     }
 }
@@ -229,6 +247,13 @@ fn parse_args() -> Args {
             "c18s requires --shards 64 (Phase 1 fixed design)"
         );
     }
+    if let Variant::R1 { ways } = variant {
+        assert_eq!(shards, 64, "r1 requires --shards 64");
+        assert!(
+            ways <= shards,
+            "r1@ways=<N>: ways ({ways}) must be <= shards ({shards})"
+        );
+    }
     // c8 / c9 / c14s は全部 6-bit entry ID で per-shard ≤ 64。
     // ここで蹴っておかないと cache の constructor まで panic を持ち越す。
     assert!(
@@ -249,9 +274,13 @@ fn parse_args() -> Args {
     }
 }
 
-/// 3 variant を同じ driver で叩くための最小 trait (`bench_concurrent.rs` と同型を取る)。
+/// 並行 variant を同じ driver で叩くための最小 trait (`bench_concurrent.rs` と同型)。
+/// `build_with_ways` は r1 等の routing variant 用、default で `build` 互換。
 trait ConcCache: Send + Sync + 'static {
     fn build(capacity: usize, shards: usize) -> Arc<Self>;
+    fn build_with_ways(capacity: usize, shards: usize, _ways: usize) -> Arc<Self> {
+        Self::build(capacity, shards)
+    }
     fn get_hit(&self, key: &u64) -> bool;
     fn insert(&self, key: u64, value: u64);
 }
@@ -340,6 +369,25 @@ impl<const S: usize> ConcCache for ConcurrentSieveC18S<u64, u64, S> {
     }
 }
 
+impl<const S: usize> ConcCache for ConcurrentSieveR1<u64, u64, S> {
+    /// fallback (= `ways=1`、c17s 等価 routing)。`Variant::R1` dispatch は
+    /// `build_with_ways` 経路を使う。
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveR1::with_ways(capacity, 1))
+    }
+    fn build_with_ways(capacity: usize, _shards: usize, ways: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveR1::with_ways(capacity, ways))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveR1::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = ConcurrentSieveR1::insert(self, key, value);
+    }
+}
+
 struct Stats {
     elapsed_ns: u128,
     hits: u64,
@@ -376,7 +424,12 @@ fn run<C: ConcCache>(args: &Args) -> Stats {
     // 起動直後から collection は止めておく (-start-paused と二重防御)。
     ittapi::pause();
 
-    let cache = C::build(args.cap, args.shards);
+    // ways は r1 のときだけ意味を持つ。他 variant は default impl で無視される。
+    let ways = match args.variant {
+        Variant::R1 { ways } => ways,
+        _ => 1,
+    };
+    let cache = C::build_with_ways(args.cap, args.shards, ways);
     let barrier = Arc::new(Barrier::new(args.threads + 1));
 
     let results: Vec<(u128, u64, u64)> = std::thread::scope(|s| {
@@ -437,10 +490,15 @@ fn run<C: ConcCache>(args: &Args) -> Stats {
 fn main() {
     let args = parse_args();
 
+    let ways = match args.variant {
+        Variant::R1 { ways } => ways,
+        _ => 1,
+    };
     eprintln!(
-        "[bench_vtune_concurrent] variant={} threads={} cap={} keys={} skew={} \
+        "[bench_vtune_concurrent] variant={} ways={} threads={} cap={} keys={} skew={} \
          warmup={} ops={} seed={} shards={}",
         args.variant.as_str(),
+        ways,
         args.threads,
         args.cap,
         args.keys,
@@ -458,6 +516,7 @@ fn main() {
         Variant::C16s => run::<ConcurrentSieveC16S<u64, u64, 64>>(&args),
         Variant::C17s => run::<ConcurrentSieveC17S<u64, u64, 64>>(&args),
         Variant::C18s => run::<ConcurrentSieveC18S<u64, u64, 64>>(&args),
+        Variant::R1 { .. } => run::<ConcurrentSieveR1<u64, u64, 64>>(&args),
     };
 
     let total = s.hits + s.misses;
@@ -466,11 +525,12 @@ fn main() {
     let mops = (total as f64) / (s.elapsed_ns as f64 / 1e3);
 
     println!(
-        "variant,threads,shards,cap,keys,skew,warmup,ops,elapsed_ns,hits,misses,hit_ratio,ns_per_op,aggregate_mops"
+        "variant,ways,threads,shards,cap,keys,skew,warmup,ops,elapsed_ns,hits,misses,hit_ratio,ns_per_op,aggregate_mops"
     );
     println!(
-        "{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.3},{:.3}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.3},{:.3}",
         args.variant.as_str(),
+        ways,
         args.threads,
         args.shards,
         args.cap,
