@@ -16,8 +16,8 @@
 //!    Path C 由来の false-miss (= shift transient で SIMD scan が candidate を見落とす) は
 //!    `path_c_epoch` を scan 前後に load して bounded retry の終了条件 (racing なし +
 //!    epoch 不変) で判定する coarse seqlock。hit 経路は早期 return で epoch_after を
-//!    skip するので、hit cost は epoch_before 1 atomic load のみ (ShardHot は find_get
-//!    の `len.load` で L1-hot)。
+//!    skip するので、hit cost は epoch_before 1 atomic load のみ (これ自体が ShardHot
+//!    line を L1 に呼ぶ)。
 //!
 //! 設計の一次資料: `docs/reports/2026-05-11-c17s-design.md`。
 //! 動機 (c14s/c16s の構造的退行): `docs/reports/2026-05-08-c14s-sweep.md` §4.2 と
@@ -286,6 +286,11 @@ where
     /// reader 用 AVX2 scan。c17s では **EMPTY-lane SIMD 検出を削除** (Path A は tag を
     /// EMPTY 化しないため)。Path C 由来の EMPTY transient は `path_c_epoch` で coarse 検出。
     ///
+    /// `pos < len` フィルタは TOCTOU 安全に省略済み: (i) Path B は entries[len] 初期化後に
+    /// `tags[len].store(LIVE|..., Release)` のため LIVE 観測時 entry init 完了済、(ii) tags
+    /// は order_cap までゼロ初期化 + Path B 以外で書かれないので tags[pos>=len] は EMPTY、
+    /// SIMD は LIVE bit 必須なので絶対 candidate にならない、(iii) len は monotonic 増加。
+    ///
     /// Returns `(value, racing)`:
     /// - `value: Option<V>` — 見つかった V (Some) または scan 完了で発見できず (None)
     /// - `racing: bool` — `try_candidate` の seqlock validate (tier 1 or tier 2) で
@@ -294,7 +299,6 @@ where
     unsafe fn find_get(&self, key: &K, needle: u16) -> (Option<V>, bool) {
         use std::arch::x86_64::*;
 
-        let len = self.hot.len.load(Ordering::Acquire);
         let tags_ptr = self.tags.as_ptr() as *const u16;
         let needle_v = _mm256_set1_epi16(needle as i16);
         let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
@@ -313,12 +317,10 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let lane = bit >> 1;
                 let pos = i + lane;
-                if pos < len {
-                    match self.try_candidate(pos, key, needle) {
-                        Probe::Found(val) => return (Some(val), false),
-                        Probe::Racing => racing = true,
-                        Probe::Miss => {}
-                    }
+                match self.try_candidate(pos, key, needle) {
+                    Probe::Found(val) => return (Some(val), false),
+                    Probe::Racing => racing = true,
+                    Probe::Miss => {}
                 }
                 mask = _blsr_u32(mask);
                 mask = _blsr_u32(mask);
@@ -387,7 +389,7 @@ where
     /// c17s: `path_c_epoch` snapshot による coarse retry + `try_candidate` 由来の
     /// `racing` flag による fine retry の OR で MAX_READER_RETRY 回まで再試行する。
     /// hit 経路では `if let Some(v)` で epoch_after を skip するので、hit cost は
-    /// epoch_before 1 atomic load (ShardHot は find_get の `len.load` で L1-hot)。
+    /// epoch_before 1 atomic load (これ自体が ShardHot line を L1 に呼ぶ)。
     /// 「epoch_before も hit から skip」という最適化を試みたが miss 経路で find_get
     /// 倍化 → skew=1.0 gim T=4 で −10pp 退行 (revert 済み、`2026-05-11-c17s-results.md`
     /// §11 参照)。
@@ -486,13 +488,13 @@ where
 
     /// Path A 用 find: pos / id / version snapshot を返す。
     /// reader と異なり visited fetch_or は撃たない (Path A の最後で SET する)。
+    /// `pos < len` フィルタは `find_get` と同 TOCTOU reasoning で省略。
     /// SAFETY: AVX2 は `Shard::new` で検証済み。
     #[target_feature(enable = "avx2,bmi1")]
     unsafe fn find_lockfree_for_path_a(&self, key: &K, needle: u16) -> Option<(usize, usize, u32)> {
         use std::arch::x86_64::*;
 
         let entries_base = self.entries_ptr();
-        let len = self.hot.len.load(Ordering::Acquire);
         let tags_ptr = self.tags.as_ptr() as *const u16;
         let needle_v = _mm256_set1_epi16(needle as i16);
         let mask_v = _mm256_set1_epi16(Self::SCAN_MASK as i16);
@@ -509,13 +511,11 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let lane = bit >> 1;
                 let pos = i + lane;
-                if pos < len {
-                    let t1 = self.tags[pos].load(Ordering::Acquire);
-                    if (t1 & Self::SCAN_MASK) == needle
-                        && let Some(found) = self.try_path_a_candidate(pos, t1, key, entries_base)
-                    {
-                        return Some(found);
-                    }
+                let t1 = self.tags[pos].load(Ordering::Acquire);
+                if (t1 & Self::SCAN_MASK) == needle
+                    && let Some(found) = self.try_path_a_candidate(pos, t1, key, entries_base)
+                {
+                    return Some(found);
                 }
                 mask = _blsr_u32(mask);
                 mask = _blsr_u32(mask);
