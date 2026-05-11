@@ -23,10 +23,12 @@ pub mod sieve_j6;
 pub mod sieve_j7;
 pub mod sieve_j8;
 pub mod sieve_orig;
+pub mod sieve_r1;
 pub mod sieve_v0;
 pub mod sieve_v1;
 pub mod sieve_v2;
 pub mod sieve_v3;
+pub mod tls_id;
 
 /// Common interface used by the cross-variant oracle test
 /// (`research/tests/oracle.rs`) and the research microbench

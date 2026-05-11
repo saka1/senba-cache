@@ -56,6 +56,8 @@ use senba_research::experimental::sieve_c15s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as ConcurrentSieveC16S;
 use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
+use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
+use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
 
 /// per-op Instant を取らずに chunk 平均を取る単位。
@@ -90,6 +92,10 @@ impl MakeValue for String {
 ///   どの variant も同条件)。
 trait ConcCache<V>: Send + Sync + 'static {
     fn build(capacity: usize, shards: usize) -> Arc<Self>;
+    /// r1 等の routing variant 用に `ways` を渡す経路。default は `build` 互換。
+    fn build_with_ways(capacity: usize, shards: usize, _ways: usize) -> Arc<Self> {
+        Self::build(capacity, shards)
+    }
     fn get_hit(&self, key: &u64) -> bool;
     fn insert(&self, key: u64, value: V);
 }
@@ -174,6 +180,44 @@ where
     #[inline]
     fn insert(&self, key: u64, value: V) {
         let _ = ConcurrentSieveC18S::insert(self, key, value);
+    }
+}
+
+/// r1: `ways` を取る別 builder。c-series と異なり constructor 引数が変わるため
+/// `ConcCache::build` シグネチャに収まらず、`R1Wrapper(ways)` 経由で newtype 化する。
+struct R1Wrapper<V, const S: usize> {
+    inner: ConcurrentSieveR1<u64, V, S>,
+}
+
+impl<V, const S: usize> R1Wrapper<V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn new(capacity: usize, ways: usize) -> Self {
+        Self {
+            inner: ConcurrentSieveR1::with_ways(capacity, ways),
+        }
+    }
+}
+
+impl<V, const S: usize> ConcCache<V> for R1Wrapper<V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    /// fallback (= `ways=1`)。実際の sweep は `build_with_ways` 経由。
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity, 1))
+    }
+    fn build_with_ways(capacity: usize, _shards: usize, ways: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity, ways))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        self.inner.get(key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = self.inner.insert(key, value);
     }
 }
 
@@ -283,6 +327,25 @@ impl ValueKind {
     }
 }
 
+/// CLI `--source` の workload 種別。Zipf は per-thread 独立生成、Twitter/Arc は trace 共有
+/// + sliced replay (thread t は `trace[t*L/T .. (t+1)*L/T)` を循環)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Zipf,
+    Twitter,
+    Arc,
+}
+
+impl Source {
+    fn as_str(self) -> &'static str {
+        match self {
+            Source::Zipf => "zipf",
+            Source::Twitter => "twitter",
+            Source::Arc => "arc",
+        }
+    }
+}
+
 struct Args {
     cap: usize,
     threads: usize,
@@ -299,6 +362,14 @@ struct Args {
     shards: usize,
     op_mix: OpMix,
     value_kind: ValueKind,
+    /// r1 の routing affinity 軸 (power of 2、1 <= ways <= shards)。非 r1 variant では無視。
+    ways: usize,
+    /// workload 種別。
+    source: Source,
+    /// `--source twitter|arc` のとき trace ファイルパス必須。
+    trace_file: Option<String>,
+    /// CSV 用 metadata 列。例: `"cluster18"`, `"OLTP"`。Zipf では空文字。
+    workload_param: String,
 }
 
 fn parse_args() -> Args {
@@ -315,6 +386,10 @@ fn parse_args() -> Args {
     let mut shards: usize = 8;
     let mut op_mix = OpMix::Gim;
     let mut value_kind = ValueKind::U64;
+    let mut ways: usize = 1;
+    let mut source = Source::Zipf;
+    let mut trace_file: Option<String> = None;
+    let mut workload_param: String = String::new();
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -351,10 +426,23 @@ fn parse_args() -> Args {
                     other => panic!("--value must be u64|string, got: {other}"),
                 };
             }
+            "--ways" => ways = val().parse().expect("--ways is usize"),
+            "--source" => {
+                let v = val();
+                source = match v.as_str() {
+                    "zipf" => Source::Zipf,
+                    "twitter" => Source::Twitter,
+                    "arc" => Source::Arc,
+                    other => panic!("--source must be zipf|twitter|arc, got: {other}"),
+                };
+            }
+            "--trace-file" => trace_file = Some(val().to_string()),
+            "--workload-param" => workload_param = val().to_string(),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_concurrent [--variant c8,c9,moka,mini_moka] \
-                     [--shards N] [--op-mix gim|read-heavy] [--value u64|string] \
+                    "usage: bench_concurrent [--variant ...] [--shards N] [--ways N] \
+                     [--op-mix gim|read-heavy] [--value u64|string] \
+                     [--source zipf|twitter|arc] [--trace-file PATH] [--workload-param S] \
                      --cap N --threads N --skew F --keys N --ops N --warmup N \
                      --trials N --seed N"
                 );
@@ -380,6 +468,10 @@ fn parse_args() -> Args {
         shards.is_power_of_two() && (8..=512).contains(&shards),
         "--shards must be a power of two in [8, 512]"
     );
+    assert!(
+        ways.is_power_of_two() && ways >= 1 && ways <= shards,
+        "--ways must be a power of two in [1, --shards]"
+    );
     for v in &variants {
         assert!(
             matches!(
@@ -394,15 +486,18 @@ fn parse_args() -> Args {
                     | "c16s"
                     | "c17s"
                     | "c18s"
+                    | "r1"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1)"
         );
     }
-    // c8 は V: Copy を要求するため string 値と組み合わせ不可。早期に弾く。
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
         panic!(
             "c8 requires --value u64 (V: Copy); remove c8 from --variant when using --value string"
         );
+    }
+    if !matches!(source, Source::Zipf) && trace_file.is_none() {
+        panic!("--source {} requires --trace-file PATH", source.as_str());
     }
 
     Args {
@@ -418,6 +513,10 @@ fn parse_args() -> Args {
         shards,
         op_mix,
         value_kind,
+        ways,
+        source,
+        trace_file,
+        workload_param,
     }
 }
 
@@ -431,14 +530,121 @@ struct ThreadResult {
 /// 流すよりも、index 単位の単純な mod 判定 (= 5% insert) が overhead が小さい。
 const READ_HEAVY_INSERT_EVERY: usize = 20;
 
-fn run_trial<V, C>(args: &Args) -> TrialResult
+/// 1 op で `get` 用 / `insert` 用のキーを供給する per-thread feed。
+///
+/// - `Zipf` は thread ごとに seed 違いの 2 つの `ZipfGen` を持ち、`get` 側 / `insert` 側で
+///   独立 draw する (`read-heavy` で cache を hot 直撃しないため)。
+/// - `Trace` は **sliced replay**: thread t は `trace[start..end)` の独立 slice を循環
+///   再生する。`get` / `insert` 両方が同一 slice の循環ストリームを共有する (= 実
+///   trace ベースでは read-heavy の insert 側も同 workload 分布で構わない)。
+///
+/// `ZipfGen` の CDF テーブル (~680 B) が enum sizeof を支配するが、per-thread に 1 個
+/// 持つだけ (T<=32 で <= 22 KB) なので heap box 化せず stack inline で保持する。
+/// hot path (`next_get` / `next_ins`) は branch 1 段 + indexed access のみ。
+#[allow(clippy::large_enum_variant)]
+enum ThreadFeed {
+    Zipf {
+        get_gen: ZipfGen,
+        ins_gen: ZipfGen,
+    },
+    Trace {
+        trace: Arc<Vec<u64>>,
+        start: usize,
+        end: usize,
+        pos_get: usize,
+        pos_ins: usize,
+    },
+}
+
+impl ThreadFeed {
+    #[inline]
+    fn next_get(&mut self) -> u64 {
+        match self {
+            ThreadFeed::Zipf { get_gen, .. } => get_gen.next().unwrap(),
+            ThreadFeed::Trace {
+                trace,
+                start,
+                end,
+                pos_get,
+                ..
+            } => {
+                let idx = *start + (*pos_get % (*end - *start));
+                *pos_get += 1;
+                trace[idx]
+            }
+        }
+    }
+    #[inline]
+    fn next_ins(&mut self) -> u64 {
+        match self {
+            ThreadFeed::Zipf { ins_gen, .. } => ins_gen.next().unwrap(),
+            ThreadFeed::Trace {
+                trace,
+                start,
+                end,
+                pos_ins,
+                ..
+            } => {
+                let idx = *start + (*pos_ins % (*end - *start));
+                *pos_ins += 1;
+                trace[idx]
+            }
+        }
+    }
+}
+
+fn build_feed(tid: usize, args: &Args, trace: Option<&Arc<Vec<u64>>>) -> ThreadFeed {
+    let seed = args.seed ^ (tid as u64);
+    match args.source {
+        Source::Zipf => ThreadFeed::Zipf {
+            get_gen: ZipfGen::new(args.skew, args.keys, seed),
+            ins_gen: ZipfGen::new(args.skew, args.keys, seed ^ 0x00C0_FFEE_DEAD_BEEF_u64),
+        },
+        Source::Twitter | Source::Arc => {
+            let trace = trace
+                .expect("trace must be loaded for --source twitter|arc")
+                .clone();
+            let n = trace.len();
+            let start = (tid * n) / args.threads;
+            let end = ((tid + 1) * n) / args.threads;
+            assert!(
+                end > start,
+                "trace slice for tid={tid} is empty (trace len={n} threads={})",
+                args.threads
+            );
+            ThreadFeed::Trace {
+                trace,
+                start,
+                end,
+                pos_get: 0,
+                pos_ins: 0,
+            }
+        }
+    }
+}
+
+/// Twitter / ARC trace を 1 度だけ memory に load する。Zipf では `None`。
+fn load_trace(args: &Args) -> Option<Arc<Vec<u64>>> {
+    let path = args.trace_file.as_deref()?;
+    let trace: Vec<u64> = match args.source {
+        Source::Zipf => return None,
+        Source::Twitter => file::libcachesim_csv_from_path(path)
+            .unwrap_or_else(|e| panic!("twitter trace open failed ({path}): {e}"))
+            .collect(),
+        Source::Arc => file::arc_from_path(path)
+            .unwrap_or_else(|e| panic!("arc trace open failed ({path}): {e}"))
+            .collect(),
+    };
+    assert!(!trace.is_empty(), "trace is empty: {path}");
+    Some(Arc::new(trace))
+}
+
+fn run_trial<V, C>(args: &Args, trace: Option<Arc<Vec<u64>>>) -> TrialResult
 where
     V: MakeValue,
     C: ConcCache<V>,
 {
-    let cache = C::build(args.cap, args.shards);
-    // +1 で main thread も barrier に並ぶ (warmup 完了 → measurement 開始の
-    // 全 thread 同時スタートを成立させる)。
+    let cache = C::build_with_ways(args.cap, args.shards, args.ways);
     let barrier = Arc::new(Barrier::new(args.threads + 1));
     let warmup_per_thread = args.warmup / args.threads;
     let ops_per_thread = args.ops / args.threads;
@@ -449,26 +655,14 @@ where
         for tid in 0..args.threads {
             let cache = Arc::clone(&cache);
             let barrier = Arc::clone(&barrier);
-            let seed = args.seed ^ (tid as u64);
-            let skew = args.skew;
-            let keys = args.keys;
+            let mut feed = build_feed(tid, args, trace.as_ref());
             handles.push(s.spawn(move || {
-                // Zipf テーブル構築は measurement 外。
-                let mut zipf = ZipfGen::new(skew, keys, seed);
-                // read-heavy では insert 側を別 seed の Zipf で draw する
-                // (cache を「自分が今 read している hot key 集合そのもの」で汚染しないため)。
-                // 0xC0FFEE_DEAD_BEEF は単に違う seed を選ぶための定数。
-                let mut zipf_ins = ZipfGen::new(skew, keys, seed ^ 0x00C0_FFEE_DEAD_BEEF_u64);
-                // warmup: 並列に warm 状態を作る。直列 prefill より steady state に近い。
-                // 計測 mode (gim / read-heavy) に依らず GIM で warm する: cache を
-                // hot key で埋める段階は read-heavy でも必要。
                 for _ in 0..warmup_per_thread {
-                    let k = zipf.next().unwrap();
+                    let k = feed.next_get();
                     if !cache.get_hit(&k) {
                         cache.insert(k, V::make(k));
                     }
                 }
-                // 全 thread 同時開始
                 barrier.wait();
                 let t0 = Instant::now();
                 let mut hits = 0u64;
@@ -479,7 +673,7 @@ where
                 for i in 0..ops_per_thread {
                     match op_mix {
                         OpMix::Gim => {
-                            let k = zipf.next().unwrap();
+                            let k = feed.next_get();
                             if cache.get_hit(&k) {
                                 hits += 1;
                             } else {
@@ -488,10 +682,10 @@ where
                         }
                         OpMix::ReadHeavy => {
                             if i.is_multiple_of(READ_HEAVY_INSERT_EVERY) {
-                                let k = zipf_ins.next().unwrap();
+                                let k = feed.next_ins();
                                 cache.insert(k, V::make(k));
                             } else {
-                                let k = zipf.next().unwrap();
+                                let k = feed.next_get();
                                 if cache.get_hit(&k) {
                                     hits += 1;
                                 }
@@ -513,7 +707,6 @@ where
                 }
             }));
         }
-        // main も barrier 待ち (warmup 完了同期)
         barrier.wait();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
@@ -584,20 +777,25 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
-    // shards 列は moka/mini-moka では「N/A」相当 (内部 shard を独自管理)。
-    // CSV を tidy に保つため、c8/c9 以外は 0 を入れる。集計時は variant でフィルタする想定。
     let shards_col = if matches!(
         variant,
-        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s" | "c18s"
+        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s" | "c18s" | "r1"
     ) {
         args.shards
     } else {
         0
     };
+    // 非 r1 variant では ways は意味を持たないが、CSV schema を symmetric に保つため
+    // `1` を退化値として書く。集計側は `(variant, ways)` join で c17s baseline と r1@ways=N
+    // を対応させる。
+    let ways_col = if variant == "r1" { args.ways } else { 1 };
     println!(
-        "{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
         variant,
         trial,
+        ways_col,
+        args.source.as_str(),
+        args.workload_param,
         args.op_mix.as_str(),
         args.value_kind.as_str(),
         args.skew,
@@ -614,9 +812,10 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
         r.thread_throughput_cv,
     );
     eprintln!(
-        "  [{}] trial {} per-thread Mops: [{}]",
+        "  [{}] trial {} ways={} per-thread Mops: [{}]",
         variant,
         trial,
+        ways_col,
         r.per_thread_mops
             .iter()
             .map(|m| format!("{:.3}", m))
@@ -627,38 +826,44 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
 
 fn main() {
     let args = parse_args();
+    let trace = load_trace(&args);
 
     println!(
-        "variant,trial,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
+        "variant,trial,ways,source,workload_param,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
     );
     for variant in &args.variants {
         for trial in 0..args.trials {
             let r = match (variant.as_str(), args.value_kind) {
-                ("c8", ValueKind::U64) => run_c8(&args),
+                ("c8", ValueKind::U64) => run_c8(&args, trace.clone()),
                 ("c8", ValueKind::String) => {
                     unreachable!("parse_args rejects c8 + --value string")
                 }
-                ("c9", ValueKind::U64) => run_trial::<u64, ConcurrentSieveC9<u64, u64>>(&args),
-                ("c9", ValueKind::String) => {
-                    run_trial::<String, ConcurrentSieveC9<u64, String>>(&args)
+                ("c9", ValueKind::U64) => {
+                    run_trial::<u64, ConcurrentSieveC9<u64, u64>>(&args, trace.clone())
                 }
-                ("moka", ValueKind::U64) => run_trial::<u64, moka::sync::Cache<u64, u64>>(&args),
+                ("c9", ValueKind::String) => {
+                    run_trial::<String, ConcurrentSieveC9<u64, String>>(&args, trace.clone())
+                }
+                ("moka", ValueKind::U64) => {
+                    run_trial::<u64, moka::sync::Cache<u64, u64>>(&args, trace.clone())
+                }
                 ("moka", ValueKind::String) => {
-                    run_trial::<String, moka::sync::Cache<u64, String>>(&args)
+                    run_trial::<String, moka::sync::Cache<u64, String>>(&args, trace.clone())
                 }
                 ("mini_moka", ValueKind::U64) => {
-                    run_trial::<u64, mini_moka::sync::Cache<u64, u64>>(&args)
+                    run_trial::<u64, mini_moka::sync::Cache<u64, u64>>(&args, trace.clone())
                 }
                 ("mini_moka", ValueKind::String) => {
-                    run_trial::<String, mini_moka::sync::Cache<u64, String>>(&args)
+                    run_trial::<String, mini_moka::sync::Cache<u64, String>>(&args, trace.clone())
                 }
-                ("c14s", v) => run_c14s(&args, v),
-                ("c16s", v) => run_c16s(&args, v),
-                ("c17s", v) => run_c17s(&args, v),
-                ("c18s", v) => run_c18s(&args, v),
-                ("c15s_16", v) => run_c15s::<4>(&args, v),
-                ("c15s_8", v) => run_c15s::<3>(&args, v),
-                ("c15s_4", v) => run_c15s::<2>(&args, v),
+                ("c14s", v) => run_c14s(&args, v, trace.clone()),
+                ("c16s", v) => run_c16s(&args, v, trace.clone()),
+                ("c17s", v) => run_c17s(&args, v, trace.clone()),
+                ("c18s", v) => run_c18s(&args, v, trace.clone()),
+                ("c15s_16", v) => run_c15s::<4>(&args, v, trace.clone()),
+                ("c15s_8", v) => run_c15s::<3>(&args, v, trace.clone()),
+                ("c15s_4", v) => run_c15s::<2>(&args, v, trace.clone()),
+                ("r1", v) => run_r1(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
             emit(variant, trial, &args, &r);
@@ -667,84 +872,73 @@ fn main() {
 }
 
 /// 実行時 `--shards` 値を c8 の const generic に dispatch する。
-/// const generic は実行時値を直接渡せないため、サポートする値ごとに明示分岐する。
-/// 範囲は parse_args の assert に合わせて 8..=512 (power of two)。
-fn run_c8(args: &Args) -> TrialResult {
+fn run_c8(args: &Args, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
     match args.shards {
-        8 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 8>>(args),
-        16 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 16>>(args),
-        32 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 32>>(args),
-        64 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 64>>(args),
-        128 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 128>>(args),
-        256 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 256>>(args),
-        512 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 512>>(args),
+        8 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 8>>(args, trace),
+        16 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 16>>(args, trace),
+        32 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 32>>(args, trace),
+        64 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 64>>(args, trace),
+        128 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 128>>(args, trace),
+        256 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 256>>(args, trace),
+        512 => run_trial::<u64, ConcurrentSieveCache<u64, u64, 512>>(args, trace),
         n => panic!("c8 shards={n} not in supported set (assert above should have caught this)"),
     }
 }
 
-/// c14s / c15s_* は SHARDS=64 固定設計。これより大きい shard 数は per-shard 容量が
-/// 1〜2 にまで縮んで SIEVE の hand サイクル統計が崩れるため、Phase 1 では 64 のみ
-/// 受け付ける (`docs/reports/2026-05-10-c15s-sloppy-visited.md` 参照)。
-fn run_c14s(args: &Args, v: ValueKind) -> TrialResult {
-    assert_eq!(
-        args.shards, 64,
-        "c14s requires --shards 64 (Phase 1 fixed design)"
-    );
+fn run_c14s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert_eq!(args.shards, 64, "c14s requires --shards 64");
     match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC14S<u64, u64, 64>>(args),
-        ValueKind::String => run_trial::<String, ConcurrentSieveC14S<u64, String, 64>>(args),
+        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC14S<u64, u64, 64>>(args, trace),
+        ValueKind::String => run_trial::<String, ConcurrentSieveC14S<u64, String, 64>>(args, trace),
     }
 }
 
-/// c16s も c14s と同じく SHARDS=64 固定 (Phase 1 設計)。layout は ShardHot に集約
-/// しただけなので shard 数の制約は同じ。
-fn run_c16s(args: &Args, v: ValueKind) -> TrialResult {
-    assert_eq!(
-        args.shards, 64,
-        "c16s requires --shards 64 (Phase 1 fixed design)"
-    );
+fn run_c16s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert_eq!(args.shards, 64, "c16s requires --shards 64");
     match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC16S<u64, u64, 64>>(args),
-        ValueKind::String => run_trial::<String, ConcurrentSieveC16S<u64, String, 64>>(args),
+        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC16S<u64, u64, 64>>(args, trace),
+        ValueKind::String => run_trial::<String, ConcurrentSieveC16S<u64, String, 64>>(args, trace),
     }
 }
 
-/// c17s も SHARDS=64 固定 (Phase 1 設計)。entry-level seqlock + tag VERSION bit 削除で
-/// G2-α-1 (`docs/reports/2026-05-11-c17s-design.md`)。
-fn run_c17s(args: &Args, v: ValueKind) -> TrialResult {
-    assert_eq!(
-        args.shards, 64,
-        "c17s requires --shards 64 (Phase 1 fixed design)"
-    );
+fn run_c17s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert_eq!(args.shards, 64, "c17s requires --shards 64");
     match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC17S<u64, u64, 64>>(args),
-        ValueKind::String => run_trial::<String, ConcurrentSieveC17S<u64, String, 64>>(args),
+        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC17S<u64, u64, 64>>(args, trace),
+        ValueKind::String => run_trial::<String, ConcurrentSieveC17S<u64, String, 64>>(args, trace),
     }
 }
 
-/// c18s も SHARDS=64 固定 (Phase 1 設計)。c17s から `Entry::version` を別配列に逃がして
-/// Slot16 復帰、`path_c_epoch` を ShardHot から ReaderState に移動 (G2-α-2、
-/// `docs/reports/2026-05-12-c18s-design.md`)。
-fn run_c18s(args: &Args, v: ValueKind) -> TrialResult {
-    assert_eq!(
-        args.shards, 64,
-        "c18s requires --shards 64 (Phase 1 fixed design)"
-    );
+fn run_c18s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert_eq!(args.shards, 64, "c18s requires --shards 64");
     match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC18S<u64, u64, 64>>(args),
-        ValueKind::String => run_trial::<String, ConcurrentSieveC18S<u64, String, 64>>(args),
+        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC18S<u64, u64, 64>>(args, trace),
+        ValueKind::String => run_trial::<String, ConcurrentSieveC18S<u64, String, 64>>(args, trace),
     }
 }
 
-fn run_c15s<const SAMPLE_BITS: u32>(args: &Args, v: ValueKind) -> TrialResult {
-    assert_eq!(
-        args.shards, 64,
-        "c15s_* requires --shards 64 (Phase 1 fixed design)"
-    );
+fn run_c15s<const SAMPLE_BITS: u32>(
+    args: &Args,
+    v: ValueKind,
+    trace: Option<Arc<Vec<u64>>>,
+) -> TrialResult {
+    assert_eq!(args.shards, 64, "c15s_* requires --shards 64");
     match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC15S<u64, u64, 64, SAMPLE_BITS>>(args),
-        ValueKind::String => {
-            run_trial::<String, ConcurrentSieveC15S<u64, String, 64, SAMPLE_BITS>>(args)
+        ValueKind::U64 => {
+            run_trial::<u64, ConcurrentSieveC15S<u64, u64, 64, SAMPLE_BITS>>(args, trace)
         }
+        ValueKind::String => {
+            run_trial::<String, ConcurrentSieveC15S<u64, String, 64, SAMPLE_BITS>>(args, trace)
+        }
+    }
+}
+
+/// r1: shard 間 routing affinity variant。`--ways` を取り、`R1Wrapper::build_with_ways`
+/// 経由で constructor に伝わる。SHARDS=64 固定 (c-series Phase 1 と同じ設計境界)。
+fn run_r1(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert_eq!(args.shards, 64, "r1 requires --shards 64");
+    match v {
+        ValueKind::U64 => run_trial::<u64, R1Wrapper<u64, 64>>(args, trace),
+        ValueKind::String => run_trial::<String, R1Wrapper<String, 64>>(args, trace),
     }
 }
