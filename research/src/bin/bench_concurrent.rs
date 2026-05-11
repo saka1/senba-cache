@@ -332,7 +332,12 @@ impl ValueKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Zipf,
+    /// libCacheSim 同梱 `# time, object, size, next_access_vtime` 形式
+    /// (`external/NSDI24-SIEVE/libCacheSim/data/twitter_cluster52.csv`)。
     Twitter,
+    /// OSDI'20 Yang `time,key,key_size,value_size,client,op,ttl` 形式
+    /// (`external/twitter-cache-trace/cluster006` 等)。String key を u64 に hash。
+    TwitterYang,
     Arc,
 }
 
@@ -341,6 +346,7 @@ impl Source {
         match self {
             Source::Zipf => "zipf",
             Source::Twitter => "twitter",
+            Source::TwitterYang => "twitter-yang",
             Source::Arc => "arc",
         }
     }
@@ -366,7 +372,7 @@ struct Args {
     ways: usize,
     /// workload 種別。
     source: Source,
-    /// `--source twitter|arc` のとき trace ファイルパス必須。
+    /// `--source twitter|twitter-yang|arc` のとき trace ファイルパス必須。
     trace_file: Option<String>,
     /// CSV 用 metadata 列。例: `"cluster18"`, `"OLTP"`。Zipf では空文字。
     workload_param: String,
@@ -432,8 +438,9 @@ fn parse_args() -> Args {
                 source = match v.as_str() {
                     "zipf" => Source::Zipf,
                     "twitter" => Source::Twitter,
+                    "twitter-yang" => Source::TwitterYang,
                     "arc" => Source::Arc,
-                    other => panic!("--source must be zipf|twitter|arc, got: {other}"),
+                    other => panic!("--source must be zipf|twitter|twitter-yang|arc, got: {other}"),
                 };
             }
             "--trace-file" => trace_file = Some(val().to_string()),
@@ -442,7 +449,7 @@ fn parse_args() -> Args {
                 eprintln!(
                     "usage: bench_concurrent [--variant ...] [--shards N] [--ways N] \
                      [--op-mix gim|read-heavy] [--value u64|string] \
-                     [--source zipf|twitter|arc] [--trace-file PATH] [--workload-param S] \
+                     [--source zipf|twitter|twitter-yang|arc] [--trace-file PATH] [--workload-param S] \
                      --cap N --threads N --skew F --keys N --ops N --warmup N \
                      --trials N --seed N"
                 );
@@ -600,9 +607,9 @@ fn build_feed(tid: usize, args: &Args, trace: Option<&Arc<Vec<u64>>>) -> ThreadF
             get_gen: ZipfGen::new(args.skew, args.keys, seed),
             ins_gen: ZipfGen::new(args.skew, args.keys, seed ^ 0x00C0_FFEE_DEAD_BEEF_u64),
         },
-        Source::Twitter | Source::Arc => {
+        Source::Twitter | Source::TwitterYang | Source::Arc => {
             let trace = trace
-                .expect("trace must be loaded for --source twitter|arc")
+                .expect("trace must be loaded for --source twitter|twitter-yang|arc")
                 .clone();
             let n = trace.len();
             let start = (tid * n) / args.threads;
@@ -630,6 +637,9 @@ fn load_trace(args: &Args) -> Option<Arc<Vec<u64>>> {
         Source::Zipf => return None,
         Source::Twitter => file::libcachesim_csv_from_path(path)
             .unwrap_or_else(|e| panic!("twitter trace open failed ({path}): {e}"))
+            .collect(),
+        Source::TwitterYang => file::twitter_csv_from_path(path)
+            .unwrap_or_else(|e| panic!("twitter-yang trace open failed ({path}): {e}"))
             .collect(),
         Source::Arc => file::arc_from_path(path)
             .unwrap_or_else(|e| panic!("arc trace open failed ({path}): {e}"))
