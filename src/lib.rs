@@ -35,6 +35,7 @@ use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 
+pub mod concurrent;
 pub mod hash;
 mod iter;
 mod shard;

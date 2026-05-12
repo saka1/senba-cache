@@ -26,6 +26,7 @@
 | 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention, c16s-design, c16s-results |
 | r 系列 (shard 間 routing × thread affinity の解空間) | r1-design, r1-results |
 | MT overhead 構造分析 (c/r-series vs lib の絶対値 ceiling) | mt-overhead-vs-lib |
+| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -239,3 +240,6 @@ r-series 初期 baseline sweep。前 sweep (cluster52 単独 / T=16 偏り / val
 
 ### 2026-05-12-mt-overhead-vs-lib.md
 仮説 (r1-sweep 中に user 提起): c17s/r1 系は MT 対応の構造的 overhead を払っていて、senba::Cache (lib) と単スレ比較すると相当差があるはず。`bench --variant senba` (lib) と `bench_concurrent --threads 1 --variant c17s` (MT 系) で apples-to-apples (cap, ops, HR 一致) で計測: c17s T=1 は **read-dominant で ~4-5x、miss-heavy で 最大 15.7x** の ns/op overhead を払う (cluster019 で lib 29.3 ns/op → c17s 460.8 ns/op、HR 0.316 bit-for-bit 一致)。Δ は +33〜+430 ns/op の範囲で workload 依存、原因は Mutex acquire ではなく **reader fast path で touch する atomic Acquire load の累積** (`path_c_epoch` / `AlignedTags` / `visited` 等 ~3 本 × ~3-5 ns)。これが c/r-series の単スレ ceiling を ~25 ns/op = ~40 Mops に規定し、T=16 で perfect scaling なら 640 Mops aggregate が天井。現状 T=16 c17s Zipf 1.4 gim u64 = 159.81 Mops は ceiling の **25-27%** で、まだ 3-4 倍の伸びしろがあるが大半は memory-order の構造的下限に近づく。Action items: (1) VTune memory-access で Acquire load 累積を直接観測、(2) Acquire→Relaxed 化可否の case-by-case 検証、(3) cluster019 を perf-gate の固定 workload に追加、(4) lock-free writer protocol 再挑戦 (epoch-based eviction defer) を c19s 候補として検討。c-series / r-series の競争相手は lib ではなく moka / mini-moka / Mutex<lib> であり、perf-gate の役割は二分割 (lib の単スレ性能 vs MT cache 同士の競争) で再定義する。
+
+### 2026-05-12-partitioned-design.md
+仮説: mt-overhead-vs-lib で出した「lib の単スレ性能を T 倍積めるなら ceiling は 640 Mops」を直接ベンチマークできる baseline として、`senba::Cache` を N 個並べて thread-id でルーティングするだけの `senba::concurrent::PartitionedCache` を lib に新設する。実装は `Box<[Mutex<Cache>]>` + TLS counter routing で ~150 行、依存追加ゼロ (`std::sync::Mutex` のみ)。`bench_concurrent` に `--variant partitioned --partitions N` を新軸として追加し、**T と N を独立に sweep する (T × N = 5 × 7 cell × workload)** ことを設計契約に明記。期待: HR-tolerant (cluster019 / MergeP) で partitioned 圧勝、HR-sensitive (ARC OLTP / cluster006) で完敗、その領域マップが成果物。本書は企画 + 実装着手前段で、sweep / 結果は後続レポートで切る。
