@@ -60,6 +60,12 @@
 //! bench_vtune_concurrent --variant c14s --threads 4 \
 //!     --cap 4096 --keys 100000 --skew 1.0 \
 //!     --warmup 400000 --ops 8000000 --seed 42
+//!
+//! # partitioned (`senba::concurrent::PartitionedCache`): N=T で uncontended、
+//! # scaling drop の物理層要因 (L1d/L2/SMT pair / E-core) を切り分ける。
+//! bench_vtune_concurrent --variant partitioned --partitions 16 --threads 16 \
+//!     --cap 4096 --keys 100000 --skew 1.4 \
+//!     --warmup 400000 --ops 8000000 --seed 42
 //! ```
 //!
 //! # VTune 起動例 (perf c2c 相当: Memory Access + memory objects)
@@ -80,6 +86,7 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
+use senba::concurrent::PartitionedCache;
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache as ConcurrentSieveC8;
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
@@ -98,11 +105,13 @@ enum Variant {
     C17s,
     C18s,
     R1 { ways: usize },
+    Partitioned,
 }
 
 impl Variant {
     /// `r1` variant は `r1@ways=N` (N = power of two, 1..=SHARDS) で受け取る。
     /// 単に `r1` と書いた場合は `ways=1` (= c17s 等価ルーティング) と解釈する。
+    /// `partitioned` variant は `--partitions N` を別 flag で受ける。
     fn parse(s: &str) -> Self {
         match s {
             "c8" => Variant::C8,
@@ -112,6 +121,7 @@ impl Variant {
             "c17s" => Variant::C17s,
             "c18s" => Variant::C18s,
             "r1" => Variant::R1 { ways: 1 },
+            "partitioned" => Variant::Partitioned,
             other if other.starts_with("r1@ways=") => {
                 let ways: usize = other["r1@ways=".len()..]
                     .parse()
@@ -123,7 +133,9 @@ impl Variant {
                 Variant::R1 { ways }
             }
             other => {
-                panic!("--variant must be c8|c9|c14s|c16s|c17s|c18s|r1[@ways=N], got: {other}")
+                panic!(
+                    "--variant must be c8|c9|c14s|c16s|c17s|c18s|r1[@ways=N]|partitioned, got: {other}"
+                )
             }
         }
     }
@@ -136,6 +148,7 @@ impl Variant {
             Variant::C17s => "c17s",
             Variant::C18s => "c18s",
             Variant::R1 { .. } => "r1",
+            Variant::Partitioned => "partitioned",
         }
     }
 }
@@ -153,6 +166,9 @@ struct Args {
     /// c14s は SHARDS=64 固定 (Phase 1 設計)、c8 は power-of-two ∈ [8, 512]、
     /// c9 は任意 power-of-two。
     shards: usize,
+    /// `partitioned` variant の partition 数 (power of two, >= 1)。
+    /// 他 variant では無視 (CSV には記録)。
+    partitions: usize,
 }
 
 fn parse_args() -> Args {
@@ -169,6 +185,7 @@ fn parse_args() -> Args {
     let mut ops: usize = 8_000_000;
     let mut seed: u64 = 42;
     let mut shards: usize = 64;
+    let mut partitions: usize = 1;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -186,14 +203,16 @@ fn parse_args() -> Args {
             "--ops" => ops = val().parse().expect("--ops usize"),
             "--seed" => seed = val().parse().expect("--seed u64"),
             "--shards" => shards = val().parse().expect("--shards usize"),
+            "--partitions" => partitions = val().parse().expect("--partitions usize"),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_vtune_concurrent --variant {{c8,c9,c14s,c16s,c17s,c18s}} \
+                    "usage: bench_vtune_concurrent --variant {{c8,c9,c14s,c16s,c17s,c18s,r1[@ways=N],partitioned}} \
                      --threads N --cap N --keys N --skew F --warmup N --ops N \
-                     --seed N [--shards N]\n\
+                     --seed N [--shards N] [--partitions N]\n\
                      defaults: variant=c14s threads=4 cap=4096 keys=100000 \
-                     skew=1.0 warmup=400000 ops=8000000 seed=42 shards=64\n\
-                     note: cap is bounded by 64 * shards (6-bit entry ID).\n\
+                     skew=1.0 warmup=400000 ops=8000000 seed=42 shards=64 partitions=1\n\
+                     note: shard-based variants bound cap by 64 * shards (6-bit entry ID); \
+                     partitioned requires cap >= partitions and partitions is power of two.\n\
                      ITT API drives VTune collection: warmup runs paused, \
                      measurement loop runs resumed."
                 );
@@ -254,12 +273,23 @@ fn parse_args() -> Args {
             "r1@ways=<N>: ways ({ways}) must be <= shards ({shards})"
         );
     }
-    // c8 / c9 / c14s は全部 6-bit entry ID で per-shard ≤ 64。
-    // ここで蹴っておかないと cache の constructor まで panic を持ち越す。
-    assert!(
-        cap <= 64 * shards,
-        "--cap ({cap}) must be <= 64 * shards ({shards}) — per-shard cap is bounded by 6-bit ID"
-    );
+    if matches!(variant, Variant::Partitioned) {
+        assert!(
+            partitions >= 1 && partitions.is_power_of_two(),
+            "--partitions must be a power of two >= 1, got {partitions}"
+        );
+        assert!(
+            cap >= partitions,
+            "--cap ({cap}) must be >= --partitions ({partitions})"
+        );
+    } else {
+        // 6-bit entry ID で per-shard ≤ 64。partitioned は senba::Cache を使うので
+        // この制約に乗らない (lib 側で cap 任意)。
+        assert!(
+            cap <= 64 * shards,
+            "--cap ({cap}) must be <= 64 * shards ({shards}) — per-shard cap is bounded by 6-bit ID"
+        );
+    }
 
     Args {
         variant,
@@ -271,15 +301,20 @@ fn parse_args() -> Args {
         ops,
         seed,
         shards,
+        partitions,
     }
 }
 
 /// 並行 variant を同じ driver で叩くための最小 trait (`bench_concurrent.rs` と同型)。
 /// `build_with_ways` は r1 等の routing variant 用、default で `build` 互換。
+/// `build_with_partitions` は partitioned variant 用、default で `build` 互換。
 trait ConcCache: Send + Sync + 'static {
     fn build(capacity: usize, shards: usize) -> Arc<Self>;
     fn build_with_ways(capacity: usize, shards: usize, _ways: usize) -> Arc<Self> {
         Self::build(capacity, shards)
+    }
+    fn build_with_partitions(capacity: usize, _partitions: usize) -> Arc<Self> {
+        Self::build(capacity, 1)
     }
     fn get_hit(&self, key: &u64) -> bool;
     fn insert(&self, key: u64, value: u64);
@@ -388,6 +423,37 @@ impl<const S: usize> ConcCache for ConcurrentSieveR1<u64, u64, S> {
     }
 }
 
+/// `senba::concurrent::PartitionedCache` の VTune driver newtype。
+/// `--partitions N` を `build_with_partitions` 経路で受ける。HITM 観測の文脈では
+/// N=T 構成が uncontended (cross-partition shared なし) になり、scaling の
+/// ボトルネックが純粋に L1d/L2/SMT-pair / E-core に切り出される。設計の出所:
+/// `docs/reports/2026-05-12-partitioned-results.md` §Scaling と物理層のボトルネック。
+struct PartitionedWrapper {
+    inner: PartitionedCache<u64, u64>,
+}
+
+impl ConcCache for PartitionedWrapper {
+    /// fallback (= `partitions=1`)。dispatch は `build_with_partitions` 経路。
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: PartitionedCache::new(capacity, 1),
+        })
+    }
+    fn build_with_partitions(capacity: usize, partitions: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: PartitionedCache::new(capacity, partitions),
+        })
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        self.inner.get(key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: u64) {
+        let _ = self.inner.insert(key, value);
+    }
+}
+
 struct Stats {
     elapsed_ns: u128,
     hits: u64,
@@ -424,12 +490,13 @@ fn run<C: ConcCache>(args: &Args) -> Stats {
     // 起動直後から collection は止めておく (-start-paused と二重防御)。
     ittapi::pause();
 
-    // ways は r1 のときだけ意味を持つ。他 variant は default impl で無視される。
-    let ways = match args.variant {
-        Variant::R1 { ways } => ways,
-        _ => 1,
+    // ways は r1 のときだけ、partitions は partitioned のときだけ意味を持つ。
+    // 他 variant は default impl 経由で無視される。
+    let cache = match args.variant {
+        Variant::R1 { ways } => C::build_with_ways(args.cap, args.shards, ways),
+        Variant::Partitioned => C::build_with_partitions(args.cap, args.partitions),
+        _ => C::build(args.cap, args.shards),
     };
-    let cache = C::build_with_ways(args.cap, args.shards, ways);
     let barrier = Arc::new(Barrier::new(args.threads + 1));
 
     let results: Vec<(u128, u64, u64)> = std::thread::scope(|s| {
@@ -494,11 +561,16 @@ fn main() {
         Variant::R1 { ways } => ways,
         _ => 1,
     };
+    let partitions = match args.variant {
+        Variant::Partitioned => args.partitions,
+        _ => 1,
+    };
     eprintln!(
-        "[bench_vtune_concurrent] variant={} ways={} threads={} cap={} keys={} skew={} \
+        "[bench_vtune_concurrent] variant={} ways={} partitions={} threads={} cap={} keys={} skew={} \
          warmup={} ops={} seed={} shards={}",
         args.variant.as_str(),
         ways,
+        partitions,
         args.threads,
         args.cap,
         args.keys,
@@ -517,6 +589,7 @@ fn main() {
         Variant::C17s => run::<ConcurrentSieveC17S<u64, u64, 64>>(&args),
         Variant::C18s => run::<ConcurrentSieveC18S<u64, u64, 64>>(&args),
         Variant::R1 { .. } => run::<ConcurrentSieveR1<u64, u64, 64>>(&args),
+        Variant::Partitioned => run::<PartitionedWrapper>(&args),
     };
 
     let total = s.hits + s.misses;
@@ -525,12 +598,13 @@ fn main() {
     let mops = (total as f64) / (s.elapsed_ns as f64 / 1e3);
 
     println!(
-        "variant,ways,threads,shards,cap,keys,skew,warmup,ops,elapsed_ns,hits,misses,hit_ratio,ns_per_op,aggregate_mops"
+        "variant,ways,partitions,threads,shards,cap,keys,skew,warmup,ops,elapsed_ns,hits,misses,hit_ratio,ns_per_op,aggregate_mops"
     );
     println!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.3},{:.3}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.3},{:.3}",
         args.variant.as_str(),
         ways,
+        partitions,
         args.threads,
         args.shards,
         args.cap,
