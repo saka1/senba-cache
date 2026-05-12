@@ -49,6 +49,7 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
+use senba::concurrent::PartitionedCache;
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache;
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
@@ -221,6 +222,44 @@ where
     }
 }
 
+/// partitioned: `senba::concurrent::PartitionedCache` を `--partitions N` 経由で
+/// 構築する newtype。`--shards` / `--ways` を無視し、`run_partitioned` が
+/// 直接 `PartitionedWrapper::new(cap, partitions)` を呼ぶ (= `ConcCache::build*`
+/// は fallback でのみ使われる)。
+struct PartitionedWrapper<V> {
+    inner: PartitionedCache<u64, V>,
+}
+
+impl<V> PartitionedWrapper<V>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn new(capacity: usize, partitions: usize) -> Self {
+        Self {
+            inner: PartitionedCache::new(capacity, partitions),
+        }
+    }
+}
+
+impl<V> ConcCache<V> for PartitionedWrapper<V>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    /// fallback (= `partitions=1`)。実際の sweep は `run_partitioned` 経由で
+    /// `PartitionedWrapper::new` を直接呼ぶ。
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity, 1))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        self.inner.get(key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = self.inner.insert(key, value);
+    }
+}
+
 impl<V, const S: usize, const B: u32> ConcCache<V> for ConcurrentSieveC15S<u64, V, S, B>
 where
     V: Clone + Send + Sync + 'static,
@@ -370,6 +409,9 @@ struct Args {
     value_kind: ValueKind,
     /// r1 の routing affinity 軸 (power of 2、1 <= ways <= shards)。非 r1 variant では無視。
     ways: usize,
+    /// partitioned の partition 数 (power of 2、>= 1)。`--partitions` 経由。非 partitioned
+    /// variant では無視。設計: `docs/reports/2026-05-12-partitioned-design.md` §(T × N) sweep。
+    partitions: usize,
     /// workload 種別。
     source: Source,
     /// `--source twitter|twitter-yang|arc` のとき trace ファイルパス必須。
@@ -393,6 +435,7 @@ fn parse_args() -> Args {
     let mut op_mix = OpMix::Gim;
     let mut value_kind = ValueKind::U64;
     let mut ways: usize = 1;
+    let mut partitions: usize = 1;
     let mut source = Source::Zipf;
     let mut trace_file: Option<String> = None;
     let mut workload_param: String = String::new();
@@ -433,6 +476,7 @@ fn parse_args() -> Args {
                 };
             }
             "--ways" => ways = val().parse().expect("--ways is usize"),
+            "--partitions" => partitions = val().parse().expect("--partitions is usize"),
             "--source" => {
                 let v = val();
                 source = match v.as_str() {
@@ -447,7 +491,7 @@ fn parse_args() -> Args {
             "--workload-param" => workload_param = val().to_string(),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: bench_concurrent [--variant ...] [--shards N] [--ways N] \
+                    "usage: bench_concurrent [--variant ...] [--shards N] [--ways N] [--partitions N] \
                      [--op-mix gim|read-heavy] [--value u64|string] \
                      [--source zipf|twitter|twitter-yang|arc] [--trace-file PATH] [--workload-param S] \
                      --cap N --threads N --skew F --keys N --ops N --warmup N \
@@ -479,6 +523,10 @@ fn parse_args() -> Args {
         ways.is_power_of_two() && ways >= 1 && ways <= shards,
         "--ways must be a power of two in [1, --shards]"
     );
+    assert!(
+        partitions.is_power_of_two() && partitions >= 1,
+        "--partitions must be a power of two >= 1"
+    );
     for v in &variants {
         assert!(
             matches!(
@@ -494,8 +542,9 @@ fn parse_args() -> Args {
                     | "c17s"
                     | "c18s"
                     | "r1"
+                    | "partitioned"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|partitioned)"
         );
     }
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
@@ -521,6 +570,7 @@ fn parse_args() -> Args {
         op_mix,
         value_kind,
         ways,
+        partitions,
         source,
         trace_file,
         workload_param,
@@ -655,6 +705,17 @@ where
     C: ConcCache<V>,
 {
     let cache = C::build_with_ways(args.cap, args.shards, args.ways);
+    run_trial_with::<V, C>(cache, args, trace)
+}
+
+/// run_trial の inner loop。cache 構築を caller に外出しすることで partitioned
+/// variant 等の non-uniform constructor (= `--partitions` 経由) も同じ harness で
+/// 叩けるようにする。
+fn run_trial_with<V, C>(cache: Arc<C>, args: &Args, trace: Option<Arc<Vec<u64>>>) -> TrialResult
+where
+    V: MakeValue,
+    C: ConcCache<V>,
+{
     let barrier = Arc::new(Barrier::new(args.threads + 1));
     let warmup_per_thread = args.warmup / args.threads;
     let ops_per_thread = args.ops / args.threads;
@@ -799,11 +860,19 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     // `1` を退化値として書く。集計側は `(variant, ways)` join で c17s baseline と r1@ways=N
     // を対応させる。
     let ways_col = if variant == "r1" { args.ways } else { 1 };
+    // partitioned のみが `--partitions` を意味的に解釈する。他 variant は退化値 `1`。
+    // 集計側は `(variant, partitions)` join で (T × N) の N 軸を読む。
+    let partitions_col = if variant == "partitioned" {
+        args.partitions
+    } else {
+        1
+    };
     println!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
         variant,
         trial,
         ways_col,
+        partitions_col,
         args.source.as_str(),
         args.workload_param,
         args.op_mix.as_str(),
@@ -822,10 +891,11 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
         r.thread_throughput_cv,
     );
     eprintln!(
-        "  [{}] trial {} ways={} per-thread Mops: [{}]",
+        "  [{}] trial {} ways={} partitions={} per-thread Mops: [{}]",
         variant,
         trial,
         ways_col,
+        partitions_col,
         r.per_thread_mops
             .iter()
             .map(|m| format!("{:.3}", m))
@@ -839,7 +909,7 @@ fn main() {
     let trace = load_trace(&args);
 
     println!(
-        "variant,trial,ways,source,workload_param,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
+        "variant,trial,ways,partitions,source,workload_param,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv"
     );
     for variant in &args.variants {
         for trial in 0..args.trials {
@@ -874,6 +944,7 @@ fn main() {
                 ("c15s_8", v) => run_c15s::<3>(&args, v, trace.clone()),
                 ("c15s_4", v) => run_c15s::<2>(&args, v, trace.clone()),
                 ("r1", v) => run_r1(&args, v, trace.clone()),
+                ("partitioned", v) => run_partitioned(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
             emit(variant, trial, &args, &r);
@@ -950,5 +1021,30 @@ fn run_r1(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResul
     match v {
         ValueKind::U64 => run_trial::<u64, R1Wrapper<u64, 64>>(args, trace),
         ValueKind::String => run_trial::<String, R1Wrapper<String, 64>>(args, trace),
+    }
+}
+
+/// partitioned: `senba::concurrent::PartitionedCache` を `--partitions N` 経由で
+/// 構築。`run_trial_with` の inner harness をそのまま使うため、cache 構築だけ
+/// 直接行い `Arc<PartitionedWrapper>` を inner に渡す。
+///
+/// `--partitions` は **`--threads` と独立な軸** として sweep する (設計
+/// `docs/reports/2026-05-12-partitioned-design.md` §(T × N) sweep)。
+fn run_partitioned(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    assert!(
+        args.cap >= args.partitions,
+        "partitioned: --cap ({}) must be >= --partitions ({})",
+        args.cap,
+        args.partitions
+    );
+    match v {
+        ValueKind::U64 => {
+            let cache = Arc::new(PartitionedWrapper::<u64>::new(args.cap, args.partitions));
+            run_trial_with::<u64, PartitionedWrapper<u64>>(cache, args, trace)
+        }
+        ValueKind::String => {
+            let cache = Arc::new(PartitionedWrapper::<String>::new(args.cap, args.partitions));
+            run_trial_with::<String, PartitionedWrapper<String>>(cache, args, trace)
+        }
     }
 }
