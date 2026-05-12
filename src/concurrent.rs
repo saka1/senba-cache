@@ -9,9 +9,10 @@
 //! ## What ships here
 //!
 //! - [`PartitionedCache`] — `N` independent [`Cache`] instances behind one
-//!   `Mutex` each, routed by thread-id. The simplest possible parallel
-//!   baseline: each thread owns one partition under the uncontended fast path,
-//!   and the per-op cost reduces to "uncontended mutex acquire + lib op".
+//!   `Mutex` each, routed by a per-thread routing hint. The simplest possible
+//!   parallel baseline: each thread owns one partition under the uncontended
+//!   fast path, and the per-op cost reduces to "uncontended mutex acquire +
+//!   lib op".
 //!
 //! The mutex implementation is [`parking_lot::Mutex`], pulled in transitively
 //! through the `concurrent` feature. Its uncontended fast path is ~5 ns
@@ -40,51 +41,63 @@ use parking_lot::Mutex;
 
 use crate::{Cache, Slot32, SlotSize, Xxh3Build};
 
-// ---------- thread-id allocator ----------
+// ---------- routing hint allocator ----------
 
-/// Sentinel for "thread has not yet been assigned an id". `u32::MAX` is
+/// Sentinel for "thread has not yet been assigned a hint". `u32::MAX` is
 /// reserved so the allocator's hot path is a single TLS load plus a
 /// predicted-not-taken branch.
 const UNASSIGNED: u32 = u32::MAX;
 
-static NEXT_TLS_ID: AtomicU32 = AtomicU32::new(0);
+static NEXT_ROUTING_HINT: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
-    static TLS_ID: Cell<u32> = const { Cell::new(UNASSIGNED) };
+    static TLS_ROUTING_HINT: Cell<u32> = const { Cell::new(UNASSIGNED) };
 }
 
-/// Returns the calling thread's monotonically-allocated TLS id, lazily
-/// assigning one on first call. Ids are never recycled (process-global),
-/// and `u32::MAX` is reserved as a sentinel — the assertion below would
-/// fire long before exhaustion in any realistic process.
+/// Returns the calling thread's routing hint — a `u32` used to bias partition
+/// selection. Lazily allocated on first call and stable for the thread's
+/// lifetime thereafter.
+///
+/// **Not a unique id.** Uniqueness is best-effort, not a contract: routing
+/// only needs each thread to land on *some* partition consistently, not on a
+/// distinct one. The allocator hands out monotonically increasing values, so
+/// in any realistic process every thread does get a distinct hint, but the
+/// type itself does not depend on that — if two threads ever collided they
+/// would simply share a partition (extra contention, no correctness impact).
+///
+/// The `assert!` below catches `u32::MAX` because that value is reserved as
+/// the "not-yet-assigned" sentinel; writing it to TLS would re-trigger the
+/// allocator on every call. Reaching `2^32` threads in a single process is
+/// not a real concern.
 #[inline]
-fn current_tls_id() -> u32 {
-    TLS_ID.with(|cell| {
-        let id = cell.get();
-        if id != UNASSIGNED {
-            id
+fn routing_hint() -> u32 {
+    TLS_ROUTING_HINT.with(|cell| {
+        let hint = cell.get();
+        if hint != UNASSIGNED {
+            hint
         } else {
-            let new_id = NEXT_TLS_ID.fetch_add(1, Ordering::Relaxed);
+            let new_hint = NEXT_ROUTING_HINT.fetch_add(1, Ordering::Relaxed);
             assert!(
-                new_id < UNASSIGNED,
-                "senba::concurrent: exhausted u32 thread-id space"
+                new_hint < UNASSIGNED,
+                "senba::concurrent: routing-hint allocator returned the reserved sentinel u32::MAX"
             );
-            cell.set(new_id);
-            new_id
+            cell.set(new_hint);
+            new_hint
         }
     })
 }
 
 // ---------- PartitionedCache ----------
 
-/// `N` independent [`Cache`] instances behind a `Mutex` each, routed by
-/// thread-id. The simplest possible parallel baseline: every operation is
-/// "compute the partition index from the calling thread's id, take that
-/// partition's mutex, run the corresponding [`Cache`] method".
+/// `N` independent [`Cache`] instances behind a `Mutex` each, routed by a
+/// per-thread routing hint. The simplest possible parallel baseline: every
+/// operation is "compute the partition index from the calling thread's
+/// routing hint, take that partition's mutex, run the corresponding
+/// [`Cache`] method".
 ///
-/// Routing is **thread-id based, not key-hash based**: the same key
-/// observed on different threads lands in different partitions and may be
-/// cached independently in each. This loses the global "one entry per key"
+/// Routing is **per-thread, not key-hash based**: the same key observed on
+/// different threads lands in different partitions and may be cached
+/// independently in each. This loses the global "one entry per key"
 /// invariant in exchange for zero cross-partition coordination. Workloads
 /// with thread-local working sets pay no HR penalty; workloads with global
 /// hot keys may see up to `partitions()`-way duplication.
@@ -203,12 +216,12 @@ where
         self.partitions.iter().all(|p| p.lock().is_empty())
     }
 
-    /// Picks the partition index for the calling thread. Thread-id based:
+    /// Picks the partition index for the calling thread. Routing-hint based:
     /// every call from the same thread returns the same index for the
     /// lifetime of the process.
     #[inline]
     fn partition_of(&self) -> usize {
-        (current_tls_id() as usize) & self.partition_mask
+        (routing_hint() as usize) & self.partition_mask
     }
 
     /// Returns a clone of the value for `key` from the calling thread's
@@ -310,8 +323,8 @@ mod tests {
 
     #[test]
     fn single_thread_basic_round_trip() {
-        // A single thread routes every op to exactly one partition (thread-id
-        // is fixed for the lifetime of the test). With 4 partitions and cap=16,
+        // A single thread routes every op to exactly one partition (routing
+        // hint is fixed for the lifetime of the test). With 4 partitions and cap=16,
         // that partition holds 4 entries — so insert only up to that cap to
         // avoid SIEVE eviction interfering with the round-trip check.
         let c: PartitionedCache<u64, u64> = PartitionedCache::new(16, 4);
@@ -329,7 +342,7 @@ mod tests {
     }
 
     /// Same key inserted from two distinct threads should end up in two
-    /// distinct partitions when the thread-id mask differs. With 16
+    /// distinct partitions when their routing hints mask differently. With 16
     /// partitions and only 2 spawned threads, a single attempt has a 1/16
     /// chance of routing both to the same partition by coincidence, so we
     /// retry until we observe the duplication.
@@ -361,18 +374,22 @@ mod tests {
         );
     }
 
-    /// Concurrent invariants smoke: 4 threads pound a partitioned cache
-    /// with Zipf-like traffic. We only check that the cache stays within
-    /// its capacity contract and that values we get back are not corrupted.
+    /// Concurrent invariants smoke: 16 threads pound a partitioned cache
+    /// with Zipf-like traffic. `threads >= 2 * partitions()` forces partition
+    /// collisions by pigeonhole, so each partition gets at least two writers
+    /// and the per-partition `Mutex` actually has to serialize cross-thread
+    /// access — without that, every partition would be touched by a single
+    /// writer and the test would never exercise the contended path.
     #[test]
     fn concurrent_invariants_smoke() {
         let cap = 256usize;
         let partitions = 8;
+        let threads = 16u64; // >= 2 * partitions to force collisions
         let cache: Arc<PartitionedCache<u64, u64>> =
             Arc::new(PartitionedCache::new(cap, partitions));
 
         std::thread::scope(|s| {
-            for tid in 0u64..4 {
+            for tid in 0..threads {
                 let c = Arc::clone(&cache);
                 s.spawn(move || {
                     // Tiny LCG to avoid pulling in rand for a lib unit test;
@@ -393,11 +410,64 @@ mod tests {
             }
         });
 
-        // len snapshot must respect the global capacity contract.
-        let total_len = cache.len();
-        assert!(
-            total_len <= cap,
-            "len snapshot {total_len} > capacity {cap}"
-        );
+        // Per-partition capacity contract is strictly stronger than the
+        // aggregate `total_len <= cap` check — verify it directly.
+        for (i, p) in cache.partitions.iter().enumerate() {
+            let p = p.lock();
+            assert!(
+                p.len() <= p.capacity(),
+                "partition {i}: len {} > capacity {}",
+                p.len(),
+                p.capacity()
+            );
+        }
+    }
+
+    /// Mixed insert + remove under contention. Some threads only insert,
+    /// some only remove the same key range. The cache must (a) stay within
+    /// per-partition capacity at all times the snapshot is taken, and (b)
+    /// never hand back a corrupted value — `get(&k)` must return `Some(k)`
+    /// or `None`.
+    #[test]
+    fn concurrent_insert_remove_preserves_invariants() {
+        let cap = 64usize;
+        let partitions = 4;
+        let cache: Arc<PartitionedCache<u64, u64>> =
+            Arc::new(PartitionedCache::new(cap, partitions));
+
+        const KEYS: u64 = 256;
+        const ITERS: usize = 10_000;
+
+        std::thread::scope(|s| {
+            for tid in 0u64..8 {
+                let c = Arc::clone(&cache);
+                let insert_thread = tid % 2 == 0;
+                s.spawn(move || {
+                    let mut state: u64 = 0xDEADBEEFCAFEBABEu64 ^ tid;
+                    for _ in 0..ITERS {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let k = (state >> 32) % KEYS;
+                        if insert_thread {
+                            c.insert(k, k);
+                        } else {
+                            c.remove(&k);
+                        }
+                        if let Some(v) = c.get(&k) {
+                            assert_eq!(v, k, "value corruption at key {k}");
+                        }
+                    }
+                });
+            }
+        });
+
+        for (i, p) in cache.partitions.iter().enumerate() {
+            let p = p.lock();
+            assert!(
+                p.len() <= p.capacity(),
+                "partition {i}: len {} > capacity {}",
+                p.len(),
+                p.capacity()
+            );
+        }
     }
 }

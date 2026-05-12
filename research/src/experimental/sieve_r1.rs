@@ -9,7 +9,7 @@
 //! 外側の routing 関数のみ:
 //!
 //! - c17s: `shard_idx = (hash as usize) & (SHARDS - 1)`  (1 引数)
-//! - r1:   `shard_idx = ((hash as usize) & set_mask) * ways + ((tls_id as usize) & way_mask)`
+//! - r1:   `shard_idx = ((hash as usize) & set_mask) * ways + ((routing_hint as usize) & way_mask)`
 //!
 //! `WAYS` は constructor で受け取る runtime 値、`SHARDS=64` は const-generic 据置。
 //! `SETS = SHARDS / WAYS`、`set_mask = SETS - 1`、`way_mask = WAYS - 1`。
@@ -18,12 +18,12 @@
 //!
 //! # routing affinity の幾何
 //!
-//! - View 1 (set-associative): SHARDS を `SETS × WAYS` に組み、K → set、TLS → way。
+//! - View 1 (set-associative): SHARDS を `SETS × WAYS` に組み、K → set、routing hint → way。
 //! - View 2 (S parallel sub-caches): cache を `WAYS` 個の独立 c17s sub-cache を glue した
 //!   ものと見る。thread t は `t mod WAYS` の sub-cache を使う。
 //!
 //! 設計 §3.3 — hot key K → set `S_K = {P*WAYS, ..., P*WAYS+WAYS-1}`、thread t →
-//! `P*WAYS + (tls_id mod WAYS)`。T ≤ WAYS なら T 個の hot ShardHot line が物理的に
+//! `P*WAYS + (routing_hint mod WAYS)`。T ≤ WAYS なら T 個の hot ShardHot line が物理的に
 //! 別 core の L1 に固定、c14s-vtune §3 の 3 hot line bouncing が構造的に 0 になる。
 //!
 //! # HR drop の trade-off
@@ -48,7 +48,7 @@ use std::hint;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
-use crate::experimental::tls_id::current_tls_id;
+use crate::experimental::routing_hint::routing_hint;
 
 /// EMPTY tag (LIVE OFF)。Path C の shift transient と pad lane に使う。
 /// c17s では Path A は tag を EMPTY 化しない。
@@ -820,7 +820,7 @@ impl<K, V> Drop for Shard<K, V> {
 
 pub const DEFAULT_SHARDS: usize = 64;
 
-/// r1: c17s と同型の単シャード機構 + `(hash, tls_id) -> shard_idx` の 2 引数 routing。
+/// r1: c17s と同型の単シャード機構 + `(hash, routing_hint) -> shard_idx` の 2 引数 routing。
 ///
 /// `WAYS=1` は c17s と bit-for-bit 等価動作する sanity 構成。`WAYS≥2` で SHARDS を
 /// `SETS × WAYS` に分割し、key は set を hash、way は TLS thread-id で選ぶ。
@@ -900,20 +900,20 @@ where
 
     pub fn contains_key(&self, key: &K) -> bool {
         let h = self.hasher.hash_one(key);
-        let tls = current_tls_id();
-        self.shards[self.shard_of(h, tls)].contains(key, h)
+        let hint = routing_hint();
+        self.shards[self.shard_of(h, hint)].contains(key, h)
     }
 
     pub fn get(&self, key: &K) -> Option<V> {
         let h = self.hasher.hash_one(key);
-        let tls = current_tls_id();
-        self.shards[self.shard_of(h, tls)].get_by_hash(key, h)
+        let hint = routing_hint();
+        self.shards[self.shard_of(h, hint)].get_by_hash(key, h)
     }
 
     pub fn insert(&self, key: K, value: V) -> Option<(K, V)> {
         let h = self.hasher.hash_one(&key);
-        let tls = current_tls_id();
-        let i = self.shard_of(h, tls);
+        let hint = routing_hint();
+        let i = self.shard_of(h, hint);
         self.shards[i].insert(key, value, h)
     }
 

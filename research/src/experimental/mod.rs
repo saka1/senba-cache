@@ -5,6 +5,7 @@
 //! variants kept around for benchmark and design comparison.
 
 pub mod concurrent_test_suite;
+pub mod routing_hint;
 pub mod sieve_c10s;
 pub mod sieve_c11s;
 pub mod sieve_c12s;
@@ -28,7 +29,6 @@ pub mod sieve_v0;
 pub mod sieve_v1;
 pub mod sieve_v2;
 pub mod sieve_v3;
-pub mod tls_id;
 
 /// Common interface used by the cross-variant oracle test
 /// (`research/tests/oracle.rs`) and the research microbench
