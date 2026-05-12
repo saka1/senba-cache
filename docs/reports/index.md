@@ -26,7 +26,7 @@
 | 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention, c16s-design, c16s-results |
 | r 系列 (shard 間 routing × thread affinity の解空間) | r1-design, r1-results |
 | MT overhead 構造分析 (c/r-series vs lib の絶対値 ceiling) | mt-overhead-vs-lib |
-| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design, partitioned-results |
+| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design, partitioned-results, partitioned-vtune |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -246,3 +246,6 @@ r-series 初期 baseline sweep。前 sweep (cluster52 単独 / T=16 偏り / val
 
 ### 2026-05-12-partitioned-results.md
 仮説検証: partitioned design の (T × N × workload) 1215 trial sweep を実施 (parking_lot::Mutex 採用版)。**設計 gate cell (Zipf 1.4 read-heavy T=16 N=16) は採用ライン +50% に対し −43% で失格**: partitioned 75.4 Mops vs c17s 133.1 Mops、T=1 ですら partitioned が負ける (c17s の AVX2 + epoch fast path が hot-key 帯で per-op 7.5 ns まで落ちており、partitioned の mutex+lib 30 ns/op で勝てない)。一方 real trace では partitioned 圧勝: Twitter cluster019 **+390% (HR drop 2.6 pp)**、cluster034 +206%、ARC OLTP +109% (HR drop 28 pp)、ARC DS1 +383% (HR drop 0.2 pp)。accept zone (HR drop ≤5pp & Mops gain ≥+20%) 44/225 = 19.6% で「100 cell」目標未達だが scan-heavy 帯に連続。設計の reject 条件には機械的に該当するが、領域分割が鮮明で lib 価値は独立にあるため keep/move 判断は人間に委ねる。
+
+### 2026-05-13-partitioned-vtune.md
+仮説判定 (partitioned-results §Scaling 物理層 3 仮説): VTune memory-access + uarch-exploration を 9 cell (cap ∈ {4096, 1024} × T=N ∈ {1,8,16}) で。**memory BW 律速は却下** (cap=4096 で LLC Miss = 0, DRAM Bound ≤0.1%、データは 20 MiB L3 に完全 fit)。**L3 latency が主犯**: cap=4096 T=8 で L3 Bound 41.7% / Memory Bound 44.8%、cap を 4096→1024 (per-partition 128 KiB → 32 KiB、L1d fit) に縮めるだけで **L3 Bound 41.7→26.9% / aggregate Mops 50.8→133.7 (+163%)**。**SMT pair L1d 共有が副犯**: cap=4096 T=8→T=16 で L1 Bound +9.8 pp、cap=1024 で +2.5 pp に縮む。E-core は memory に詰まっておらず drag 寄与小。**cap-tune が partitioned scaling の支配因子** であり、設計書 reject 条件 (Zipf 1.4 read-heavy で c17s 同等以下) は cap=4096 前提だったため再評価が必要 — cap=1024 では T=16 partitioned 157.5 Mops ≥ c17s 133.1 Mops。HR との trade-off は cap=1024 で bench_concurrent sweep を取り直すのが次の最重要項目。
