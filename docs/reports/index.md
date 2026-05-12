@@ -26,7 +26,7 @@
 | 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention, c16s-design, c16s-results |
 | r 系列 (shard 間 routing × thread affinity の解空間) | r1-design, r1-results |
 | MT overhead 構造分析 (c/r-series vs lib の絶対値 ceiling) | mt-overhead-vs-lib |
-| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design |
+| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design, partitioned-results |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -243,3 +243,6 @@ r-series 初期 baseline sweep。前 sweep (cluster52 単独 / T=16 偏り / val
 
 ### 2026-05-12-partitioned-design.md
 仮説: mt-overhead-vs-lib で出した「lib の単スレ性能を T 倍積めるなら ceiling は 640 Mops」を直接ベンチマークできる baseline として、`senba::Cache` を N 個並べて thread-id でルーティングするだけの `senba::concurrent::PartitionedCache` を lib に新設する。実装は `Box<[Mutex<Cache>]>` + TLS counter routing で ~150 行、依存追加ゼロ (`std::sync::Mutex` のみ)。`bench_concurrent` に `--variant partitioned --partitions N` を新軸として追加し、**T と N を独立に sweep する (T × N = 5 × 7 cell × workload)** ことを設計契約に明記。期待: HR-tolerant (cluster019 / MergeP) で partitioned 圧勝、HR-sensitive (ARC OLTP / cluster006) で完敗、その領域マップが成果物。本書は企画 + 実装着手前段で、sweep / 結果は後続レポートで切る。
+
+### 2026-05-12-partitioned-results.md
+仮説検証: partitioned design の (T × N × workload) 1215 trial sweep を実施 (parking_lot::Mutex 採用版)。**設計 gate cell (Zipf 1.4 read-heavy T=16 N=16) は採用ライン +50% に対し −43% で失格**: partitioned 75.4 Mops vs c17s 133.1 Mops、T=1 ですら partitioned が負ける (c17s の AVX2 + epoch fast path が hot-key 帯で per-op 7.5 ns まで落ちており、partitioned の mutex+lib 30 ns/op で勝てない)。一方 real trace では partitioned 圧勝: Twitter cluster019 **+390% (HR drop 2.6 pp)**、cluster034 +206%、ARC OLTP +109% (HR drop 28 pp)、ARC DS1 +383% (HR drop 0.2 pp)。accept zone (HR drop ≤5pp & Mops gain ≥+20%) 44/225 = 19.6% で「100 cell」目標未達だが scan-heavy 帯に連続。設計の reject 条件には機械的に該当するが、領域分割が鮮明で lib 価値は独立にあるため keep/move 判断は人間に委ねる。
