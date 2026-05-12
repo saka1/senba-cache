@@ -140,12 +140,53 @@ cap=4096 T=8 uarch で Lock Latency 6.7% を観測したが、Memory Bound 44.8%
 
 ## 今後
 
-優先度順:
+### 直近 (経験的検証、採否確定のために先に回す)
 
 1. **cap=1024 で `bench_concurrent` の (T × N × workload) sweep を取り直す**: HR と Mops の trade-off マップが本研究の最大の宿題。`2026-05-12-partitioned-results.md` の領域分割 (Zipf 完敗 / real trace 圧勝) が cap=1024 でどう動くか。real trace (Twitter cluster019, ARC DS1) は元々 HR-tolerant なので cap 縮小で更に partitioned 有利になる仮説、検証する。**partitioned 採否を確定させる sweep**。
 2. **memory-object group-by で partition Mutex の cacheline を直接観測**: 残存 L3 Bound 26.9% のうち Mutex line の寄与を分離。`vtune -report hotspots -group-by memory-object` を既存 `r_part_cap1024_T8_N8_mem` に対して回せばコスト 0 で取れる。
 3. SMT off (T=6 P-core affinity) cell: cap-tune で大半消えたので優先度低、但し partitioned の物理ピーク値を knowledge として持っておく価値はある。
 4. cap=512 / cap=256 を加えた cap sweep: L1d fit 帯のさらに下で writer (eviction + insert) 比率が増え、Mutex contention が初めて支配的になるはず。partitioned の reject ライン側を見にいく。
+
+### 計算量増を許して L3 を緩める algorithmic 案 (採否確定後)
+
+cap-tune は library の自由度として大きいが、ユーザーに sizing を強いる解。algorithmic に同じ効果を狙えれば lib として価値が上がる。本書の VTune 結果に基づき、計算量を多少増やしてでも L3 Bound を削る方向に何が刺さるかを整理しておく。
+
+**まず効かない方向の棄却**: tag を u8 → u4 等に縮める案は割が悪い。理由は tags 4 KiB がそもそも sequential SIMD scan で L1d 在留しており、L3 Bound 41% を吐いているのは **entries 96 KiB/partition のランダム touch** だから。tag false positive 率を 1/256 → 1/16 に劣化させると entry cacheline の余計な touch が増えて逆効果になる。tag 側を弄っても entries 側の working set には影響しない。
+
+候補 (期待値順):
+
+| 案 | 概要 | 期待 perf | コスト / risk |
+|---|---|---|---|
+| **two-tier (hot/cold split)** | partition 内側に小 hot tier (cap=128 ≈ 4 KiB、L1d 完全 fit) + 大 cold tier。Zipf 1.4 で hot tier が hit の 85%+ を捌けば、その op は L3 完全回避 | **+100% 候補 (cap-tune と独立、相乗あり)** | 新 variant `partitioned_tiered` を作るだけ、既存 `Cache` × 2 で実験可。promotion path の race-free 性のみ要設計 |
+| **entry fingerprint 化** | entry の full key (u64 = 8B) を 32-bit fingerprint に置換。per-partition 96 KiB → 64 KiB に縮む | +50–80% (L3 Bound 41% → 25% 見込み) | slot layout 全書き換え、`Iter` で原 key を返せなくなる API 影響あり |
+| **prefetch batch API** | `get_many(&[K])` を生やし、batch 内で `keys[i+k]` の tag/entry line を `_mm_prefetch` で先読み | batch 限定で +30–50%、単発 get には効かない | additive (`get` 互換維持)、実装コスト最小 |
+| inline shard (1 cacheline / shard) | tag+entry を 1 cacheline 内に inline、SoA → AoS 寄せ | 単体小、上記と組み合わせ前提 | layout 全書き換え、SIMD scan の vector 化が崩れる |
+| direct-mapped variant | SIEVE 廃して hash 直撃、collision は問答無用に上書き | speed +、HR − (real trace で沈む) | accept zone が狭い、HR-sensitive workload で失格 |
+
+**実装着手の優先案: two-tier**。理由は (a) cap-tune の延長線で「ユーザーが cap を選ばなくても hot tier が勝手に L1d fit する」絵が library として綺麗、(b) 既存 `senba::Cache` を 2 段に組むだけで研究実装は最小、(c) VTune で L3 Bound が 41% → 15% に落ちれば一発で診断確定 (外れても情報量大)。entry fingerprint 化は API 影響が広く、partitioned 採否が確定してから着手するほうが投資判断しやすい。prefetch batch API は **public API 拡張として独立に価値がある** ので、algorithmic 系列とは別軸で進められる。
+
+順序としては「直近の sweep で採否確定 → two-tier 試作 → fingerprint 検討 → batch API 追加」が無駄が少ない。algorithmic 案を先に走らせると、partitioned の reject 判定が変わった場合に試作が空振りになる。
+
+#### fingerprint 化の設計空間 (MemC3 との比較、oracle 緩和の話)
+
+fingerprint key は senba の独自発明ではなく、**MemC3** (Fan, Andersen, Kaminsky, NSDI'13) が memcached 互換実装で同じ「index を L1d/L2 在留させる」目的で採用した古典手法。ただし memcached は **純 KV store** で `get(K)` が K と無関係な V を返すのは仕様違反なので、MemC3 は fingerprint match 後に payload arena の full key と verify する。これに対し senba は **cache (任意 eviction 許容)** なので、verify を払うか省くかが新たな設計自由度になる:
+
+| 設計 | hit path | 誤 hit 時 | 衝突確率 (32-bit fp) |
+|---|---|---|---|
+| A. full key 保持 (現状 `senba::Cache`) | tag → entry (key+val) → key eq → val | 起きない | 0 |
+| B. MemC3 流 (verify あり) | tag → fp → fp eq → arena (key+val) → key eq | 起きない、verify cost あり | 0 |
+| C. **verify 省略 (senba 新自由度)** | tag → fp → fp eq → val (line touch 最小) | 間違った V を返す、ただし "誤 hit → 自然な evict" として cache 挙動に吸収 | ~2.3 × 10⁻¹⁰ |
+
+C の誤 hit は cap=4096 で 100M ops 走らせて期待 0.023 件。application から見ると「miss だったが別 key の値が返る」形で、cache 上の値の妥当性を application が独立に確認している大半のユースケースでは区別不能。
+
+**oracle 整合の問題と、その上での位置づけ**: C を採ると `sieve_orig` との eviction sequence bit-exact 一致は崩れる (fingerprint 衝突で evict 対象が変わる)。これは厳しい contract に見えるが、現実には senba の **set-associative variants (j3+) が既に strict SIEVE から外れている** — 公開 oracle (`research/tests/oracle.rs`) も j3/j8 については `cap = per_shard` (= 1 shard) 構成でしか一致を取っていない。multi-shard 配置で運用する c-series / r-series / partitioned は **既に「SIEVE 意味論を per-shard でしか保たない」近似** で、global eviction order は原 SIEVE と異なる挙動を許容する流れにある。fingerprint-relaxed (C) はその系譜の自然な延長 (= 「SIEVE 厳格性をどこまで希釈するか」連続スペクトル上の更に 1 歩) であって、新規の劣化ではなく、既にある trade-off の延伸として位置づけられる。
+
+公開 API としての切り分け方:
+
+- 研究系列の variant (`senba-research::experimental::sieve_X`) は C 路線を遠慮なく踏んで perf 上限を取りに行く
+- `senba::Cache` (公開 lib) は A を保つか B を採るかの 2 択 — `Cache` の contract に「fingerprint 衝突で誤値を返さない」を残すかどうかは別判断
+
+この区分は CLAUDE.md の "senba (publishable) / senba-research (experimental)" 二層構造とも整合的。oracle 緩和は research crate 内で完結し、publish 面の信頼性は守られる。
 
 ## 関連レポート
 
