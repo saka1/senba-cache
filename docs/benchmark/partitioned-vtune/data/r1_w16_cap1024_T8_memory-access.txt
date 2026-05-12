@@ -1,0 +1,24 @@
+# vtune -collect memory-access -knob analyze-mem-objects=true \
+#     -knob mem-object-size-min-thres=64 -start-paused -- \
+#     bench_vtune_concurrent.exe \
+#     --variant r1@ways=16 --threads 8 --shards 64 \
+#     --cap 1024 --keys 100000 --skew 1.4 \
+#     --warmup 400000 --ops 100000000 --seed 42
+#
+# host: Windows native, Intel i5-12600K
+# binary: target/x86_64-pc-windows-msvc/release/bench_vtune_concurrent.exe
+# date: 2026-05-13
+
+Elapsed Time:    2.998s
+    CPU Time:    3.666s
+    Performance-core (P-core):
+    Memory Bound:    10.2%
+    Efficient-core (E-core):
+    Memory Bound:    0.0%
+    Uncore:
+    DRAM Bandwidth Bound:    0.0%
+    Loads:    8,928,967,861
+    Stores:    5,071,352,136
+    LLC Miss Count:    0
+    Total Thread Count:    9
+    Paused Time:    2.394s

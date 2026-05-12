@@ -26,7 +26,7 @@
 | 並行 write contention の道具箱 (hot-key 対策、LongAdder visited) | write-contention-design-space, visited-bitmap, c14s-vtune-write-contention, c16s-design, c16s-results |
 | r 系列 (shard 間 routing × thread affinity の解空間) | r1-design, r1-results |
 | MT overhead 構造分析 (c/r-series vs lib の絶対値 ceiling) | mt-overhead-vs-lib |
-| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design, partitioned-results, partitioned-vtune |
+| partitioned baseline (`senba::concurrent::PartitionedCache`, lib surface) | partitioned-design, partitioned-results, partitioned-vtune, partitioned-cap1024-sweep |
 | 5 cluster ベース sweep (cluster006/016/018/019/034) | st-twitter-5cluster |
 | ライブラリ化 (`senba::Cache` 公開 API) | senba-sievecache-design, twitter-string-keys, senba-twitter-string-sweep, sieve-cache-shift-on-evict, inline-design-cache-vs-inner, api-comparison-moka-lru → `docs/api-comparison.md` に昇格 |
 
@@ -249,3 +249,6 @@ r-series 初期 baseline sweep。前 sweep (cluster52 単独 / T=16 偏り / val
 
 ### 2026-05-13-partitioned-vtune.md
 仮説判定 (partitioned-results §Scaling 物理層 3 仮説): VTune memory-access + uarch-exploration を 9 cell (cap ∈ {4096, 1024} × T=N ∈ {1,8,16}) で。**memory BW 律速は却下** (cap=4096 で LLC Miss = 0, DRAM Bound ≤0.1%、データは 20 MiB L3 に完全 fit)。**L3 latency が主犯**: cap=4096 T=8 で L3 Bound 41.7% / Memory Bound 44.8%、cap を 4096→1024 (per-partition 128 KiB → 32 KiB、L1d fit) に縮めるだけで **L3 Bound 41.7→26.9% / aggregate Mops 50.8→133.7 (+163%)**。**SMT pair L1d 共有が副犯**: cap=4096 T=8→T=16 で L1 Bound +9.8 pp、cap=1024 で +2.5 pp に縮む。E-core は memory に詰まっておらず drag 寄与小。**cap-tune が partitioned scaling の支配因子** であり、設計書 reject 条件 (Zipf 1.4 read-heavy で c17s 同等以下) は cap=4096 前提だったため再評価が必要 — cap=1024 では T=16 partitioned 157.5 Mops ≥ c17s 133.1 Mops。HR との trade-off は cap=1024 で bench_concurrent sweep を取り直すのが次の最重要項目。
+
+### 2026-05-13-partitioned-cap1024-sweep.md
+仮説検証 (partitioned-vtune §Future): VTune Win native で観測した「cap=1024 で T=16 partitioned 157.5 Mops ≥ c17s 133.1 Mops」が bench_concurrent full sweep で再現するかを WSL2 Linux で確認。**結果は仮説と逆向き**: partitioned accept rate **19.6% → 7.6%**、設計 gate (Zipf 1.4 RH T=16 N=16) は partitioned 73 vs c17s **155 = −53%** で更に悪化。c17s も cap-tune で +17% 取り、cap-tune は variant 固有利益ではなく cache サイズの関数だった。**追加で r1 を Windows VTune memory-access + uarch-exploration で計 6 cell 取得**: (i) r1 は cap=4096 T=16 で既に Memory Bound 4-10% / 178.6 Mops (partitioned cap=1024 T=16 ピーク 157.5 を超過)、(ii) **uarch で case B (compute 律速、ほぼ理想) を確定** — CPI 0.358-0.475 / **Retiring 59.6%→71.2%** / Back-End Bound 13.5%→10.1% / Bad Spec T=16 で 1.5%。Alder Lake P-core 構造的天井域。partitioned T=8 (CPI 1.746 / Back-End 69.5%) との対比で「**sharded routing が L3 trap を構造的に回避** ので memory wait が起きず CPU が実際に演算に使われる」が uarch 側からも裏付け。VTune 生データは `docs/benchmark/partitioned-vtune/data/` に保存。次の焦点は bench_concurrent を Win native cross-build して sweep を取り直し、r1 を lib に上げる根拠を集めること。

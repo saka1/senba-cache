@@ -1,0 +1,32 @@
+# vtune -collect uarch-exploration -start-paused \
+#     -result-dir r_r1_w16_cap4096_T8_uarch -- \
+#     bench_vtune_concurrent.exe \
+#     --variant r1@ways=16 --threads 8 --shards 64 \
+#     --cap 4096 --keys 100000 --skew 1.4 \
+#     --warmup 400000 --ops 100000000 --seed 42
+#
+# host: Windows native, Intel i5-12600K
+# binary: target/x86_64-pc-windows-msvc/release/bench_vtune_concurrent.exe
+# date: 2026-05-13
+
+Elapsed Time:    2.913s
+    Clockticks:    13,848,302,000
+    Instructions Retired:    38,732,488,000
+    CPI Rate:    0.358
+    MUX Reliability:    0.974
+    Performance-core (P-core):
+    Retiring:    59.6%
+    Front-End Bound:    15.6%
+    Bad Speculation:    11.2%
+    Back-End Bound:    13.5%
+    Efficient-core (E-core):
+    Retiring:    34.3%
+    Front-End Bound:    6.2%
+    Bad Speculation:    43.1%
+    Back-End Bound:    16.4%
+    Info Metrics:
+    Stores Bound:    0.010
+    Load Bound:    0.087
+    Average CPU Frequency:    4.4 GHz
+    Total Thread Count:    9
+    Paused Time:    2.350s
