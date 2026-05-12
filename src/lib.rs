@@ -35,6 +35,14 @@ use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 
+/// `senba::concurrent::*` — thread-safe wrappers built on top of [`Cache`].
+///
+/// **Experimental.** Opt-in via the `concurrent` Cargo feature; the API and
+/// semantics may change without notice until the design (see
+/// `docs/reports/2026-05-12-partitioned-design.md`) is validated on
+/// production workloads.
+#[cfg(feature = "concurrent")]
+#[cfg_attr(docsrs, doc(cfg(feature = "concurrent")))]
 pub mod concurrent;
 pub mod hash;
 mod iter;

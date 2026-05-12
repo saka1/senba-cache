@@ -26,6 +26,30 @@ include = [
 
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Pulled in only when the `concurrent` feature is enabled (experimental
+# `senba::concurrent::PartitionedCache`). Default-off keeps the publishable
+# surface single-dep for the stable ST `Cache`.
+parking_lot = { version = "0.12", optional = true }
+
+[features]
+default = []
+# **Experimental.** Enables `senba::concurrent::*` — currently just
+# `PartitionedCache`. The API and semantics may change without notice until
+# the design is validated on production workloads (sweep methodology in
+# `docs/reports/2026-05-12-partitioned-design.md`). Opt-in via:
+#
+#     senba = { version = "0.2", features = ["concurrent"] }
+#
+# Implicitly pulls in `parking_lot` for its faster uncontended `Mutex`
+# (~5 ns vs `std::sync::Mutex`'s ~10-15 ns on Linux glibc).
+concurrent = ["dep:parking_lot"]
+
+[package.metadata.docs.rs]
+# Render the `concurrent` module on docs.rs even though it's not part of
+# the default build. The "Available on crate feature ..." badge marks
+# every gated item.
+features = ["concurrent"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [profile.release]
 # debuginfo so samply / `perf annotate` can map asm back to source lines.

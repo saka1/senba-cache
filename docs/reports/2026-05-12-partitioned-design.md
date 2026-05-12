@@ -31,12 +31,38 @@ c17s / r1 / moka / mini-moka との同 sweep で **partitioned が支配する c
 3. **downstream user に直接価値がある**: scan-heavy / per-thread workload では
    c-series より HR / throughput 両面で勝つ可能性が高く (r1-results の cluster019 等を
    参照)、moka / mini-moka に代わる選択肢として library 価値が独立にある。
-4. dep を増やさない: `std::sync::Mutex` のみ使用、senba の既存 dep (`xxhash-rust`) を
-   除き新規追加ゼロ。
 
 `senba::Cache` の `&mut self` API は wrap 不能 (interior mutability 必須) のため、
 `PartitionedCache` は新しい `concurrent` module 配下に独立した型として置く。
 publishable な並行 API として初の登場となる。
+
+## experimental status と feature gating
+
+並行 API はまだ sweep 前の **実験段階** で API 安定性を約束できないため、`senba`
+crate に **`concurrent` Cargo feature** (default-off) を新設し、
+`senba::concurrent` module は feature 有効時のみコンパイル対象に含める形にする。
+default user は `senba::Cache` (ST surface) しか見えず、existence 自体が hidden:
+
+```toml
+# 既定 (ST 利用者): 何も変わらない
+senba = "0.2"
+
+# 並行 API を opt-in する利用者
+senba = { version = "0.2", features = ["concurrent"] }
+```
+
+`concurrent` feature は `parking_lot` を transitive dep として引き込み、
+内部実装の `Mutex` は `parking_lot::Mutex` を使う。`std::sync::Mutex` 比で
+uncontended fast path が ~5 ns (vs ~10–15 ns)、Mutex object sizeof が 1 byte
+(vs ~40 byte)、poisoning なし (= `.lock().unwrap()` の boilerplate 不要)、
+という 3 点が partitioned の per-op 25–35 ns 帯で意味的に効く。default
+user は `parking_lot` を transitively 引かないので、ST surface の依存
+最小性 (`xxhash-rust` 1 本) は維持。
+
+`docs.rs` 側は `[package.metadata.docs.rs] features = ["concurrent"]` を指定し、
+`#[cfg_attr(docsrs, doc(cfg(feature = "concurrent")))]` で feature gate を
+明示表示。reject 確定時は feature ごと削除して publish history から消す経路を
+残す。
 
 ## API スケッチ
 
@@ -248,9 +274,9 @@ surface を汚す。
 
 ## Risk register
 
-- **R1**: `std::sync::Mutex` が `parking_lot::Mutex` より遅く ceiling 推定 (~35 ns/op)
-  に届かない。→ 観測したら parking_lot 採用を再検討、lib 側に新規 dep として
-  入れるか別 module で分けるか別途判断。
+- **R1** (解消済): Mutex の uncontended cost で ceiling に届かないリスク → `concurrent`
+  feature 経由で `parking_lot::Mutex` を最初から採用、設計時想定の 35 ns/op に
+  乗る前提で sweep 計画を組む。
 - **R2**: `current_tls_id()` の TLS slot 確保コストが見えないが thread spawn 時の
   1 回限りなので bench loop には乗らない。問題なし想定。
 - **R3**: N が大きいと **メモリ footprint が N 倍に膨らむ**
@@ -258,6 +284,11 @@ surface を汚す。
   user は cap/N で渡す形になり、API doc で明記が必要。
 - **R4**: `partition_mask` が power-of-two 仮定なので `N=3` 等を panic で弾く。
   user friendly な制約だが doc に書く必要あり。
+- **R5** (feature gating の副作用): workspace 内で誰かが `senba` を default
+  feature で引いていて、別 crate が `features = ["concurrent"]` で引くと、
+  Cargo の feature unification で全 crate 側に `concurrent` が漏れる。`senba`
+  本体のテストが default + with-feature の両方で通る必要があるので CI matrix
+  を要分割。
 
 ## 関連レポート
 
