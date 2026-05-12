@@ -13,6 +13,11 @@
 //!   baseline: each thread owns one partition under the uncontended fast path,
 //!   and the per-op cost reduces to "uncontended mutex acquire + lib op".
 //!
+//! The mutex implementation is [`parking_lot::Mutex`], pulled in transitively
+//! through the `concurrent` feature. Its uncontended fast path is ~5 ns
+//! (vs. ~10–15 ns for `std::sync::Mutex` on Linux glibc), which matters at
+//! the per-op overhead this baseline targets.
+//!
 //! Design rationale: see `docs/reports/2026-05-12-partitioned-design.md`.
 //! The (T × N) sweep methodology — threads and partition count vary
 //! independently — is part of the contract for this type.
@@ -29,8 +34,9 @@
 use std::borrow::Borrow;
 use std::cell::Cell;
 use std::hash::{BuildHasher, Hash};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use parking_lot::Mutex;
 
 use crate::{Cache, Slot32, SlotSize, Xxh3Build};
 
@@ -182,25 +188,19 @@ where
 
     /// Total capacity summed across every partition (fixed at construction).
     pub fn capacity(&self) -> usize {
-        self.partitions
-            .iter()
-            .map(|p| p.lock().unwrap().capacity())
-            .sum()
+        self.partitions.iter().map(|p| p.lock().capacity()).sum()
     }
 
     /// Number of live entries summed across every partition. Snapshot value:
     /// concurrent inserts on other partitions can change before this
     /// returns. Locks every partition's mutex in turn.
     pub fn len(&self) -> usize {
-        self.partitions
-            .iter()
-            .map(|p| p.lock().unwrap().len())
-            .sum()
+        self.partitions.iter().map(|p| p.lock().len()).sum()
     }
 
     /// `true` when every partition is empty. Like [`Self::len`], a snapshot.
     pub fn is_empty(&self) -> bool {
-        self.partitions.iter().all(|p| p.lock().unwrap().is_empty())
+        self.partitions.iter().all(|p| p.lock().is_empty())
     }
 
     /// Picks the partition index for the calling thread. Thread-id based:
@@ -225,7 +225,7 @@ where
         V: Clone,
     {
         let i = self.partition_of();
-        self.partitions[i].lock().unwrap().get(key).cloned()
+        self.partitions[i].lock().get(key).cloned()
     }
 
     /// Non-promoting lookup — returns a clone of the value without setting
@@ -237,7 +237,7 @@ where
         V: Clone,
     {
         let i = self.partition_of();
-        self.partitions[i].lock().unwrap().peek(key).cloned()
+        self.partitions[i].lock().peek(key).cloned()
     }
 
     /// Inserts `(key, value)` into the calling thread's partition. Returns
@@ -248,7 +248,7 @@ where
     /// Equivalent to [`Cache::insert`] on the chosen partition.
     pub fn insert(&self, key: K, value: V) -> Option<(K, V)> {
         let i = self.partition_of();
-        self.partitions[i].lock().unwrap().insert(key, value)
+        self.partitions[i].lock().insert(key, value)
     }
 
     /// Removes the entry for `key` from the calling thread's partition and
@@ -259,7 +259,7 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let i = self.partition_of();
-        self.partitions[i].lock().unwrap().remove(key)
+        self.partitions[i].lock().remove(key)
     }
 
     /// Returns `true` when `key` is currently in the calling thread's
@@ -270,7 +270,7 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let i = self.partition_of();
-        self.partitions[i].lock().unwrap().contains_key(key)
+        self.partitions[i].lock().contains_key(key)
     }
 }
 
@@ -292,11 +292,7 @@ mod tests {
         // Sum of per-partition capacities must equal the requested total
         // (matches Cache::with_shards's "first `extra` partitions get +1" rule).
         assert_eq!(c.capacity(), 103);
-        let per: Vec<usize> = c
-            .partitions
-            .iter()
-            .map(|p| p.lock().unwrap().capacity())
-            .collect();
+        let per: Vec<usize> = c.partitions.iter().map(|p| p.lock().capacity()).collect();
         assert_eq!(per, vec![26, 26, 26, 25]);
     }
 

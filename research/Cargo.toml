@@ -17,7 +17,7 @@ publish = false
 external-traces = ["dep:zstd"]
 
 [dependencies]
-senba = { path = ".." }
+senba = { path = "..", features = ["concurrent"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Zipf generator (workload module).
 rand = "0.10"
