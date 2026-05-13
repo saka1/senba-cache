@@ -7,8 +7,11 @@ Compared to well-known alternatives like moka and lru-cache, it has interesting 
 
 SIMD is x86_64 + AVX2/BMI1 only; other targets fall back to a scalar scan (still correct, just slower).
 
-The crate is single-threaded: every mutating operation takes `&mut self`.
-Wrap in `Mutex<Cache>` / `RwLock<Cache>` if you need concurrent access.
+The default surface ([`senba::Cache`]) is single-threaded: every
+mutating operation takes `&mut self`. For multi-threaded use, the
+opt-in `concurrent` feature ships [`senba::concurrent::Cache`] — a
+sharded, lock-free-reader variant with the same SIEVE policy; see
+[Concurrent access](#concurrent-access) below.
 
 ## Quick start
 
@@ -110,10 +113,45 @@ println!(
 `evictions` counts only capacity-driven evictions inside `insert`;
 explicit removal (`remove`, `clear`, `retain`, `drain`) is not counted.
 
+## Concurrent access
+
+The `concurrent` Cargo feature exposes `senba::concurrent::Cache` — a
+sharded SIEVE cache with a lock-free reader path. Internally each entry's
+value is held behind an `Arc<V>`; the writer's drop is deferred through
+`crossbeam-epoch` so a reader cloning a value can never race a
+concurrent eviction. The contract matches `moka::sync::Cache<K, V>`:
+`V: Clone + Send + Sync + 'static`, every operation takes `&self`,
+`get` / `remove` return `Option<V>` (cloned).
+
+```toml
+[dependencies]
+senba = { version = "0.3", features = ["concurrent"] }
+```
+
+```rust
+use senba::concurrent::Cache;
+use std::sync::Arc;
+
+let cache: Arc<Cache<u64, String>> = Arc::new(Cache::new(4096));
+cache.insert(1, "hello".into());
+assert_eq!(cache.get(&1), Some("hello".to_string()));
+```
+
+`Cache::new(capacity)` picks the shard count from `capacity` via
+`next_pow2(cap/8)` (clamped to per-shard `[4, 64]`); override with
+`Cache::with_shards` if you want a specific count. The reader path is
+AVX2 + entry-version seqlock — `x86_64 + AVX2` only — and is not
+exposed on other targets. The writer path uses `parking_lot::Mutex`
+under contention.
+
+Design notes and the sweep that picked the auto-shard heuristic live
+in `docs/reports/2026-05-13-c17s-shard-heuristic.md` and
+`docs/reports/2026-05-13-senba-concurrent-cache-design.md`.
+
 ## Future work
 
 - **Wider SIMD coverage** — NEON for aarch64, and a portable 128-bit fallback for x86_64 without AVX2, so the vectorized `find` is not gated on a single ISA extension.
-- **Multi-threaded API** — a concurrent variant that does not require the caller to wrap `Cache` in a `Mutex` / `RwLock`. The current single-threaded design is deliberate (it keeps the per-shard SIEVE state machine and the SIMD scan trivially sound); a sharded, lock-amortized concurrent surface is the natural next step.
+- **Concurrent extensions** — `peek` / `iter` / `Stats` on `senba::concurrent::Cache` (v0.3 ships the minimal `get` / `insert` / `remove` / `contains_key` surface).
 
 ## Reference
 
