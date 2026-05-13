@@ -328,10 +328,14 @@ mod tests {
             ids_before, ids_after,
             "Path A update changed the id mapping (unexpected Path C fallthrough)"
         );
-        // c17s invariant: tag is fully immutable on update (c14s/c16s flipped a VERSION bit).
+        // Path A invariant: tag is fully immutable on an in-place key
+        // update; only the entry version flips. Earlier research variants
+        // (c14s/c16s) flipped a VERSION bit in the tag — this design does
+        // not, and the test guards against accidental regression to that
+        // shape.
         assert_eq!(
             tags_before, tags_after,
-            "Path A update changed the tag (c17s requires tag-immutable updates as a core property)"
+            "Path A update changed the tag (must stay tag-immutable as a core property)"
         );
         assert_eq!(cache.get(&2), Some(222));
     }
@@ -494,7 +498,8 @@ mod tests {
         assert_eq!(S::hash_mask().count_ones(), 9);
         assert_eq!(S::scan_mask(), S::live_bit_pub() | S::hash_mask());
 
-        // LIVE | ID | HASH cover all 16 bits with no overlap (c17s has no VERSION field).
+        // LIVE | ID | HASH cover all 16 bits with no overlap — no
+        // VERSION bit in the tag (the entry seqlock subsumes its role).
         assert_eq!(S::live_bit_pub() | S::id_mask() | S::hash_mask(), 0xFFFF);
         assert_eq!(S::live_bit_pub() & S::id_mask(), 0);
         assert_eq!(S::live_bit_pub() & S::hash_mask(), 0);
