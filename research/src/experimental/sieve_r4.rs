@@ -242,6 +242,30 @@ fn defer_drop_if_needed<V: Send + 'static>(v: V) {
     }
 }
 
+/// Path C / remove で旧 K, V の双方を defer drop する。両方が `!needs_drop` のときは
+/// `mem::forget` の組に縮退、片方でも drop を持つなら 1 回の `epoch::pin` + 1 個の closure に
+/// 束ねる。
+#[inline]
+fn defer_drop_kv_if_needed<K, V>(k: K, v: V)
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
+    if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
+        let guard = epoch::pin();
+        // SAFETY: K, V: Send + 'static で closure capture が健全。
+        unsafe {
+            guard.defer_unchecked(move || {
+                drop(k);
+                drop(v);
+            });
+        }
+    } else {
+        std::mem::forget(k);
+        std::mem::forget(v);
+    }
+}
+
 impl<K, V> Shard<K, V>
 where
     K: Hash + Eq + Send + 'static,
@@ -602,7 +626,10 @@ where
         }
 
         // (c) Path C: 定常 evict + shift + install
-        Some(self.writer_evict_and_install(&mut state, key, value, needle))
+        // r4: 旧 K, V は defer closure に move されるので caller に返さない。常に None。
+        //     Phase 4 lib 統合時に API contract を再検討する。
+        self.writer_evict_and_install(&mut state, key, value, needle);
+        None
     }
 
     /// writer 内部 find: tags + entry version + key 比較。Mutex 配下だが Path A と並行する
@@ -728,7 +755,7 @@ where
         key: K,
         value: V,
         needle: u16,
-    ) -> (K, V) {
+    ) {
         let cap = self.capacity;
         debug_assert_eq!(self.hot.len.load(Ordering::Relaxed), cap);
         if state.hand >= cap {
@@ -811,7 +838,10 @@ where
         // reader に retry を促す)。
         self.hot.path_c_epoch.fetch_add(1, Ordering::Release);
 
-        (evicted_key, evicted_value)
+        // r4: 旧 K, V を epoch defer で reclaim (race β + race γ 防御、設計 §6.4)。
+        //     path_c_epoch publish の後に呼ぶのは defer 自体が global queue に積む
+        //     だけで visibility は epoch 進行に従うため (publish 順序問題は起きない)。
+        defer_drop_kv_if_needed::<K, V>(evicted_key, evicted_value);
     }
 
     /// hand 巡回: visited を見て立っていれば剥がす、立っていなければ evict 候補。
@@ -1012,13 +1042,15 @@ mod tests {
 
     crate::concurrent_suite!(ConcurrentSieveCache<u64, u64>);
 
+    // r4: Path C は evicted (K,V) を defer closure に move するため `insert` は常に None を
+    // 返す。oracle 等価性は cache contents (contains_key / get) 側で検証する。
     #[test]
     fn evicts_oldest_when_full_and_unvisited() {
         let cache: ConcurrentSieveCache<i32, i32, 1> = ConcurrentSieveCache::new(2);
         cache.insert(1, 10);
         cache.insert(2, 20);
         let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((1, 10)));
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key(&1));
         assert!(cache.contains_key(&2));
@@ -1032,7 +1064,10 @@ mod tests {
         cache.insert(2, 20);
         cache.get(&1);
         let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((2, 20)));
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
+        assert!(cache.contains_key(&1), "visited key 1 survived");
+        assert!(!cache.contains_key(&2), "unvisited key 2 evicted");
+        assert!(cache.contains_key(&3));
     }
 
     #[test]
@@ -1043,7 +1078,11 @@ mod tests {
         cache.get(&1);
         cache.get(&2);
         let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((1, 10)));
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
+        // SIEVE: 全 visited → 一周してクリア → 最古 (=1) を evict。
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
     }
 
     #[test]
@@ -1054,8 +1093,9 @@ mod tests {
         assert_eq!(cache.insert(3, 300), None);
         assert_eq!(cache.insert(4, 400), None);
         assert_eq!(cache.len(), 4);
+        // r4: Path C 経由でも常に None。
         let evicted = cache.insert(5, 500);
-        assert!(evicted.is_some());
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
         assert_eq!(cache.len(), 4);
         assert_eq!(cache.get(&5), Some(500));
     }
@@ -1131,6 +1171,7 @@ mod tests {
     }
 
     /// 既存キー update が visited を 1 に SET (sieve_orig の `freq=1` と一致)。
+    /// r4: evicted identity は返らないので contains_key で SIEVE 不変条件を検証。
     #[test]
     fn update_existing_key_sets_visited_like_oracle() {
         let cache: ConcurrentSieveCache<i32, i32, 1> = ConcurrentSieveCache::new(2);
@@ -1138,12 +1179,11 @@ mod tests {
         cache.insert(2, 20);
         cache.insert(1, 11); // update via Path A
         let evicted = cache.insert(3, 30);
-        assert_eq!(
-            evicted,
-            Some((2, 20)),
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
+        assert!(
+            cache.contains_key(&1),
             "update が visited を SET しないと (1) が evict されてしまう"
         );
-        assert!(cache.contains_key(&1));
         assert!(!cache.contains_key(&2));
         assert!(cache.contains_key(&3));
     }
@@ -1181,8 +1221,9 @@ mod tests {
         let ids_before: Vec<usize> = sh.live_ids();
         assert_eq!(sh.live_count(), 4);
         assert_eq!(ids_before, vec![0, 1, 2, 3]);
+        // r4: Path C は常に None を返す。SIEVE 不変条件は live_count / tag / id で検証。
         let evicted = cache.insert(99, 9900);
-        assert!(evicted.is_some());
+        assert!(evicted.is_none(), "r4 returns None on Path C eviction");
         assert_eq!(sh.live_count(), 4);
         let last_tag = sh.tags[3].load(Ordering::Acquire);
         let last_id = Shard::<u64, u64>::id_of(last_tag);
