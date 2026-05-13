@@ -1040,6 +1040,8 @@ chmod +x docs/benchmark/r4-sanitizer/run.sh
 
 期待: `[OK] TSan clean.`。**race report が出る場合**は report の stack trace を確認し、設計 §6 の証明と突き合わせる (典型的には compiler_fence の位置漏れ、defer 順序ミスを疑う)。修正は別 task として plan に追加。
 
+> **Findings (2026-05-14):** TSan は **16 warnings** を出力、内訳は **すべて seqlock pattern による expected false-positive** (writer の `ptr::write` / `version CAS` と reader の `ptr::read` の byte-level overlap)。設計 §6.1 の race α 防御で v2 一致確認で discard されるため意図された動作。TSan は seqlock semantics を解さないため、Linux kernel seqlock + KCSAN と同じ false-positive を出す。ASan を race β/γ の一次検証に使う (Task 11)。詳細は `docs/benchmark/r4-sanitizer/findings.md` 参照。
+
 - [ ] **Step 9.4: コミット**
 
 ```bash
@@ -1128,6 +1130,8 @@ echo "[OK] ASan clean."
 ```
 
 期待: `[OK] ASan clean.`。**heap-use-after-free が出る場合**は race β/γ 防御が破れているサイン。stack trace から writer (Path A/C) の defer 漏れか reader pin の取り忘れを特定する。
+
+> **Findings (2026-05-14):** **ASan clean** (20M ops / T=8 / V=String / hot-key skew=1.8 / read-heavy で UAF / SEGV ゼロ)。race β (clone-mid-flight UAF) と race γ (K drop on remove) は crossbeam-epoch defer で実機 confirm。設計 §6.2 の証明と整合。
 
 - [ ] **Step 11.3: コミット**
 
