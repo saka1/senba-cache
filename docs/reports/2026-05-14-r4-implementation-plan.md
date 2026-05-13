@@ -955,6 +955,11 @@ cargo build --release -p senba-research --bin bench_concurrent --features senba/
 > - V=String: c17s = X.X Mops, r4 = Y.Y Mops (Δ vs senba = +Z.Z%)
 ```
 
+> **Smoke result (2026-05-14, T=16, cap=4096, shards=512, skew=1.4 gim, 1 trial):**
+> - V=u64:    c17s = 173.29 Mops, **r4 = 175.76 Mops** (Δ vs c17s = **+1.4%**), senba_concurrent = 66.84 Mops
+> - V=String: c17s = 112.59 Mops, **r4 = 109.90 Mops** (Δ vs c17s = **−2.4%**, Δ vs senba = **+84.8%**), senba_concurrent = 59.46 Mops
+> - Accept 基準 (V=u64 ≥ −5%, V=String vs senba ≥ +30%) 両方 pass、特に V=String は大幅超過。Phase 2 進行可。
+
 - [ ] **Step 8.4: コミット**
 
 ```bash
