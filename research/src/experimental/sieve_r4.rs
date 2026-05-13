@@ -49,7 +49,36 @@ use std::cell::UnsafeCell;
 use std::hash::{BuildHasher, Hash};
 use std::hint;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{
+    AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, compiler_fence, fence,
+};
+
+use crossbeam_epoch as epoch;
+
+/// `mem::needs_drop::<V>()` の monomorphize-time fold で V: Copy の場合に
+/// guard 取得を完全消去するための wrapper。`Some(epoch::Guard)` バリアントは
+/// Drop 時に reader の pin を release する。
+///
+/// 設計 §8.1 (`needs_drop` const branch + `EpochGuardWrapper`) 参照。
+#[allow(dead_code)]
+enum EpochGuardWrapper {
+    Some(epoch::Guard),
+    None,
+}
+
+#[inline(always)]
+fn needs_epoch<V>() -> bool {
+    std::mem::needs_drop::<V>()
+}
+
+#[inline(always)]
+fn pin_for<V>() -> EpochGuardWrapper {
+    if needs_epoch::<V>() {
+        EpochGuardWrapper::Some(epoch::pin())
+    } else {
+        EpochGuardWrapper::None
+    }
+}
 
 /// EMPTY tag (LIVE OFF)。Path C の shift transient と pad lane に使う。
 /// r4 では Path A は tag を EMPTY 化しない。
@@ -322,6 +351,9 @@ where
         // 真の所有者であり、local は bitwise copy なので drop すると double-free。
         let buf: ManuallyDrop<Entry<K, V>> =
             unsafe { ManuallyDrop::new(std::ptr::read(entry_ptr)) };
+        // r4: LLVM IR 段の non-atomic load (ptr::read の中身) を v2 load の後ろに reorder
+        //     させない。x86 では codegen 上 no-op (TSO で隠蔽)。設計 §6.3 参照。
+        compiler_fence(Ordering::Acquire);
         let v2 = unsafe { (*entry_ptr).version.load(Ordering::Acquire) };
         if v1 != v2 {
             return Probe::Racing;
@@ -349,15 +381,17 @@ where
         self.get_by_hash(key, hash).is_some()
     }
 
-    /// r4: `path_c_epoch` snapshot による coarse retry + `try_candidate` 由来の
-    /// `racing` flag による fine retry の OR で MAX_READER_RETRY 回まで再試行する。
-    /// hit 経路では `if let Some(v)` で epoch_after を skip するので、hit cost は
-    /// epoch_before 1 atomic load (これ自体が ShardHot line を L1 に呼ぶ)。
-    /// 「epoch_before も hit から skip」という最適化を試みたが miss 経路で find_get
-    /// 倍化 → skew=1.0 gim T=4 で −10pp 退行 (revert 済み、`2026-05-11-r4-results.md`
-    /// §11 参照)。
+    /// `path_c_epoch` snapshot による coarse retry + `try_candidate` 由来の `racing` flag
+    /// による fine retry の OR で MAX_READER_RETRY 回まで再試行する (c17s 由来)。hit 経路で
+    /// は `if let Some(v)` で epoch_after を skip するので、hit cost は epoch_before 1 atomic
+    /// load のみ。
+    ///
+    /// **r4 固有**: 入口で `pin_for::<V>()` を取得し、scan + V::clone 中に writer の
+    /// deferred drop が走らないことを保証する。`needs_drop::<V>()` が false (= V: Copy) の
+    /// とき pin は monomorphize-time に dead code 除去される (設計 §8.2)。
     pub fn get_by_hash(&self, key: &K, hash: u64) -> Option<V> {
         const MAX_READER_RETRY: usize = 4;
+        let _guard = pin_for::<V>();
         let needle = Self::needle_from_hash(hash);
         for attempt in 0..MAX_READER_RETRY {
             let epoch_before = self.hot.path_c_epoch.load(Ordering::Acquire);
@@ -509,6 +543,8 @@ where
         }
         let buf: ManuallyDrop<Entry<K, V>> =
             unsafe { ManuallyDrop::new(std::ptr::read(entry_ptr)) };
+        // r4: IR-level reorder 防止。設計 §6.3。x86 codegen 上 no-op。
+        compiler_fence(Ordering::Acquire);
         let v2 = unsafe { (*entry_ptr).version.load(Ordering::Acquire) };
         if v1 != v2 {
             return None;
