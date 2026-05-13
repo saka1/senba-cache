@@ -58,6 +58,7 @@ use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
 use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
+use senba_research::experimental::sieve_r2h::ConcurrentSieveR2h;
 use senba_research::workload::arc_preset;
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
@@ -207,6 +208,43 @@ where
     V: Clone + Send + Sync + 'static,
 {
     /// fallback (= `ways=1`)。実際の sweep は `build_with_ways` 経由。
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity, 1))
+    }
+    fn build_with_ways(capacity: usize, _shards: usize, ways: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity, ways))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        self.inner.get(key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = self.inner.insert(key, value);
+    }
+}
+
+/// r2h: r1 の hash-routed control。同 routing 構造を持つので R1Wrapper と同型の薄い
+/// newtype を一個増やすだけ。`--ways` 軸は r1 と同じ意味で取る。
+struct R2hWrapper<V, const S: usize> {
+    inner: ConcurrentSieveR2h<u64, V, S>,
+}
+
+impl<V, const S: usize> R2hWrapper<V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn new(capacity: usize, ways: usize) -> Self {
+        Self {
+            inner: ConcurrentSieveR2h::with_ways(capacity, ways),
+        }
+    }
+}
+
+impl<V, const S: usize> ConcCache<V> for R2hWrapper<V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
     fn build(capacity: usize, _shards: usize) -> Arc<Self> {
         Arc::new(Self::new(capacity, 1))
     }
@@ -561,9 +599,10 @@ fn parse_args() -> Args {
                     | "c17s"
                     | "c18s"
                     | "r1"
+                    | "r2h"
                     | "partitioned"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|partitioned)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|partitioned)"
         );
     }
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
@@ -869,16 +908,27 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     let shards_col = if matches!(
         variant,
-        "c8" | "c9" | "c14s" | "c15s_16" | "c15s_8" | "c15s_4" | "c16s" | "c17s" | "c18s" | "r1"
+        "c8" | "c9"
+            | "c14s"
+            | "c15s_16"
+            | "c15s_8"
+            | "c15s_4"
+            | "c16s"
+            | "c17s"
+            | "c18s"
+            | "r1"
+            | "r2h"
     ) {
         args.shards
     } else {
         0
     };
-    // 非 r1 variant では ways は意味を持たないが、CSV schema を symmetric に保つため
-    // `1` を退化値として書く。集計側は `(variant, ways)` join で c17s baseline と r1@ways=N
-    // を対応させる。
-    let ways_col = if variant == "r1" { args.ways } else { 1 };
+    // ways 軸を持つのは r1 / r2h 系。それ以外は退化値 `1` で CSV を symmetric に。
+    let ways_col = if matches!(variant, "r1" | "r2h") {
+        args.ways
+    } else {
+        1
+    };
     // partitioned のみが `--partitions` を意味的に解釈する。他 variant は退化値 `1`。
     // 集計側は `(variant, partitions)` join で (T × N) の N 軸を読む。
     let partitions_col = if variant == "partitioned" {
@@ -963,6 +1013,7 @@ fn main() {
                 ("c15s_8", v) => run_c15s::<3>(&args, v, trace.clone()),
                 ("c15s_4", v) => run_c15s::<2>(&args, v, trace.clone()),
                 ("r1", v) => run_r1(&args, v, trace.clone()),
+                ("r2h", v) => run_r2h(&args, v, trace.clone()),
                 ("partitioned", v) => run_partitioned(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
@@ -1091,6 +1142,38 @@ fn run_r1(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResul
         65536 => arm_r1!(65536),
         131072 => arm_r1!(131072),
         n => panic!("r1 shards={n} not in supported set (4,8,16,32,...,131072)"),
+    }
+}
+
+/// r2h: r1 の hash-routed control。dispatch 構造は r1 と完全に同型 (SHARDS 軸 +
+/// `--ways`)。差分は `R2hWrapper` の routing rule のみ。
+fn run_r2h(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    macro_rules! arm_r2h {
+        ($s:literal) => {
+            match v {
+                ValueKind::U64 => run_trial::<u64, R2hWrapper<u64, $s>>(args, trace),
+                ValueKind::String => run_trial::<String, R2hWrapper<String, $s>>(args, trace),
+            }
+        };
+    }
+    match args.shards {
+        4 => arm_r2h!(4),
+        8 => arm_r2h!(8),
+        16 => arm_r2h!(16),
+        32 => arm_r2h!(32),
+        64 => arm_r2h!(64),
+        128 => arm_r2h!(128),
+        256 => arm_r2h!(256),
+        512 => arm_r2h!(512),
+        1024 => arm_r2h!(1024),
+        2048 => arm_r2h!(2048),
+        4096 => arm_r2h!(4096),
+        8192 => arm_r2h!(8192),
+        16384 => arm_r2h!(16384),
+        32768 => arm_r2h!(32768),
+        65536 => arm_r2h!(65536),
+        131072 => arm_r2h!(131072),
+        n => panic!("r2h shards={n} not in supported set (4,8,16,32,...,131072)"),
     }
 }
 

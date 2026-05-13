@@ -25,6 +25,7 @@ pub mod sieve_j7;
 pub mod sieve_j8;
 pub mod sieve_orig;
 pub mod sieve_r1;
+pub mod sieve_r2h;
 pub mod sieve_v0;
 pub mod sieve_v1;
 pub mod sieve_v2;
