@@ -471,6 +471,47 @@ fn c17s_1shard_matches_orig_on_synthetic_zipf() {
     );
 }
 
+/// **r4 (1-shard) は SIEVE 等価**: c17s skeleton + crossbeam-epoch (race β 防御) variant。
+/// state machine は c17s と同型なので `sieve_orig` と eviction stream / cache contents が
+/// 完全一致する。本テストは V=u64 (Copy) で走らせるため epoch path は monomorphize-time に
+/// dead code 除去される (= c17s 相当の codegen を確認するついで)。設計 §6 で V=!Copy も
+/// 同じ等価性を持つことが証明されている (V=String は stress test 側で実機検証)。
+///
+/// 設計詳細は `docs/reports/2026-05-14-arc-less-concurrent-design.md` 参照。
+#[test]
+fn r4_1shard_matches_orig_on_synthetic_zipf() {
+    use senba_research::experimental::sieve_r4::ConcurrentSieveCache as R4;
+    let mut total_diff = 0usize;
+    let mut total_ops = 0usize;
+    for &(skew, cap) in &[(1.05_f64, 16usize), (1.1, 32), (1.2, 64), (1.5, 64)] {
+        let trace: Vec<u64> = ZipfGen::new(skew, 10_000, 42).take(200_000).collect();
+        let mut a: sieve_orig::SieveCache<u64, u64> = sieve_orig::SieveCache::new(cap);
+        let b: R4<u64, u64, 1> = R4::new(cap);
+        for k in &trace {
+            a.insert(*k, *k);
+            b.insert(*k, *k);
+        }
+        let mut diff = 0usize;
+        for &k in &trace {
+            if a.get(&k).copied() != b.get(&k) {
+                diff += 1;
+            }
+        }
+        eprintln!(
+            "[r4 vs orig] skew={skew} cap={cap}: diff={diff}/{} ({:.4}%)",
+            trace.len(),
+            100.0 * diff as f64 / trace.len() as f64
+        );
+        total_diff += diff;
+        total_ops += trace.len();
+    }
+    assert_eq!(
+        total_diff, 0,
+        "r4 が sieve_orig と divergent ({total_ops} ops 中 {total_diff} diff): \
+         epoch defer 導入が SIEVE 不変条件を破っている (= 設計通りでない)"
+    );
+}
+
 /// **c18s は SIEVE 等価**: c17s から `Entry::version` を別配列 `versions: [AtomicU32; 64]`
 /// に逃がした (G2-α-2) variant。Entry を Slot16 に戻し、`path_c_epoch` を ShardHot から
 /// 新 ReaderState block に移動。state machine 自体は c17s と同型なので `sieve_orig` と

@@ -60,6 +60,7 @@ use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
 use senba_research::experimental::sieve_r2h::ConcurrentSieveR2h;
 use senba_research::experimental::sieve_r3::ConcurrentSieveR3;
+use senba_research::experimental::sieve_r4::ConcurrentSieveCache as ConcurrentSieveR4;
 use senba_research::workload::arc_preset;
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
@@ -201,6 +202,23 @@ where
     #[inline]
     fn insert(&self, key: u64, value: V) {
         let _ = ConcurrentSieveR3::insert(self, key, value);
+    }
+}
+
+impl<V, const S: usize> ConcCache<V> for ConcurrentSieveR4<u64, V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveR4::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveR4::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = ConcurrentSieveR4::insert(self, key, value);
     }
 }
 
@@ -617,9 +635,10 @@ fn parse_args() -> Args {
                     | "r1"
                     | "r2h"
                     | "r3"
+                    | "r4"
                     | "senba_concurrent"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|r3|senba_concurrent)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|r3|r4|senba_concurrent)"
         );
     }
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
@@ -936,6 +955,7 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
             | "r1"
             | "r2h"
             | "r3"
+            | "r4"
             | "senba_concurrent"
     ) {
         args.shards
@@ -1031,6 +1051,7 @@ fn main() {
                 ("r1", v) => run_r1(&args, v, trace.clone()),
                 ("r2h", v) => run_r2h(&args, v, trace.clone()),
                 ("r3", v) => run_r3(&args, v, trace.clone()),
+                ("r4", v) => run_r4(&args, v, trace.clone()),
                 ("senba_concurrent", v) => run_senba_concurrent(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
@@ -1143,6 +1164,39 @@ fn run_r3(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResul
         65536 => arm_r3!(65536),
         131072 => arm_r3!(131072),
         n => panic!("r3 shards={n} not in supported set (4,8,16,32,...,131072)"),
+    }
+}
+
+/// r4: c17s + crossbeam-epoch (V: !Copy soundness)。shard-count axis は c17s と同型。
+fn run_r4(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    macro_rules! arm_r4 {
+        ($s:literal) => {
+            match v {
+                ValueKind::U64 => run_trial::<u64, ConcurrentSieveR4<u64, u64, $s>>(args, trace),
+                ValueKind::String => {
+                    run_trial::<String, ConcurrentSieveR4<u64, String, $s>>(args, trace)
+                }
+            }
+        };
+    }
+    match args.shards {
+        4 => arm_r4!(4),
+        8 => arm_r4!(8),
+        16 => arm_r4!(16),
+        32 => arm_r4!(32),
+        64 => arm_r4!(64),
+        128 => arm_r4!(128),
+        256 => arm_r4!(256),
+        512 => arm_r4!(512),
+        1024 => arm_r4!(1024),
+        2048 => arm_r4!(2048),
+        4096 => arm_r4!(4096),
+        8192 => arm_r4!(8192),
+        16384 => arm_r4!(16384),
+        32768 => arm_r4!(32768),
+        65536 => arm_r4!(65536),
+        131072 => arm_r4!(131072),
+        n => panic!("r4 shards={n} not in supported set (4,8,16,32,...,131072)"),
     }
 }
 
