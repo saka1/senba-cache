@@ -59,6 +59,7 @@ use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
 use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
 use senba_research::experimental::sieve_r2h::ConcurrentSieveR2h;
+use senba_research::experimental::sieve_r3::ConcurrentSieveR3;
 use senba_research::workload::arc_preset;
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
@@ -183,6 +184,23 @@ where
     #[inline]
     fn insert(&self, key: u64, value: V) {
         let _ = ConcurrentSieveC18S::insert(self, key, value);
+    }
+}
+
+impl<V, const S: usize> ConcCache<V> for ConcurrentSieveR3<u64, V, S>
+where
+    V: Clone + Send + Sync + 'static,
+{
+    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
+        Arc::new(ConcurrentSieveR3::new(capacity))
+    }
+    #[inline]
+    fn get_hit(&self, key: &u64) -> bool {
+        ConcurrentSieveR3::get(self, key).is_some()
+    }
+    #[inline]
+    fn insert(&self, key: u64, value: V) {
+        let _ = ConcurrentSieveR3::insert(self, key, value);
     }
 }
 
@@ -598,9 +616,10 @@ fn parse_args() -> Args {
                     | "c18s"
                     | "r1"
                     | "r2h"
+                    | "r3"
                     | "senba_concurrent"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|senba_concurrent)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|r3|senba_concurrent)"
         );
     }
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
@@ -916,6 +935,7 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
             | "c18s"
             | "r1"
             | "r2h"
+            | "r3"
             | "senba_concurrent"
     ) {
         args.shards
@@ -1010,6 +1030,7 @@ fn main() {
                 ("c15s_4", v) => run_c15s::<2>(&args, v, trace.clone()),
                 ("r1", v) => run_r1(&args, v, trace.clone()),
                 ("r2h", v) => run_r2h(&args, v, trace.clone()),
+                ("r3", v) => run_r3(&args, v, trace.clone()),
                 ("senba_concurrent", v) => run_senba_concurrent(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
@@ -1088,6 +1109,40 @@ fn run_c18s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialRes
     match v {
         ValueKind::U64 => run_trial::<u64, ConcurrentSieveC18S<u64, u64, 64>>(args, trace),
         ValueKind::String => run_trial::<String, ConcurrentSieveC18S<u64, String, 64>>(args, trace),
+    }
+}
+
+/// r3: RwLock-based concurrent variant。c17s と同じ shard-count axis を持つので
+/// arm_c17s と同形の macro dispatch、`--shards` で SHARDS を選ぶ。
+fn run_r3(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
+    macro_rules! arm_r3 {
+        ($s:literal) => {
+            match v {
+                ValueKind::U64 => run_trial::<u64, ConcurrentSieveR3<u64, u64, $s>>(args, trace),
+                ValueKind::String => {
+                    run_trial::<String, ConcurrentSieveR3<u64, String, $s>>(args, trace)
+                }
+            }
+        };
+    }
+    match args.shards {
+        4 => arm_r3!(4),
+        8 => arm_r3!(8),
+        16 => arm_r3!(16),
+        32 => arm_r3!(32),
+        64 => arm_r3!(64),
+        128 => arm_r3!(128),
+        256 => arm_r3!(256),
+        512 => arm_r3!(512),
+        1024 => arm_r3!(1024),
+        2048 => arm_r3!(2048),
+        4096 => arm_r3!(4096),
+        8192 => arm_r3!(8192),
+        16384 => arm_r3!(16384),
+        32768 => arm_r3!(32768),
+        65536 => arm_r3!(65536),
+        131072 => arm_r3!(131072),
+        n => panic!("r3 shards={n} not in supported set (4,8,16,32,...,131072)"),
     }
 }
 
