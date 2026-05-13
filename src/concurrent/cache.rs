@@ -11,11 +11,15 @@
 //! `next_pow2(cap/8)` auto-shard choice and the `MIN_PER_SHARD = 4` cliff
 //! analysis that motivates the lib defaults.
 //!
-//! ## Soundness boundary (this commit)
+//! ## Soundness model
 //!
-//! `V: Copy` is required — see `shard.rs` module doc. The follow-up commit
-//! lifts this to `V: Clone` by storing each entry's value behind an
-//! `Arc<V>` and reclaiming writer-side drops through `crossbeam-epoch`.
+//! The entry arena stores `Arc<V>` rather than raw `V`; readers bump the
+//! refcount on the bit-copy they pulled out of `entries[id]` and writers
+//! defer their old `Arc<V>` drops through `crossbeam-epoch`. The reader's
+//! local epoch pin keeps the deferred drops alive until every in-flight
+//! `V::clone` finishes (see `shard.rs` module doc for the protocol). This
+//! lets the public API require only `V: Clone + Send + Sync + 'static`,
+//! matching `moka::sync::Cache<K, V>`.
 
 mod shard;
 
@@ -70,7 +74,7 @@ pub struct Cache<K, V, H: BuildHasher = Xxh3Build> {
 impl<K, V> Cache<K, V, Xxh3Build>
 where
     K: Hash + Eq + Send + Sync + 'static,
-    V: Copy + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     /// Creates a cache with `capacity` total entries split across an
     /// automatically chosen power-of-two number of shards (see module doc).
@@ -90,7 +94,7 @@ where
 impl<K, V, H> Cache<K, V, H>
 where
     K: Hash + Eq + Send + Sync + 'static,
-    V: Copy + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
     H: BuildHasher,
 {
     /// Cache with a user-supplied [`BuildHasher`] and auto-chosen shards.
@@ -484,6 +488,69 @@ mod tests {
         assert_eq!(auto_shard(8), 1);
         // cap=16 → target = 2, min = 1, max = 4 → 2
         assert_eq!(auto_shard(16), 2);
+    }
+
+    #[test]
+    fn v_string_chaos_under_contention() {
+        // Stresses the Arc<V> + epoch reclamation path with a heap-owning V.
+        // Under the previous (V: Copy) implementation this test would race
+        // a writer's drop against a reader's clone and segfault on heap V;
+        // with `Arc<V>` + `crossbeam-epoch` it must run clean.
+        use std::sync::Arc;
+        use std::thread;
+
+        let cap = 64usize;
+        let cache: Arc<Cache<u64, String>> = Arc::new(Cache::new(cap));
+
+        thread::scope(|s| {
+            // Writers: hammer a small key universe with churning string values.
+            for tid in 0..4u64 {
+                let c = Arc::clone(&cache);
+                s.spawn(move || {
+                    for i in 0..10_000u64 {
+                        let k = (i ^ tid).wrapping_mul(0x9E37_79B9_7F4A_7C15) % 256;
+                        let v = format!("t{tid}-i{i}-k{k}");
+                        c.insert(k, v);
+                    }
+                });
+            }
+            // Readers: keep cloning values out and assert they're well-formed.
+            for tid in 0..4u64 {
+                let c = Arc::clone(&cache);
+                s.spawn(move || {
+                    for i in 0..10_000u64 {
+                        let k = (i ^ tid).wrapping_mul(0xBF58_476D_1CE4_E5B9) % 256;
+                        if let Some(v) = c.get(&k) {
+                            // The whole point: we received an owned `String`
+                            // whose heap allocation didn't get freed mid-clone.
+                            assert!(v.starts_with('t'), "torn string: {:?}", v);
+                            // Force inspection of the heap bytes; if the
+                            // allocation were freed under us, ASan / heap
+                            // checker would fire here.
+                            let _ = v.len();
+                            let _: u32 = v.bytes().map(u32::from).sum();
+                        }
+                    }
+                });
+            }
+        });
+
+        // Final structural invariants.
+        let total_len = cache.len();
+        assert!(total_len <= cap);
+        let nshards = cache.shards();
+        let mut sum_live = 0;
+        for i in 0..nshards {
+            let sh = cache.shard(i);
+            let live = sh.live_count();
+            assert_eq!(live, sh.len());
+            sum_live += live;
+        }
+        assert_eq!(sum_live, total_len);
+
+        // Spot-check we can still get/remove without UAF.
+        let _ = cache.get(&7);
+        let _ = cache.remove(&7);
     }
 
     #[test]

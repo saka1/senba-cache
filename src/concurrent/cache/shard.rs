@@ -28,22 +28,39 @@
 //! used (c17s removed it; the entry seqlock subsumes its role), so reader
 //! needle-match collides only on the 9 hash bits.
 //!
-//! ## Soundness boundary (this commit: `V: Copy`)
+//! ## Soundness model: `Arc<V>` + `crossbeam-epoch`
 //!
 //! The reader's `ptr::read(entry_ptr)` is a bit-wise copy of the live
-//! `Entry<K, V>` — its `V` field is now a bit-wise duplicate of the entry's
-//! `V`. If a concurrent writer drops the original `V` before the reader
-//! has finished cloning the duplicate, heap-owning `V` (e.g. `String`)
-//! reads freed memory. **For now this module requires `V: Copy`** to stay
-//! sound; the follow-up commit threads `Arc<V>` + `crossbeam-epoch` GC
-//! through this same code path to lift the bound to `V: Clone`.
+//! `Entry<K, Arc<V>>` — its `value: Arc<V>` field is a bit-copy `Arc`
+//! sharing the live `ArcInner`'s refcount. To clone `V` out of it safely
+//! the reader needs the `ArcInner` to stay allocated past the writer's
+//! drop. We get that from `crossbeam-epoch`:
+//!
+//! 1. Reader pins the local epoch on entry (`get_by_hash`).
+//! 2. After the seqlock validates, reader bumps the strong count
+//!    (`Arc::increment_strong_count` on the bit-copy's inner pointer)
+//!    before calling `V::clone` — `Arc::from_raw` reconstructs the owned
+//!    handle and drops it after the clone, decrementing back.
+//! 3. Writers (Path A in-place replace, Path C evict + install, `remove`)
+//!    `Guard::defer_unchecked` the old `Arc<V>`'s drop instead of
+//!    decrementing immediately. The deferred drop fires only after every
+//!    pin held at the moment of `defer` is released, so any reader who
+//!    had observed the old `Arc` has finished cloning before the
+//!    `ArcInner` is freed.
+//!
+//! The result: `V: Clone + Send + Sync + 'static` is sound (matching
+//! `moka::sync::Cache<K, V>`), with the `Arc<V>` indirection adding a
+//! single pointer-sized field per entry and ~3–5 ns of `epoch::pin`
+//! overhead on the hot reader path.
 
+use crossbeam_epoch as epoch;
 use parking_lot::Mutex;
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
 use std::hash::Hash;
 use std::hint;
 use std::mem::{ManuallyDrop, MaybeUninit};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
 /// `EMPTY` tag (LIVE bit cleared). Used for the Path C shift transient and
@@ -79,8 +96,10 @@ const fn hash_mask_from_id_mask(id_mask: u16) -> u16 {
 /// Single entry in the per-shard arena.
 ///
 /// `repr(C, align(32))` makes the size a power of two regardless of the
-/// natural alignment of `K` / `V`. `version` lives at offset 0 so the
-/// seqlock load is the first cache line touched.
+/// natural alignment of `K` / `Arc<V>`. `version` lives at offset 0 so the
+/// seqlock load is the first cache line touched. `value` is `Arc<V>` so
+/// readers can extend the value's lifetime past a writer's drop via
+/// epoch-deferred reclamation (module doc).
 #[repr(C, align(32))]
 struct Entry<K, V> {
     /// Even = stable, odd = writer in flight. Path A and Path C write the
@@ -88,7 +107,7 @@ struct Entry<K, V> {
     /// store(v+2)` envelope.
     version: AtomicU32,
     key: K,
-    value: V,
+    value: Arc<V>,
 }
 
 enum Probe<V> {
@@ -148,9 +167,9 @@ pub(crate) struct Shard<K, V> {
 // SAFETY: writes to `entries[id]` are guarded by `Entry::version` (Path A)
 // or by `hot.writer` (Path B/C). The `UnsafeCell` is the only `!Sync` field
 // at the type level; the protocol above turns it into a properly
-// synchronised arena. Sound for `V: Send + Sync` because the published `V`
-// values flow across threads via the reader's seqlock-validated copy.
-unsafe impl<K: Send, V: Send> Send for Shard<K, V> {}
+// synchronised arena. `Arc<V>: Send + Sync` requires `V: Send + Sync`, so
+// that lifts to the Shard as well.
+unsafe impl<K: Send + Sync, V: Send + Sync> Send for Shard<K, V> {}
 unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Shard<K, V> {}
 
 impl<K, V> Shard<K, V> {
@@ -192,11 +211,7 @@ impl<K, V> Shard<K, V> {
     }
 }
 
-impl<K, V> Shard<K, V>
-where
-    K: Hash + Eq,
-    V: Copy,
-{
+impl<K, V> Shard<K, V> {
     pub(crate) fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
         assert!(
@@ -233,7 +248,13 @@ where
             },
         }
     }
+}
 
+impl<K, V> Shard<K, V>
+where
+    K: Hash + Eq,
+    V: Clone + Send + Sync + 'static,
+{
     /// Spread the top 9 bits of `hash` over the 9 HASH bits of the tag.
     /// The HASH region is **not** contiguous (the ID region cuts through
     /// it), so the spread splits along the ID boundary.
@@ -267,6 +288,11 @@ where
     {
         const MAX_READER_RETRY: usize = 4;
         let needle = Self::needle_from_hash(hash);
+        // Pin the local epoch for the duration of the lookup. Any
+        // `Arc<V>` we read out of `entries[id]` keeps its `ArcInner`
+        // alive past a concurrent writer's `defer_unchecked` drop as long
+        // as this pin is held.
+        let _guard = epoch::pin();
         for attempt in 0..MAX_READER_RETRY {
             let epoch_before = self.hot.path_c_epoch.load(Ordering::Acquire);
             // SAFETY: AVX2 verified in `Shard::new`.
@@ -347,7 +373,8 @@ where
             return Probe::Racing;
         }
         // SAFETY: ManuallyDrop suppresses the local Drop. `entries[id]` keeps
-        // ownership of the live K, V; the local copy must not double-free.
+        // ownership of the live K and `Arc<V>`; the local copy must not
+        // double-free (we'd otherwise decrement the strong count twice).
         let buf: ManuallyDrop<Entry<K, V>> =
             unsafe { ManuallyDrop::new(std::ptr::read(entry_ptr)) };
         let v2 = unsafe { (*entry_ptr).version.load(Ordering::Acquire) };
@@ -355,7 +382,24 @@ where
             return Probe::Racing;
         }
         if <K as Borrow<Q>>::borrow(&buf.key) == key {
-            let v = buf.value;
+            // The bit-copy `buf.value: Arc<V>` shares the original
+            // `ArcInner`'s refcount. Bump the strong count first, then
+            // reconstruct an owned `Arc<V>` from the same pointer and
+            // clone `V` out of it. The epoch pin in `get_by_hash` keeps
+            // the `ArcInner` allocated even if a writer concurrently
+            // schedules its drop via `Guard::defer_unchecked`.
+            let arc_ptr: *const V = Arc::as_ptr(&buf.value);
+            // SAFETY: epoch pin held by the caller (`get_by_hash`) holds
+            // back any writer-deferred drop of this `ArcInner`. The
+            // pointer was obtained from a `&Arc<V>` we just read out of
+            // a seqlock-validated `Entry<K, V>`.
+            unsafe { Arc::increment_strong_count(arc_ptr) };
+            let owned: Arc<V> = unsafe { Arc::from_raw(arc_ptr) };
+            let v: V = (*owned).clone();
+            // `owned` drops here, decrementing the strong count we just
+            // added. The bit-copy in `buf` stays inside `ManuallyDrop`
+            // and never decrements, so the original refcount is
+            // unchanged.
             let mask = Self::vbit_mask(pos);
             if self.hot.visited.load(Ordering::Relaxed) & mask == 0 {
                 self.hot.visited.fetch_or(mask, Ordering::Relaxed);
@@ -378,7 +422,10 @@ where
 
     /// Path A: lock-free in-place value update for an existing key. Tag
     /// stays untouched (LIVE/ID/HASH all stable); only `entries[id].value`
-    /// flips, guarded by the entry-version CAS envelope.
+    /// flips, guarded by the entry-version CAS envelope. The old `Arc<V>`
+    /// drop is deferred through `crossbeam-epoch` so any reader who
+    /// observed it via `ptr::read` finishes cloning before the
+    /// `ArcInner` is freed.
     fn try_path_a(&self, key: &K, needle: u16, value: V) -> Result<(), V> {
         const MAX_RETRY: usize = 1;
         let mut value_holder = ManuallyDrop::new(value);
@@ -404,19 +451,22 @@ where
                 Err(_) => continue,
             }
             let new_value = unsafe { ManuallyDrop::take(&mut value_holder) };
+            let new_arc = Arc::new(new_value);
             // SAFETY: odd version excludes both readers and other writers
             // for the duration of the in-place write.
-            let old_value: V = unsafe { std::ptr::read(&(*entry_ptr).value) };
+            let old_arc: Arc<V> = unsafe { std::ptr::read(&(*entry_ptr).value) };
             unsafe {
-                std::ptr::write(&mut (*entry_ptr).value, new_value);
+                std::ptr::write(&mut (*entry_ptr).value, new_arc);
             }
             version_ref.store(v_snap.wrapping_add(2), Ordering::Release);
             let mask = Self::vbit_mask(pos);
             self.hot.visited.fetch_or(mask, Ordering::Relaxed);
-            // V: Copy here — the bit-wise copy in `old_value` is fine to
-            // discard; the next commit (Arc<V> + epoch) replaces this with
-            // a `Guard::defer_unchecked` reclaim.
-            let _ = old_value;
+            // Defer the old Arc's drop past every in-flight reader pin.
+            let guard = epoch::pin();
+            // SAFETY: the closure captures `old_arc` by move and is run on
+            // a thread that has pinned epoch ≥ the pin epoch at this call,
+            // matching crossbeam-epoch's reclamation contract.
+            unsafe { guard.defer_unchecked(move || drop(old_arc)) };
             return Ok(());
         }
         let v = unsafe { ManuallyDrop::take(&mut value_holder) };
@@ -610,19 +660,17 @@ where
             }
             hint::spin_loop();
         };
+        let new_arc = Arc::new(value);
         // SAFETY: odd version excludes both readers and Path A writers.
-        unsafe {
-            let old_value: V = std::ptr::read(&(*entry_ptr).value);
-            std::ptr::write(&mut (*entry_ptr).value, value);
-            // V: Copy here — the bit-wise copy in `old_value` is fine to
-            // discard; the next commit (Arc<V> + epoch) replaces this with
-            // a `Guard::defer_unchecked` reclaim.
-            let _ = old_value;
-        }
+        let old_arc: Arc<V> = unsafe { std::ptr::read(&(*entry_ptr).value) };
+        unsafe { std::ptr::write(&mut (*entry_ptr).value, new_arc) };
         drop(key);
         version_ref.store(v_claimed.wrapping_add(1), Ordering::Release);
         let mask = Self::vbit_mask(pos);
         self.hot.visited.fetch_or(mask, Ordering::Relaxed);
+        let guard = epoch::pin();
+        // SAFETY: see `try_path_a`; same reclamation contract applies.
+        unsafe { guard.defer_unchecked(move || drop(old_arc)) };
     }
 
     fn writer_warmup_install(
@@ -650,7 +698,7 @@ where
                 Entry {
                     version: AtomicU32::new(0),
                     key,
-                    value,
+                    value: Arc::new(value),
                 },
             );
         }
@@ -697,7 +745,11 @@ where
 
         // SAFETY: odd version excludes readers / Path A.
         let evicted_key: K = unsafe { std::ptr::read(&(*evict_entry_ptr).key) };
-        let evicted_value: V = unsafe { std::ptr::read(&(*evict_entry_ptr).value) };
+        let evicted_arc: Arc<V> = unsafe { std::ptr::read(&(*evict_entry_ptr).value) };
+        // Clone the value to hand back to the caller; the `Arc<V>` itself
+        // is deferred to the epoch GC at the end of this function so any
+        // in-flight reader gets to finish its own clone.
+        let evicted_value: V = (*evicted_arc).clone();
 
         for i in evict_pos..(cap - 1) {
             let next_tag = self.read_live_tag_with_spin(i + 1);
@@ -716,11 +768,12 @@ where
         }
         self.tags[cap - 1].store(EMPTY, Ordering::Release);
 
+        let new_arc = Arc::new(value);
         // SAFETY: odd version still held; the tag at `cap-1` is now EMPTY
         // so readers cannot reach this slot through SIMD scan.
         unsafe {
             std::ptr::write(&mut (*evict_entry_ptr).key, key);
-            std::ptr::write(&mut (*evict_entry_ptr).value, value);
+            std::ptr::write(&mut (*evict_entry_ptr).value, new_arc);
         }
         evict_version_ref.store(v_claimed.wrapping_add(1), Ordering::Release);
 
@@ -733,6 +786,11 @@ where
         state.hand = if evict_pos < cap - 1 { evict_pos } else { 0 };
 
         self.hot.path_c_epoch.fetch_add(1, Ordering::Release);
+
+        // Defer the old `Arc<V>` drop past in-flight reader pins.
+        let guard = epoch::pin();
+        // SAFETY: see `try_path_a`.
+        unsafe { guard.defer_unchecked(move || drop(evicted_arc)) };
 
         (evicted_key, evicted_value)
     }
@@ -800,7 +858,8 @@ where
         };
         // SAFETY: odd version excludes readers / Path A.
         let removed_key: K = unsafe { std::ptr::read(&(*entry_ptr).key) };
-        let removed_value: V = unsafe { std::ptr::read(&(*entry_ptr).value) };
+        let removed_arc: Arc<V> = unsafe { std::ptr::read(&(*entry_ptr).value) };
+        let removed_value: V = (*removed_arc).clone();
         version_ref.store(v_claimed.wrapping_add(1), Ordering::Release);
 
         let len = self.hot.len.load(Ordering::Relaxed);
@@ -830,6 +889,10 @@ where
             state.hand = 0;
         }
         drop(removed_key);
+        // Defer the `Arc<V>` drop past in-flight reader pins.
+        let guard = epoch::pin();
+        // SAFETY: see `try_path_a`.
+        unsafe { guard.defer_unchecked(move || drop(removed_arc)) };
         Some(removed_value)
     }
 
