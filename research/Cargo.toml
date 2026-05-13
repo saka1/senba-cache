@@ -35,6 +35,8 @@ lru = "0.12"
 # (~12 ns vs ~25 ns)、PoisonError も持たない。read path は lock-free なので
 # writer 競合域でだけ効く。
 parking_lot = "0.12"
+# r4 が writer の old K/V drop を defer する。lib (senba::concurrent) と同じ 0.9 系。
+crossbeam-epoch = "0.9"
 # ARC paper trace ( `external/mokabench/cache-trace/arc/*.lis.zst` ) を bench から
 # 直接食わせるため zstd を生やす。decompressed `.lis` も読めるよう拡張子で分岐。
 # `external-traces` feature 経由でしか有効化されない (default off) — C 拡張なので

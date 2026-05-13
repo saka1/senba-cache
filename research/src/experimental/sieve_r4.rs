@@ -83,13 +83,18 @@ const fn hash_mask_from_id_mask(id_mask: u16) -> u16 {
 
 /// `repr(C, align(32))` で sizeof = 32 (power of 2、ID_SHIFT = 5)。version は offset 0。
 /// reader は `entries[id].version` を tier 1 seqlock として load、Path A はここを CAS。
+///
+/// **r4 固有**: `key`/`value` を `ManuallyDrop` で包む。writer Path C で `ManuallyDrop::take`
+/// で K, V を抜き取って `defer_unchecked(move || drop(...))` の closure に move するため、
+/// Entry 側に「自身の Drop で K, V を破棄しない」属性を型レベルで付ける。`Drop for Shard`
+/// で live entry の K, V を `ManuallyDrop::drop` で明示破棄する。
 #[repr(C, align(32))]
 struct Entry<K, V> {
     /// 偶数 = stable、奇数 = in-flight。Path A / Path C entries 上書きは
     /// CAS even→odd → 値書き換え → store even+2 で囲う。
     version: AtomicU32,
-    key: K,
-    value: V,
+    key: ManuallyDrop<K>,
+    value: ManuallyDrop<V>,
 }
 
 /// reader scan 1 slot の結果。
@@ -322,8 +327,9 @@ where
             return Probe::Racing;
         }
         // Validated: buf is a consistent snapshot. Safe to call K::eq + V::clone.
-        if buf.key == *key {
-            let v = buf.value.clone();
+        // r4: buf.key / buf.value は ManuallyDrop<K/V> なので一段 deref。
+        if *buf.key == *key {
+            let v = (*buf.value).clone();
             // visited bit conditional set (c11s 由来、hot key の MESI ping-pong 回避)。
             let mask = Self::vbit_mask(pos);
             if self.hot.visited.load(Ordering::Relaxed) & mask == 0 {
@@ -425,9 +431,12 @@ where
             let new_value = unsafe { ManuallyDrop::take(&mut value_holder) };
             // SAFETY: version 奇数で reader は bail out、別 writer も CAS で弾かれる。
             //         value field のみ in-place write、key は不変。
-            let old_value: V = unsafe { std::ptr::read(&(*entry_ptr).value) };
+            //         r4: ManuallyDrop<V> 越しに raw V を read/write する (sizeof / layout 同じ)。
+            let value_ptr =
+                unsafe { &mut (*entry_ptr).value as *mut ManuallyDrop<V> as *mut V };
+            let old_value: V = unsafe { std::ptr::read(value_ptr) };
             unsafe {
-                std::ptr::write(&mut (*entry_ptr).value, new_value);
+                std::ptr::write(value_ptr, new_value);
             }
             // version を even (= v_snap + 2) に store (Release で先行 store を publish)。
             version_ref.store(v_snap.wrapping_add(2), Ordering::Release);
@@ -507,7 +516,8 @@ where
         // tier 2 (t1 == t2) は削除済み: try_candidate と同 reasoning。Path C で tag が
         // shift しても entries[id] 自身の consistency は version flip で捕えており、stale
         // pos での visited.fetch_or は SIEVE algorithm noise (data corruption ではない)。
-        if buf.key == *key {
+        // r4: buf.key は ManuallyDrop<K> なので一段 deref。
+        if *buf.key == *key {
             return Some((pos, id, v1));
         }
         None
@@ -576,7 +586,8 @@ where
                 if t != t2 || (t2 & LIVE) == 0 {
                     continue;
                 }
-                if buf.key == *key {
+                // r4: buf.key は ManuallyDrop<K>。
+                if *buf.key == *key {
                     return Some((pos, id));
                 }
                 break;
@@ -604,9 +615,11 @@ where
             hint::spin_loop();
         };
         // SAFETY: version 奇数で reader は bail、別 writer も Path A は CAS で弾かれる。
+        //         r4: ManuallyDrop<V> 越しに raw V を read/write する。
         unsafe {
-            let old_value: V = std::ptr::read(&(*entry_ptr).value);
-            std::ptr::write(&mut (*entry_ptr).value, value);
+            let value_ptr = &mut (*entry_ptr).value as *mut ManuallyDrop<V> as *mut V;
+            let old_value: V = std::ptr::read(value_ptr);
+            std::ptr::write(value_ptr, value);
             drop(old_value);
         }
         // 引数 `key` は重複した K として scope 末で drop。entries[id] の旧 K は不変。
@@ -621,14 +634,15 @@ where
         let entry_id = len as u16;
         let entries_mut = self.entries.get();
         // SAFETY: writer Mutex 排他下、entries[len] は uninit slot。
+        //         r4: K, V を ManuallyDrop で包む (Drop は Shard::drop / Path C defer で管理)。
         unsafe {
             let slot_ptr = (*entries_mut).as_mut_ptr().add(len) as *mut Entry<K, V>;
             std::ptr::write(
                 slot_ptr,
                 Entry {
                     version: AtomicU32::new(0),
-                    key,
-                    value,
+                    key: ManuallyDrop::new(key),
+                    value: ManuallyDrop::new(value),
                 },
             );
         }
@@ -683,8 +697,9 @@ where
 
         // 旧 entry の (key, value) を取り出し
         // SAFETY: version 奇数で排他、Path A は CAS で弾かれる。
-        let evicted_key: K = unsafe { std::ptr::read(&(*evict_entry_ptr).key) };
-        let evicted_value: V = unsafe { std::ptr::read(&(*evict_entry_ptr).value) };
+        //         r4: ManuallyDrop<K/V> から ManuallyDrop::take で抜き取る。
+        let evicted_key: K = unsafe { ManuallyDrop::take(&mut (*evict_entry_ptr).key) };
+        let evicted_value: V = unsafe { ManuallyDrop::take(&mut (*evict_entry_ptr).value) };
 
         // shift: tags[evict_pos+1..cap] を tags[evict_pos..cap-1] に下げる
         for i in evict_pos..(cap - 1) {
@@ -710,9 +725,10 @@ where
         // 新 entry を entries[evict_id] に install (key, value 上書き、version flip)
         // SAFETY: version 奇数で排他確保済み、tag は LIVE が無い (= 上で EMPTY を踏んだ)
         //         ので reader はこの slot に当たらない。
+        //         r4: ManuallyDrop で包んで slot に書き戻す (旧 K/V は take 済で空き)。
         unsafe {
-            std::ptr::write(&mut (*evict_entry_ptr).key, key);
-            std::ptr::write(&mut (*evict_entry_ptr).value, value);
+            (*evict_entry_ptr).key = ManuallyDrop::new(key);
+            (*evict_entry_ptr).value = ManuallyDrop::new(value);
         }
         // version を even (= v_claimed + 1) に store。
         evict_version_ref.store(v_claimed.wrapping_add(1), Ordering::Release);
@@ -808,9 +824,13 @@ impl<K, V> Drop for Shard<K, V> {
             let t = self.tags[i].load(Ordering::Relaxed);
             if t & LIVE != 0 {
                 let id = Self::id_of(t);
-                // SAFETY: LIVE ⇒ entries[id] init 済み。
+                // SAFETY: LIVE ⇒ entries[id] init 済み。&mut self なので reader 不在。
+                //         r4: ManuallyDrop<K/V> なので明示 drop が必要。assume_init_mut で
+                //         &mut Entry を取ってから ManuallyDrop::drop を 2 回呼ぶ。
                 unsafe {
-                    (*entries_mut)[id].assume_init_drop();
+                    let entry: &mut Entry<K, V> = (*entries_mut)[id].assume_init_mut();
+                    ManuallyDrop::drop(&mut entry.key);
+                    ManuallyDrop::drop(&mut entry.value);
                 }
             }
         }

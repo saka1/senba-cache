@@ -824,6 +824,7 @@ name = "senba-research"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "crossbeam-epoch",
  "ittapi",
  "lru",
  "mini-moka",
