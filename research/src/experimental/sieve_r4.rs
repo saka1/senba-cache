@@ -514,8 +514,7 @@ where
             // SAFETY: version 奇数で reader は bail out、別 writer も CAS で弾かれる。
             //         value field のみ in-place write、key は不変。
             //         r4: ManuallyDrop<V> 越しに raw V を read/write する (sizeof / layout 同じ)。
-            let value_ptr =
-                unsafe { &mut (*entry_ptr).value as *mut ManuallyDrop<V> as *mut V };
+            let value_ptr = unsafe { &mut (*entry_ptr).value as *mut ManuallyDrop<V> as *mut V };
             let old_value: V = unsafe { std::ptr::read(value_ptr) };
             unsafe {
                 std::ptr::write(value_ptr, new_value);
@@ -749,13 +748,7 @@ where
     /// Path C: 定常 evict + shift + install。c16s と同型の shift loop (tag を EMPTY 経由で
     /// 動かす) + entries[evict_id] 上書き (entry version 偶奇 flip で reader 通知) + 末尾の
     /// `path_c_epoch` bump (reader の coarse seqlock 用)。
-    fn writer_evict_and_install(
-        &self,
-        state: &mut WriterState,
-        key: K,
-        value: V,
-        needle: u16,
-    ) {
+    fn writer_evict_and_install(&self, state: &mut WriterState, key: K, value: V, needle: u16) {
         let cap = self.capacity;
         debug_assert_eq!(self.hot.len.load(Ordering::Relaxed), cap);
         if state.hand >= cap {
