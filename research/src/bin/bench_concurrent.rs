@@ -916,6 +916,7 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
             | "c18s"
             | "r1"
             | "r2h"
+            | "senba_concurrent"
     ) {
         args.shards
     } else {
