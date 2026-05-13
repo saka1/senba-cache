@@ -332,6 +332,11 @@ where
         let mut i = 0usize;
         let mut racing = false;
         while i < limit {
+            // SAFETY: `limit == self.tags.len()` is `next_multiple_of(LANE)`
+            // (see `Shard::new`), so every iteration's 32-byte load stays
+            // inside the allocation. Unaligned load is intentional; tags
+            // is 64-byte aligned via repr(align), so this is also aligned
+            // in practice, but loadu is the conservative choice.
             let v = unsafe { _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i) };
             let masked = _mm256_and_si256(v, mask_v);
             let cmp = _mm256_cmpeq_epi16(masked, needle_v);
@@ -426,51 +431,50 @@ where
     /// drop is deferred through `crossbeam-epoch` so any reader who
     /// observed it via `ptr::read` finishes cloning before the
     /// `ArcInner` is freed.
+    ///
+    /// Single-shot: on CAS contention or lookup miss we hand the value back
+    /// to the caller, which falls through to `path_bc` under the mutex.
+    /// `path_bc` is the definitive winner for any racing case.
     fn try_path_a(&self, key: &K, needle: u16, value: V) -> Result<(), V> {
-        const MAX_RETRY: usize = 1;
         let mut value_holder = ManuallyDrop::new(value);
-        for _ in 0..MAX_RETRY {
-            // SAFETY: AVX2 verified in `Shard::new`.
-            let found = unsafe { self.find_lockfree_for_path_a(key, needle) };
-            let (pos, id, v_snap) = match found {
-                Some(x) => x,
-                None => {
-                    let v = unsafe { ManuallyDrop::take(&mut value_holder) };
-                    return Err(v);
-                }
-            };
-            let entry_ptr = unsafe { self.entries_mut_ptr().add(id) as *mut Entry<K, V> };
-            let version_ref = unsafe { &(*entry_ptr).version };
-            match version_ref.compare_exchange(
+        // SAFETY: AVX2 verified in `Shard::new`.
+        let Some((pos, id, v_snap)) = (unsafe { self.find_lockfree_for_path_a(key, needle) })
+        else {
+            let v = unsafe { ManuallyDrop::take(&mut value_holder) };
+            return Err(v);
+        };
+        let entry_ptr = unsafe { self.entries_mut_ptr().add(id) as *mut Entry<K, V> };
+        let version_ref = unsafe { &(*entry_ptr).version };
+        if version_ref
+            .compare_exchange(
                 v_snap,
                 v_snap.wrapping_add(1),
                 Ordering::Acquire,
                 Ordering::Acquire,
-            ) {
-                Ok(_) => {}
-                Err(_) => continue,
-            }
-            let new_value = unsafe { ManuallyDrop::take(&mut value_holder) };
-            let new_arc = Arc::new(new_value);
-            // SAFETY: odd version excludes both readers and other writers
-            // for the duration of the in-place write.
-            let old_arc: Arc<V> = unsafe { std::ptr::read(&(*entry_ptr).value) };
-            unsafe {
-                std::ptr::write(&mut (*entry_ptr).value, new_arc);
-            }
-            version_ref.store(v_snap.wrapping_add(2), Ordering::Release);
-            let mask = Self::vbit_mask(pos);
-            self.hot.visited.fetch_or(mask, Ordering::Relaxed);
-            // Defer the old Arc's drop past every in-flight reader pin.
-            let guard = epoch::pin();
-            // SAFETY: the closure captures `old_arc` by move and is run on
-            // a thread that has pinned epoch ≥ the pin epoch at this call,
-            // matching crossbeam-epoch's reclamation contract.
-            unsafe { guard.defer_unchecked(move || drop(old_arc)) };
-            return Ok(());
+            )
+            .is_err()
+        {
+            let v = unsafe { ManuallyDrop::take(&mut value_holder) };
+            return Err(v);
         }
-        let v = unsafe { ManuallyDrop::take(&mut value_holder) };
-        Err(v)
+        let new_value = unsafe { ManuallyDrop::take(&mut value_holder) };
+        let new_arc = Arc::new(new_value);
+        // SAFETY: odd version excludes both readers and other writers
+        // for the duration of the in-place write.
+        let old_arc: Arc<V> = unsafe { std::ptr::read(&(*entry_ptr).value) };
+        unsafe {
+            std::ptr::write(&mut (*entry_ptr).value, new_arc);
+        }
+        version_ref.store(v_snap.wrapping_add(2), Ordering::Release);
+        let mask = Self::vbit_mask(pos);
+        self.hot.visited.fetch_or(mask, Ordering::Relaxed);
+        // Defer the old Arc's drop past every in-flight reader pin.
+        let guard = epoch::pin();
+        // SAFETY: the closure captures `old_arc` by move and is run on
+        // a thread that has pinned epoch ≥ the pin epoch at this call,
+        // matching crossbeam-epoch's reclamation contract.
+        unsafe { guard.defer_unchecked(move || drop(old_arc)) };
+        Ok(())
     }
 
     #[target_feature(enable = "avx2,bmi1")]
@@ -485,6 +489,8 @@ where
         let limit = self.tags.len();
         let mut i = 0usize;
         while i < limit {
+            // SAFETY: identical bound to `find_get`; see that function for
+            // the full reasoning.
             let v = unsafe { _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i) };
             let masked = _mm256_and_si256(v, mask_v);
             let cmp = _mm256_cmpeq_epi16(masked, needle_v);
@@ -557,10 +563,15 @@ where
         for pos in 0..len {
             loop {
                 let t = self.tags[pos].load(Ordering::Acquire);
-                if t == EMPTY {
-                    hint::spin_loop();
-                    continue;
-                }
+                // We hold the writer mutex, and only writers store EMPTY
+                // (via Path C / remove shifts). All those stores happen
+                // before `len` is decremented, so `pos < len` precludes
+                // EMPTY here. An EMPTY observation would mean a structural
+                // invariant break — fail loud rather than spin.
+                debug_assert!(
+                    t != EMPTY,
+                    "writer_find observed EMPTY at pos {pos} < len {len}"
+                );
                 if (t & LIVE) == 0 {
                     break;
                 }
@@ -607,10 +618,12 @@ where
         for pos in 0..len {
             loop {
                 let t = self.tags[pos].load(Ordering::Acquire);
-                if t == EMPTY {
-                    hint::spin_loop();
-                    continue;
-                }
+                // See `writer_find` for why EMPTY is unreachable under the
+                // writer mutex.
+                debug_assert!(
+                    t != EMPTY,
+                    "writer_find_q observed EMPTY at pos {pos} < len {len}"
+                );
                 if (t & LIVE) == 0 {
                     break;
                 }
@@ -691,6 +704,26 @@ where
         };
         // SAFETY: writer mutex serialises us; `entry_id` was either fresh
         // (uninit) or reclaimed by `remove` (dropped before being pushed).
+        //
+        // Re-using a reclaimed id resets `version` from its prior even
+        // value `X` back to 0. This is sound only because no reader can
+        // reach this slot through the tag scan between the `ptr::write`
+        // below and the `tags[len].store(new_tag)` further down:
+        //   1. `remove` overwrote every tag pointing at this id (the shift
+        //      collapses the freed slot, terminating with the `EMPTY`
+        //      sentinel at the new tail) before pushing the id onto
+        //      `free_ids`.
+        //   2. The new tag is published AFTER `ptr::write` completes, via
+        //      the `Release` store on `tags[len]` below (paired with the
+        //      `fence(Release)` for the entry write).
+        //   3. Therefore any successful reader tag-match here observes the
+        //      fresh entry (version 0, key, value) — never the stale
+        //      `X`-versioned ghost.
+        // The version dropping from `X` to 0 is invisible to readers
+        // because no reader holds a snapshot of `X` for this id while the
+        // id is on `free_ids` (any such snapshot was either resolved
+        // before the freeing remove returned, or invalidated by the
+        // remove's seqlock bump + tag shift).
         unsafe {
             let slot_ptr = self.entries_mut_ptr().add(entry_id as usize) as *mut Entry<K, V>;
             std::ptr::write(

@@ -169,6 +169,14 @@ where
 
     /// Returns a copy of the value for `key`, or `None` if absent. Sets
     /// the SIEVE visited bit on hit.
+    ///
+    /// Under sustained writer contention on the same shard, `get` may
+    /// return `None` after a bounded number of seqlock retries even when
+    /// the key is present — concurrent in-place updates or evictions on
+    /// the candidate slot keep invalidating the reader's snapshot. This
+    /// is extremely unlikely in practice (it requires the same lane to
+    /// race across every retry), and a follow-up call will succeed once
+    /// the writer storm subsides.
     #[inline]
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
@@ -292,12 +300,12 @@ mod tests {
         let tags_after: Vec<u16> = (0..4).map(|i| sh.tag_at(i)).collect();
         assert_eq!(
             ids_before, ids_after,
-            "Path A update が id mapping を変えている (= 想定外の Path C 経路)"
+            "Path A update changed the id mapping (unexpected Path C fallthrough)"
         );
-        // c17s 固有: tag は完全に不変 (c14s/c16s は VERSION bit が flip していた)
+        // c17s invariant: tag is fully immutable on update (c14s/c16s flipped a VERSION bit).
         assert_eq!(
             tags_before, tags_after,
-            "Path A update が tag を変更している (c17s は tag 不変が core property)"
+            "Path A update changed the tag (c17s requires tag-immutable updates as a core property)"
         );
         assert_eq!(cache.get(&2), Some(222));
     }
@@ -337,7 +345,7 @@ mod tests {
         assert_eq!(
             evicted,
             Some((2, 20)),
-            "update が visited を SET しないと (1) が evict されてしまう"
+            "update must set visited; otherwise key (1) would be evicted instead of (2)"
         );
         assert!(cache.contains_key(&1));
         assert!(!cache.contains_key(&2));
@@ -354,12 +362,12 @@ mod tests {
         let tag_after = sh.tag_at(0);
         assert_eq!(
             tag_before, tag_after,
-            "reader hit が tag を変更している (visited 分離が崩れている)"
+            "reader hit changed the tag (visited bit must live outside the tag array)"
         );
         let mask = Shard::<u64, u64>::vbit_mask_pub(0);
         assert!(
             sh.visited_snapshot() & mask != 0,
-            "visited bit が立っていない"
+            "reader hit did not set the visited bit"
         );
     }
 
@@ -379,11 +387,11 @@ mod tests {
         assert_eq!(sh.live_count(), 4);
         let last_tag = sh.tag_at(3);
         let last_id = Shard::<u64, u64>::id_of_pub(last_tag);
-        assert_eq!(last_id, 0, "Path C で id 再利用していない");
+        assert_eq!(last_id, 0, "Path C did not reuse the evicted id");
         let epoch_after = sh.path_c_epoch_snapshot();
         assert!(
             epoch_after > epoch_before,
-            "Path C で path_c_epoch が bump されていない"
+            "Path C did not bump path_c_epoch"
         );
     }
 
@@ -398,7 +406,7 @@ mod tests {
                 assert_eq!(
                     cache.insert(k, k * 1000),
                     None,
-                    "Path A update が evicted を返した (= Path C に落ちた)"
+                    "Path A update returned an evicted entry (fell through to Path C)"
                 );
             }
         }
@@ -462,7 +470,7 @@ mod tests {
         assert_eq!(S::hash_mask().count_ones(), 9);
         assert_eq!(S::scan_mask(), S::live_bit_pub() | S::hash_mask());
 
-        // LIVE | ID | HASH の 3 区画で 0xFFFF を埋め切る (c17s は VERSION 不在)。
+        // LIVE | ID | HASH cover all 16 bits with no overlap (c17s has no VERSION field).
         assert_eq!(S::live_bit_pub() | S::id_mask() | S::hash_mask(), 0xFFFF);
         assert_eq!(S::live_bit_pub() & S::id_mask(), 0);
         assert_eq!(S::live_bit_pub() & S::hash_mask(), 0);
@@ -594,14 +602,14 @@ mod tests {
             let mut sorted = ids.clone();
             sorted.sort();
             sorted.dedup();
-            assert_eq!(sorted.len(), ids.len(), "shard {i} で id 重複");
+            assert_eq!(sorted.len(), ids.len(), "shard {i} has duplicate ids");
             sum_live += live;
         }
         assert_eq!(sum_live, total_len);
 
         for k in 0..1024u64 {
             if let Some(v) = cache.get(&k) {
-                assert_eq!(v, k, "key {k} の value が破壊されている");
+                assert_eq!(v, k, "value for key {k} is corrupted");
             }
         }
     }
