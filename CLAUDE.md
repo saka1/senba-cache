@@ -49,6 +49,18 @@ The bench has 8 scenarios covering `SlotSize` × op-mix × skew × value-type (f
 
 Skipping is fine for changes that demonstrably cannot reach the compiled hot path (doc / test / clippy fixes). The perf-gate is the **stable contract for `senba::Cache`** and is intentionally separated from `research/benches/micro.rs` (the experimental playground, freely rewritten as variants come and go); editing the perf-gate invalidates prior saved baselines.
 
+### Concurrent perf-gate (`research/benches/sieve_concurrent_perf.rs`)
+
+Companion to the single-thread gate; runs when **`src/concurrent/**` changes in ways that could plausibly reach the `senba::concurrent::Cache` hot path** (writer paths in `shard.rs`, the public `cache.rs` surface). Four cells: `V ∈ {u64, String}` × `threads ∈ {4, 16}` at `cap=4096, shards=512, skew ∈ {1.0, 1.4}`.
+
+```bash
+cargo bench -p senba-research --bench sieve_concurrent_perf -- --save-baseline before
+# apply change
+cargo bench -p senba-research --bench sieve_concurrent_perf -- --baseline before
+```
+
+Same **>5% regression on any cell = commit-blocker** rule as the single-thread gate. Same skip rules apply (doc / test / clippy fixes don't touch the compiled hot path).
+
 ## Plot / analysis scripts (Python)
 
 `scripts/` is a separate uv project (`pyproject.toml` + `uv.lock` + `.python-version`). Run from anywhere in the repo:

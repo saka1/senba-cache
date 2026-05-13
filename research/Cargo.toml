@@ -64,6 +64,14 @@ harness = false
 name = "sieve_cache_perf"
 harness = false
 
+# Companion regression bench for `senba::concurrent::Cache`. Four-cell
+# matrix (V ∈ {u64, String} × T ∈ {4, 16}) at cap=4096 / shards=512,
+# fixed seeds. Same `--save-baseline` / `--baseline` flow as above; the
+# gate it enforces is `src/concurrent/`.
+[[bench]]
+name = "sieve_concurrent_perf"
+harness = false
+
 [[bin]]
 name = "bench"
 
