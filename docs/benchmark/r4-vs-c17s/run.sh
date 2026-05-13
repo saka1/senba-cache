@@ -95,4 +95,6 @@ for value in $VALUE_LIST; do
 done
 
 echo "[$(date +%H:%M:%S)] sweep complete: $OUT ($(wc -l < "$OUT") rows incl header)" >&2
-[ -s "$LOG" ] && echo "[$(date +%H:%M:%S)] crashes recorded: $LOG" >&2
+if [ -s "$LOG" ]; then
+  echo "[$(date +%H:%M:%S)] crashes recorded: $LOG" >&2
+fi
