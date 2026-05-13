@@ -182,8 +182,10 @@ struct WriterState {
 // writer または Mutex 配下の writer のみが行い、reader は version seqlock + tag re-load
 // + ManuallyDrop で torn read / use-after-free を弾く (V: Clone soundness 限界は module
 // doc 参照)。
-unsafe impl<K: Send, V: Send> Send for Shard<K, V> {}
-unsafe impl<K: Send + Sync, V: Send + Sync> Sync for Shard<K, V> {}
+// r4: defer_unchecked closure capture のため `'static` 要請、reader が `&V` を読むため
+// `V: Sync` も要請。
+unsafe impl<K: Send + 'static, V: Send + 'static> Send for Shard<K, V> {}
+unsafe impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Sync for Shard<K, V> {}
 
 impl<K, V> Shard<K, V> {
     const ENTRY_SIZE: usize = std::mem::size_of::<Entry<K, V>>();
@@ -218,10 +220,32 @@ impl<K, V> Shard<K, V> {
     }
 }
 
+/// V: !Copy のときは epoch::pin + defer_unchecked で reclaim を遅延、V: Copy のときは
+/// `mem::forget` (drop も forget も asm 上同じ)。`needs_drop::<V>()` の monomorphize-time
+/// fold で片方の path が消える。
+///
+/// SAFETY: `defer_unchecked` は closure が `Send + 'static` であること、および呼び出し時点で
+/// reader が自分の pin guard を保持している場合に reader の clone-mid-flight を保護する
+/// crossbeam-epoch の標準契約に依存する。本関数は writer 経路から呼ばれ、上記契約は
+/// `V: Send + 'static` の trait bound (Shard impl 側) で満たされる。
+#[inline]
+fn defer_drop_if_needed<V: Send + 'static>(v: V) {
+    if needs_epoch::<V>() {
+        let guard = epoch::pin();
+        // SAFETY: V: Send + 'static で closure capture が健全。defer 後の reclaim は
+        //         crossbeam-epoch が pin holder と一緒に管理する。
+        unsafe {
+            guard.defer_unchecked(move || drop(v));
+        }
+    } else {
+        std::mem::forget(v);
+    }
+}
+
 impl<K, V> Shard<K, V>
 where
-    K: Hash + Eq,
-    V: Clone,
+    K: Hash + Eq + Send + 'static,
+    V: Clone + Send + 'static,
 {
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be > 0");
@@ -477,7 +501,8 @@ where
             // visited SET (sieve_orig の `freq=1` と一致、c11s `writer_update_in_place` と同形)。
             let mask = Self::vbit_mask(pos);
             self.hot.visited.fetch_or(mask, Ordering::Relaxed);
-            drop(old_value);
+            // r4: race β 防御。reader が pin 中なら旧 V の heap は alive のまま残る。
+            defer_drop_if_needed::<V>(old_value);
             let _ = id;
             return Ok(());
         }
@@ -652,14 +677,16 @@ where
         };
         // SAFETY: version 奇数で reader は bail、別 writer も Path A は CAS で弾かれる。
         //         r4: ManuallyDrop<V> 越しに raw V を read/write する。
-        unsafe {
+        let old_value: V = unsafe {
             let value_ptr = &mut (*entry_ptr).value as *mut ManuallyDrop<V> as *mut V;
-            let old_value: V = std::ptr::read(value_ptr);
+            let old = std::ptr::read(value_ptr);
             std::ptr::write(value_ptr, value);
-            drop(old_value);
-        }
+            old
+        };
         // 引数 `key` は重複した K として scope 末で drop。entries[id] の旧 K は不変。
         drop(key);
+        // r4: 旧 V を defer drop (race β 防御)。
+        defer_drop_if_needed::<V>(old_value);
         version_ref.store(v_claimed.wrapping_add(1), Ordering::Release);
         let mask = Self::vbit_mask(pos);
         self.hot.visited.fetch_or(mask, Ordering::Relaxed);
@@ -887,8 +914,8 @@ pub struct ConcurrentSieveCache<K, V, const SHARDS: usize = DEFAULT_SHARDS> {
 
 impl<K, V, const SHARDS: usize> ConcurrentSieveCache<K, V, SHARDS>
 where
-    K: Hash + Eq,
-    V: Clone,
+    K: Hash + Eq + Send + 'static,
+    V: Clone + Send + 'static,
 {
     pub fn new(capacity: usize) -> Self {
         assert!(SHARDS > 0, "SHARDS must be > 0");
