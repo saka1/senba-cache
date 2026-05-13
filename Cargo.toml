@@ -26,23 +26,27 @@ include = [
 
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-# Pulled in only when the `concurrent` feature is enabled (experimental
-# `senba::concurrent::PartitionedCache`). Default-off keeps the publishable
-# surface single-dep for the stable ST `Cache`.
+# Pulled in only when the `concurrent` feature is enabled. `parking_lot`
+# provides the Path B/C writer Mutex (~5 ns uncontended vs ~10-15 ns for
+# `std::sync::Mutex`). `crossbeam-epoch` defers writer-side `Arc<V>` drops
+# past in-flight readers — the soundness foundation that lets the lock-free
+# reader on `senba::concurrent::Cache` clone `V` without racing a concurrent
+# eviction (`docs/reports/2026-05-13-senba-concurrent-cache-design.md` §1).
 parking_lot = { version = "0.12", optional = true }
+crossbeam-epoch = { version = "0.9", optional = true }
 
 [features]
 default = []
-# **Experimental.** Enables `senba::concurrent::*` — currently just
-# `PartitionedCache`. The API and semantics may change without notice until
-# the design is validated on production workloads (sweep methodology in
-# `docs/reports/2026-05-12-partitioned-design.md`). Opt-in via:
+# **Experimental.** Enables `senba::concurrent::*`. The API and semantics may
+# change without notice until the design is validated on production
+# workloads. Opt-in via:
 #
-#     senba = { version = "0.2", features = ["concurrent"] }
+#     senba = { version = "0.3", features = ["concurrent"] }
 #
-# Implicitly pulls in `parking_lot` for its faster uncontended `Mutex`
-# (~5 ns vs `std::sync::Mutex`'s ~10-15 ns on Linux glibc).
-concurrent = ["dep:parking_lot"]
+# Pulls in `parking_lot` (Path B/C writer Mutex) and `crossbeam-epoch`
+# (deferred-drop GC for the lock-free reader path; see
+# `docs/reports/2026-05-13-senba-concurrent-cache-design.md` §1).
+concurrent = ["dep:parking_lot", "dep:crossbeam-epoch"]
 
 [package.metadata.docs.rs]
 # Render the `concurrent` module on docs.rs even though it's not part of

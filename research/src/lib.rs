@@ -42,3 +42,33 @@ where
         self.contains_key(key)
     }
 }
+
+/// Adapter that lets the concurrent `senba::concurrent::Cache` plug into the
+/// research-side cross-variant harness (`bench_concurrent`,
+/// `concurrent_test_suite!`). Gated to match the publishable type's own
+/// `x86_64 + non-miri` availability.
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+impl<K, V> experimental::ConcurrentCacheImpl<K, V> for senba::concurrent::Cache<K, V>
+where
+    K: std::hash::Hash + Eq + Copy + Send + Sync + 'static,
+    V: Copy + Send + Sync + 'static,
+{
+    fn with_capacity(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.contains_key(key)
+    }
+    fn get(&self, key: &K) -> Option<V> {
+        self.get(key)
+    }
+    fn insert(&self, key: K, value: V) -> Option<(K, V)> {
+        self.insert(key, value)
+    }
+}

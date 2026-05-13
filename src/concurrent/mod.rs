@@ -1,36 +1,27 @@
-//! Concurrent wrappers around [`crate::Cache`].
+//! Thread-safe SIEVE caches.
 //!
-//! The single-threaded [`crate::Cache`] is `&mut self`-driven by design (the
-//! SIEVE state machine touches `visited`, `hand`, and the tags array on every
-//! op). This module provides thread-safe wrappers built on top of that surface
-//! without changing the underlying `Cache` invariants — concurrency is layered
-//! externally.
+//! Two designs ship behind the `concurrent` Cargo feature, occupying
+//! different points on the HR-vs-throughput Pareto frontier:
 //!
-//! ## What ships here
+//! - [`Cache`] — sharded, lock-free-reader SIEVE (promoted from the `c17s`
+//!   research variant). AVX2 SIMD tag scan + entry-version seqlock on the
+//!   reader side; per-shard `parking_lot::Mutex` only for Path B/C
+//!   writers. **`x86_64 + AVX2` only**; the type compiles out on other
+//!   targets. Pareto-dominates `PartitionedCache` on HR-preserving
+//!   workloads (Twitter session traces, ARC OLTP/DS1) by 2-7×
+//!   ([`docs/reports/2026-05-13-c17s-shard-heuristic.md`]).
+//! - [`PartitionedCache`] — `N` independent [`crate::Cache`] instances
+//!   behind one `Mutex` each, routed by a per-thread routing hint. Simpler
+//!   model but loses HR on shared hot keys.
+//!   ([`docs/reports/2026-05-12-partitioned-design.md`]).
 //!
-//! - [`PartitionedCache`] — `N` independent [`Cache`] instances behind one
-//!   `Mutex` each, routed by a per-thread routing hint. The simplest possible
-//!   parallel baseline: each thread owns one partition under the uncontended
-//!   fast path, and the per-op cost reduces to "uncontended mutex acquire +
-//!   lib op".
-//!
-//! The mutex implementation is [`parking_lot::Mutex`], pulled in transitively
-//! through the `concurrent` feature. Its uncontended fast path is ~5 ns
-//! (vs. ~10–15 ns for `std::sync::Mutex` on Linux glibc), which matters at
-//! the per-op overhead this baseline targets.
-//!
-//! Design rationale: see `docs/reports/2026-05-12-partitioned-design.md`.
-//! The (T × N) sweep methodology — threads and partition count vary
-//! independently — is part of the contract for this type.
-//!
-//! ## What does **not** ship here
-//!
-//! Lock-free / seqlock / epoch-based concurrent SIEVE variants live in
-//! `senba-research::experimental` (the `c*` / `r*` series). They preserve HR
-//! exactly at the cost of a more elaborate state machine; the partitioned
-//! cache trades HR (same key may duplicate across partitions) for radical
-//! simplicity. The two designs cover different points on the HR-vs-throughput
-//! Pareto frontier.
+//! Both rely on [`parking_lot::Mutex`] for the uncontended fast path
+//! (~5 ns vs ~10-15 ns for `std::sync::Mutex` on Linux glibc).
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+mod cache;
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+pub use cache::Cache;
 
 use std::borrow::Borrow;
 use std::cell::Cell;
@@ -39,7 +30,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::{Cache, Slot32, SlotSize, Xxh3Build};
+use crate::{Cache as LibCache, Slot32, SlotSize, Xxh3Build};
 
 // ---------- routing hint allocator ----------
 
@@ -138,7 +129,7 @@ pub struct PartitionedCache<K, V, S: SlotSize = Slot32, H: BuildHasher = Xxh3Bui
 
 /// A single underlying [`Cache`] guarded by its own `Mutex`. Kept as a
 /// type alias mostly to give the field above a clippy-friendly signature.
-type Partition<K, V, S, H> = Mutex<Cache<K, V, S, H>>;
+type Partition<K, V, S, H> = Mutex<LibCache<K, V, S, H>>;
 
 impl<K, V, S> PartitionedCache<K, V, S, Xxh3Build>
 where
@@ -184,7 +175,7 @@ where
         let built: Vec<Partition<K, V, S, H>> = (0..partitions)
             .map(|i| {
                 let cap_i = base + if i < extra { 1 } else { 0 };
-                Mutex::new(Cache::with_hasher(cap_i, hasher.clone()))
+                Mutex::new(LibCache::with_hasher(cap_i, hasher.clone()))
             })
             .collect();
         Self {
