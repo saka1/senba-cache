@@ -825,7 +825,9 @@ pub const DEFAULT_SHARDS: usize = 64;
 /// `WAYS=1` は c17s と bit-for-bit 等価動作する sanity 構成。`WAYS≥2` で SHARDS を
 /// `SETS × WAYS` に分割し、key は set を hash、way は TLS thread-id で選ぶ。
 pub struct ConcurrentSieveR1<K, V, const SHARDS: usize = DEFAULT_SHARDS> {
-    shards: [Shard<K, V>; SHARDS],
+    /// SHARDS は const generic で compile-time invariant を保つが、実体は heap に置き、
+    /// SHARDS が大きい場合に stack overflow を避ける。length は constructor で SHARDS と一致。
+    shards: Box<[Shard<K, V>]>,
     hasher: Xxh3Build,
     ways: usize,
     set_mask: usize,
@@ -859,12 +861,13 @@ where
         let way_mask = ways - 1;
         let base = capacity / SHARDS;
         let extra = capacity % SHARDS;
-        let shards: [Shard<K, V>; SHARDS] = std::array::from_fn(|i| {
+        let mut shards_vec: Vec<Shard<K, V>> = Vec::with_capacity(SHARDS);
+        for i in 0..SHARDS {
             let cap_i = base + if i < extra { 1 } else { 0 };
-            Shard::new(cap_i)
-        });
+            shards_vec.push(Shard::new(cap_i));
+        }
         Self {
-            shards,
+            shards: shards_vec.into_boxed_slice(),
             hasher: Xxh3Build,
             ways,
             set_mask,

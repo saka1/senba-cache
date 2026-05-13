@@ -224,6 +224,7 @@ where
 
 // use senba_research::experimental::sieve_v0::SieveCache as V0;
 // use senba_research::experimental::sieve_v3::SieveCache as V3;
+use senba_research::workload::arc_preset;
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
 
@@ -467,16 +468,16 @@ fn parse_args() -> Args {
 
     // --arc-preset 解決: 明示指定が無いフィールドだけ preset で埋める。
     if let Some(name) = &arc_preset {
-        let (preset_path, preset_caps) =
-            arc_preset_lookup(name).unwrap_or_else(|| panic!("unknown --arc-preset name: {name}"));
+        let preset =
+            arc_preset::lookup(name).unwrap_or_else(|| panic!("unknown --arc-preset name: {name}"));
         if !source_explicit {
             source = String::from("arc");
         }
         if path.is_none() {
-            path = Some(preset_path.to_string());
+            path = Some(preset.trace_path.to_string());
         }
         if capacities.is_empty() {
-            capacities = preset_caps.to_vec();
+            capacities = preset.default_capacities.to_vec();
         }
     }
 
@@ -502,105 +503,6 @@ fn parse_args() -> Args {
         repeat,
         rng_seed,
     }
-}
-
-/// mokabench の `TraceFile::default_capacities` (`external/mokabench/src/trace_file.rs`)
-/// の ARC 行を転記。trace は `external/mokabench/cache-trace/arc/<NAME>.lis.zst` に
-/// 配置済みの zstd 圧縮形式を直接読む。spc1likeread は split zst (`.zst.00`/...) で
-/// 連結 reader が必要なため preset から外す。
-fn arc_preset_lookup(name: &str) -> Option<(&'static str, &'static [usize])> {
-    let entry: (&'static str, &'static [usize]) = match name.trim().to_ascii_lowercase().as_str() {
-        "concat" => (
-            "external/mokabench/cache-trace/arc/ConCat.lis.zst",
-            &[200_000, 400_000, 3_200_000],
-        ),
-        "ds1" => (
-            "external/mokabench/cache-trace/arc/DS1.lis.zst",
-            &[1_000_000, 4_000_000, 8_000_000],
-        ),
-        "merge-p" | "mergep" => (
-            "external/mokabench/cache-trace/arc/MergeP.lis.zst",
-            &[400_000, 1_000_000, 3_200_000],
-        ),
-        "merge-s" | "merges" => (
-            "external/mokabench/cache-trace/arc/MergeS.lis.zst",
-            &[400_000, 1_000_000, 3_200_000],
-        ),
-        "oltp" => (
-            "external/mokabench/cache-trace/arc/OLTP.lis.zst",
-            &[256, 512, 1_000, 2_000],
-        ),
-        "p1" => (
-            "external/mokabench/cache-trace/arc/P1.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p2" => (
-            "external/mokabench/cache-trace/arc/P2.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p3" => (
-            "external/mokabench/cache-trace/arc/P3.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p4" => (
-            "external/mokabench/cache-trace/arc/P4.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p5" => (
-            "external/mokabench/cache-trace/arc/P5.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p6" => (
-            "external/mokabench/cache-trace/arc/P6.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p7" => (
-            "external/mokabench/cache-trace/arc/P7.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p8" => (
-            "external/mokabench/cache-trace/arc/P8.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p9" => (
-            "external/mokabench/cache-trace/arc/P9.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p10" => (
-            "external/mokabench/cache-trace/arc/P10.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p11" => (
-            "external/mokabench/cache-trace/arc/P11.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p12" => (
-            "external/mokabench/cache-trace/arc/P12.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p13" => (
-            "external/mokabench/cache-trace/arc/P13.lis.zst",
-            &[20_000, 160_000],
-        ),
-        "p14" => (
-            "external/mokabench/cache-trace/arc/P14.lis.zst",
-            &[80_000, 640_000],
-        ),
-        "s1" => (
-            "external/mokabench/cache-trace/arc/S1.lis.zst",
-            &[100_000, 800_000],
-        ),
-        "s2" => (
-            "external/mokabench/cache-trace/arc/S2.lis.zst",
-            &[100_000, 800_000],
-        ),
-        "s3" => (
-            "external/mokabench/cache-trace/arc/S3.lis.zst",
-            &[100_000, 400_000, 800_000],
-        ),
-        _ => return None,
-    };
-    Some(entry)
 }
 
 fn build_trace_string(args: &Args) -> Vec<String> {

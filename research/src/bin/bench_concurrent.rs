@@ -58,6 +58,7 @@ use senba_research::experimental::sieve_c16s::ConcurrentSieveCache as Concurrent
 use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as ConcurrentSieveC17S;
 use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as ConcurrentSieveC18S;
 use senba_research::experimental::sieve_r1::ConcurrentSieveR1;
+use senba_research::workload::arc_preset;
 use senba_research::workload::file;
 use senba_research::workload::zipf::ZipfGen;
 
@@ -489,11 +490,29 @@ fn parse_args() -> Args {
             }
             "--trace-file" => trace_file = Some(val().to_string()),
             "--workload-param" => workload_param = val().to_string(),
+            "--arc-preset" => {
+                // ARC trace を mokabench preset 名で一括解決。
+                // 明示指定 (--source / --trace-file / --workload-param) が無いフィールドだけ埋める。
+                // --cap は preset 側で複数候補を持つので、harness 側で `--cap N` を都度渡す
+                // (bench.rs 流の "complete sweep を一発" 経路は本ツールでは取らない、
+                //  T × cap の二重 sweep は harness 側で記述するため)。
+                let name = val().to_string();
+                let preset = arc_preset::lookup(&name)
+                    .unwrap_or_else(|| panic!("unknown --arc-preset name: {name}"));
+                source = Source::Arc;
+                if trace_file.is_none() {
+                    trace_file = Some(preset.trace_path.to_string());
+                }
+                if workload_param.is_empty() {
+                    workload_param = name;
+                }
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "usage: bench_concurrent [--variant ...] [--shards N] [--ways N] [--partitions N] \
                      [--op-mix gim|read-heavy] [--value u64|string] \
                      [--source zipf|twitter|twitter-yang|arc] [--trace-file PATH] [--workload-param S] \
+                     [--arc-preset NAME] \
                      --cap N --threads N --skew F --keys N --ops N --warmup N \
                      --trials N --seed N"
                 );
@@ -516,8 +535,8 @@ fn parse_args() -> Args {
         "--warmup must be divisible by --threads"
     );
     assert!(
-        shards.is_power_of_two() && (8..=512).contains(&shards),
-        "--shards must be a power of two in [8, 512]"
+        shards.is_power_of_two() && (1..=131_072).contains(&shards),
+        "--shards must be a power of two in [1, 131072]"
     );
     assert!(
         ways.is_power_of_two() && ways >= 1 && ways <= shards,
@@ -983,10 +1002,37 @@ fn run_c16s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialRes
 }
 
 fn run_c17s(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
-    assert_eq!(args.shards, 64, "c17s requires --shards 64");
-    match v {
-        ValueKind::U64 => run_trial::<u64, ConcurrentSieveC17S<u64, u64, 64>>(args, trace),
-        ValueKind::String => run_trial::<String, ConcurrentSieveC17S<u64, String, 64>>(args, trace),
+    // SHARDS は const generic で arm を展開。cap-axis sweep で
+    // shards = next_pow2(cap/64) (= senba::Cache auto-shard 同等) を harness 側で渡す。
+    // 範囲外の SHARDS で呼ばれた場合は明確に panic させる (silent fallback はしない)。
+    macro_rules! arm_c17s {
+        ($s:literal) => {
+            match v {
+                ValueKind::U64 => run_trial::<u64, ConcurrentSieveC17S<u64, u64, $s>>(args, trace),
+                ValueKind::String => {
+                    run_trial::<String, ConcurrentSieveC17S<u64, String, $s>>(args, trace)
+                }
+            }
+        };
+    }
+    match args.shards {
+        4 => arm_c17s!(4),
+        8 => arm_c17s!(8),
+        16 => arm_c17s!(16),
+        32 => arm_c17s!(32),
+        64 => arm_c17s!(64),
+        128 => arm_c17s!(128),
+        256 => arm_c17s!(256),
+        512 => arm_c17s!(512),
+        1024 => arm_c17s!(1024),
+        2048 => arm_c17s!(2048),
+        4096 => arm_c17s!(4096),
+        8192 => arm_c17s!(8192),
+        16384 => arm_c17s!(16384),
+        32768 => arm_c17s!(32768),
+        65536 => arm_c17s!(65536),
+        131072 => arm_c17s!(131072),
+        n => panic!("c17s shards={n} not in supported set (4,8,16,32,...,131072)"),
     }
 }
 
@@ -1015,12 +1061,36 @@ fn run_c15s<const SAMPLE_BITS: u32>(
 }
 
 /// r1: shard 間 routing affinity variant。`--ways` を取り、`R1Wrapper::build_with_ways`
-/// 経由で constructor に伝わる。SHARDS=64 固定 (c-series Phase 1 と同じ設計境界)。
+/// 経由で constructor に伝わる。c17s と同様に `--shards` で SHARDS を選び、
+/// `next_pow2(cap/64)` を harness 側で渡す前提。`ways <= shards` の制約は
+/// constructor 側で assert される。
 fn run_r1(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
-    assert_eq!(args.shards, 64, "r1 requires --shards 64");
-    match v {
-        ValueKind::U64 => run_trial::<u64, R1Wrapper<u64, 64>>(args, trace),
-        ValueKind::String => run_trial::<String, R1Wrapper<String, 64>>(args, trace),
+    macro_rules! arm_r1 {
+        ($s:literal) => {
+            match v {
+                ValueKind::U64 => run_trial::<u64, R1Wrapper<u64, $s>>(args, trace),
+                ValueKind::String => run_trial::<String, R1Wrapper<String, $s>>(args, trace),
+            }
+        };
+    }
+    match args.shards {
+        4 => arm_r1!(4),
+        8 => arm_r1!(8),
+        16 => arm_r1!(16),
+        32 => arm_r1!(32),
+        64 => arm_r1!(64),
+        128 => arm_r1!(128),
+        256 => arm_r1!(256),
+        512 => arm_r1!(512),
+        1024 => arm_r1!(1024),
+        2048 => arm_r1!(2048),
+        4096 => arm_r1!(4096),
+        8192 => arm_r1!(8192),
+        16384 => arm_r1!(16384),
+        32768 => arm_r1!(32768),
+        65536 => arm_r1!(65536),
+        131072 => arm_r1!(131072),
+        n => panic!("r1 shards={n} not in supported set (4,8,16,32,...,131072)"),
     }
 }
 

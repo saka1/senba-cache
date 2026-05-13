@@ -865,7 +865,10 @@ impl<K, V> Drop for Shard<K, V> {
 pub const DEFAULT_SHARDS: usize = 8;
 
 pub struct ConcurrentSieveCache<K, V, const SHARDS: usize = DEFAULT_SHARDS> {
-    shards: [Shard<K, V>; SHARDS],
+    /// SHARDS は const generic で compile-time invariant (power-of-two mask) を保つが、
+    /// 実体は heap に置き、SHARDS が大きい場合に stack overflow を避ける。
+    /// length は constructor で SHARDS と一致させる。
+    shards: Box<[Shard<K, V>]>,
     hasher: Xxh3Build,
 }
 
@@ -886,12 +889,13 @@ where
         );
         let base = capacity / SHARDS;
         let extra = capacity % SHARDS;
-        let shards: [Shard<K, V>; SHARDS] = std::array::from_fn(|i| {
+        let mut shards_vec: Vec<Shard<K, V>> = Vec::with_capacity(SHARDS);
+        for i in 0..SHARDS {
             let cap_i = base + if i < extra { 1 } else { 0 };
-            Shard::new(cap_i)
-        });
+            shards_vec.push(Shard::new(cap_i));
+        }
         Self {
-            shards,
+            shards: shards_vec.into_boxed_slice(),
             hasher: Xxh3Build,
         }
     }
