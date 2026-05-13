@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use senba::concurrent::PartitionedCache;
+use senba::concurrent::Cache as SenbaConcurrent;
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache;
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
@@ -261,33 +261,28 @@ where
     }
 }
 
-/// partitioned: `senba::concurrent::PartitionedCache` を `--partitions N` 経由で
-/// 構築する newtype。`--shards` / `--ways` を無視し、`run_partitioned` が
-/// 直接 `PartitionedWrapper::new(cap, partitions)` を呼ぶ (= `ConcCache::build*`
-/// は fallback でのみ使われる)。
-struct PartitionedWrapper<V> {
-    inner: PartitionedCache<u64, V>,
-}
-
-impl<V> PartitionedWrapper<V>
+/// `senba::concurrent::Cache` (the publishable c17s descendant) wrapped
+/// for the `ConcCache` harness. `build` uses the lib's auto-shard heuristic
+/// when `_shards` is zero (the harness's default); explicit shard counts
+/// flow through `Cache::with_shards`.
+struct SenbaConcurrentWrapper<V>
 where
     V: Clone + Send + Sync + 'static,
 {
-    fn new(capacity: usize, partitions: usize) -> Self {
-        Self {
-            inner: PartitionedCache::new(capacity, partitions),
-        }
-    }
+    inner: SenbaConcurrent<u64, V>,
 }
 
-impl<V> ConcCache<V> for PartitionedWrapper<V>
+impl<V> ConcCache<V> for SenbaConcurrentWrapper<V>
 where
     V: Clone + Send + Sync + 'static,
 {
-    /// fallback (= `partitions=1`)。実際の sweep は `run_partitioned` 経由で
-    /// `PartitionedWrapper::new` を直接呼ぶ。
-    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
-        Arc::new(Self::new(capacity, 1))
+    fn build(capacity: usize, shards: usize) -> Arc<Self> {
+        let inner = if shards == 0 {
+            SenbaConcurrent::new(capacity)
+        } else {
+            SenbaConcurrent::with_shards(capacity, shards)
+        };
+        Arc::new(Self { inner })
     }
     #[inline]
     fn get_hit(&self, key: &u64) -> bool {
@@ -448,8 +443,11 @@ struct Args {
     value_kind: ValueKind,
     /// r1 の routing affinity 軸 (power of 2、1 <= ways <= shards)。非 r1 variant では無視。
     ways: usize,
-    /// partitioned の partition 数 (power of 2、>= 1)。`--partitions` 経由。非 partitioned
-    /// variant では無視。設計: `docs/reports/2026-05-12-partitioned-design.md` §(T × N) sweep。
+    /// Held for CLI back-compat with the removed `partitioned` variant.
+    /// No current variant interprets it; the `--partitions` flag is
+    /// accepted to keep older harness invocations from breaking but
+    /// otherwise unused.
+    #[allow(dead_code)]
     partitions: usize,
     /// workload 種別。
     source: Source,
@@ -600,9 +598,9 @@ fn parse_args() -> Args {
                     | "c18s"
                     | "r1"
                     | "r2h"
-                    | "partitioned"
+                    | "senba_concurrent"
             ),
-            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|partitioned)"
+            "unknown variant: {v} (expected c8|c9|moka|mini_moka|c14s|c15s_{{16,8,4}}|c16s|c17s|c18s|r1|r2h|senba_concurrent)"
         );
     }
     if matches!(value_kind, ValueKind::String) && variants.iter().any(|v| v == "c8") {
@@ -929,13 +927,10 @@ fn emit(variant: &str, trial: usize, args: &Args, r: &TrialResult) {
     } else {
         1
     };
-    // partitioned のみが `--partitions` を意味的に解釈する。他 variant は退化値 `1`。
-    // 集計側は `(variant, partitions)` join で (T × N) の N 軸を読む。
-    let partitions_col = if variant == "partitioned" {
-        args.partitions
-    } else {
-        1
-    };
+    // `--partitions` was meaningful for the removed `partitioned` variant.
+    // The column is kept in the CSV for downstream-tool compatibility and
+    // is always `1` now (no variant interprets it).
+    let partitions_col: usize = 1;
     println!(
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.4}",
         variant,
@@ -1014,7 +1009,7 @@ fn main() {
                 ("c15s_4", v) => run_c15s::<2>(&args, v, trace.clone()),
                 ("r1", v) => run_r1(&args, v, trace.clone()),
                 ("r2h", v) => run_r2h(&args, v, trace.clone()),
-                ("partitioned", v) => run_partitioned(&args, v, trace.clone()),
+                ("senba_concurrent", v) => run_senba_concurrent(&args, v, trace.clone()),
                 (other, _) => panic!("unknown variant: {other}"),
             };
             emit(variant, trial, &args, &r);
@@ -1177,27 +1172,14 @@ fn run_r2h(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResu
     }
 }
 
-/// partitioned: `senba::concurrent::PartitionedCache` を `--partitions N` 経由で
-/// 構築。`run_trial_with` の inner harness をそのまま使うため、cache 構築だけ
-/// 直接行い `Arc<PartitionedWrapper>` を inner に渡す。
-///
-/// `--partitions` は **`--threads` と独立な軸** として sweep する (設計
-/// `docs/reports/2026-05-12-partitioned-design.md` §(T × N) sweep)。
-fn run_partitioned(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
-    assert!(
-        args.cap >= args.partitions,
-        "partitioned: --cap ({}) must be >= --partitions ({})",
-        args.cap,
-        args.partitions
-    );
+/// `senba_concurrent`: dispatch through the standard `ConcCache::build`
+/// path. When `--shards` is the harness default (= 0 in this binary), the
+/// publishable `Cache::new` auto-shard heuristic picks
+/// `next_pow2(cap/8)`; an explicit `--shards N` overrides it via
+/// `Cache::with_shards`.
+fn run_senba_concurrent(args: &Args, v: ValueKind, trace: Option<Arc<Vec<u64>>>) -> TrialResult {
     match v {
-        ValueKind::U64 => {
-            let cache = Arc::new(PartitionedWrapper::<u64>::new(args.cap, args.partitions));
-            run_trial_with::<u64, PartitionedWrapper<u64>>(cache, args, trace)
-        }
-        ValueKind::String => {
-            let cache = Arc::new(PartitionedWrapper::<String>::new(args.cap, args.partitions));
-            run_trial_with::<String, PartitionedWrapper<String>>(cache, args, trace)
-        }
+        ValueKind::U64 => run_trial::<u64, SenbaConcurrentWrapper<u64>>(args, trace),
+        ValueKind::String => run_trial::<String, SenbaConcurrentWrapper<String>>(args, trace),
     }
 }

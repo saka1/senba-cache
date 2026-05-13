@@ -86,7 +86,7 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use senba::concurrent::PartitionedCache;
+use senba::concurrent::Cache as SenbaConcurrent;
 use senba_research::experimental::sieve_c8::ConcurrentSieveCache as ConcurrentSieveC8;
 use senba_research::experimental::sieve_c9::ConcurrentSieveCache as ConcurrentSieveC9;
 use senba_research::experimental::sieve_c14s::ConcurrentSieveCache as ConcurrentSieveC14S;
@@ -105,13 +105,12 @@ enum Variant {
     C17s,
     C18s,
     R1 { ways: usize },
-    Partitioned,
+    SenbaConcurrent,
 }
 
 impl Variant {
     /// `r1` variant は `r1@ways=N` (N = power of two, 1..=SHARDS) で受け取る。
     /// 単に `r1` と書いた場合は `ways=1` (= c17s 等価ルーティング) と解釈する。
-    /// `partitioned` variant は `--partitions N` を別 flag で受ける。
     fn parse(s: &str) -> Self {
         match s {
             "c8" => Variant::C8,
@@ -121,7 +120,7 @@ impl Variant {
             "c17s" => Variant::C17s,
             "c18s" => Variant::C18s,
             "r1" => Variant::R1 { ways: 1 },
-            "partitioned" => Variant::Partitioned,
+            "senba_concurrent" => Variant::SenbaConcurrent,
             other if other.starts_with("r1@ways=") => {
                 let ways: usize = other["r1@ways=".len()..]
                     .parse()
@@ -134,7 +133,7 @@ impl Variant {
             }
             other => {
                 panic!(
-                    "--variant must be c8|c9|c14s|c16s|c17s|c18s|r1[@ways=N]|partitioned, got: {other}"
+                    "--variant must be c8|c9|c14s|c16s|c17s|c18s|r1[@ways=N]|senba_concurrent, got: {other}"
                 )
             }
         }
@@ -148,7 +147,7 @@ impl Variant {
             Variant::C17s => "c17s",
             Variant::C18s => "c18s",
             Variant::R1 { .. } => "r1",
-            Variant::Partitioned => "partitioned",
+            Variant::SenbaConcurrent => "senba_concurrent",
         }
     }
 }
@@ -166,8 +165,10 @@ struct Args {
     /// c14s は SHARDS=64 固定 (Phase 1 設計)、c8 は power-of-two ∈ [8, 512]、
     /// c9 は任意 power-of-two。
     shards: usize,
-    /// `partitioned` variant の partition 数 (power of two, >= 1)。
-    /// 他 variant では無視 (CSV には記録)。
+    /// Held for CLI back-compat with the removed `partitioned` variant.
+    /// Not interpreted by any current variant; the `--partitions` flag is
+    /// accepted but ignored.
+    #[allow(dead_code)]
     partitions: usize,
 }
 
@@ -273,18 +274,12 @@ fn parse_args() -> Args {
             "r1@ways=<N>: ways ({ways}) must be <= shards ({shards})"
         );
     }
-    if matches!(variant, Variant::Partitioned) {
-        assert!(
-            partitions >= 1 && partitions.is_power_of_two(),
-            "--partitions must be a power of two >= 1, got {partitions}"
-        );
-        assert!(
-            cap >= partitions,
-            "--cap ({cap}) must be >= --partitions ({partitions})"
-        );
+    if matches!(variant, Variant::SenbaConcurrent) {
+        // The publishable Cache auto-shards from `cap` so the harness's
+        // `--shards` is informational; the per-shard cap bound is
+        // enforced internally.
     } else {
-        // 6-bit entry ID で per-shard ≤ 64。partitioned は senba::Cache を使うので
-        // この制約に乗らない (lib 側で cap 任意)。
+        // 6-bit entry ID で per-shard ≤ 64。
         assert!(
             cap <= 64 * shards,
             "--cap ({cap}) must be <= 64 * shards ({shards}) — per-shard cap is bounded by 6-bit ID"
@@ -307,14 +302,10 @@ fn parse_args() -> Args {
 
 /// 並行 variant を同じ driver で叩くための最小 trait (`bench_concurrent.rs` と同型)。
 /// `build_with_ways` は r1 等の routing variant 用、default で `build` 互換。
-/// `build_with_partitions` は partitioned variant 用、default で `build` 互換。
 trait ConcCache: Send + Sync + 'static {
     fn build(capacity: usize, shards: usize) -> Arc<Self>;
     fn build_with_ways(capacity: usize, shards: usize, _ways: usize) -> Arc<Self> {
         Self::build(capacity, shards)
-    }
-    fn build_with_partitions(capacity: usize, _partitions: usize) -> Arc<Self> {
-        Self::build(capacity, 1)
     }
     fn get_hit(&self, key: &u64) -> bool;
     fn insert(&self, key: u64, value: u64);
@@ -423,26 +414,21 @@ impl<const S: usize> ConcCache for ConcurrentSieveR1<u64, u64, S> {
     }
 }
 
-/// `senba::concurrent::PartitionedCache` の VTune driver newtype。
-/// `--partitions N` を `build_with_partitions` 経路で受ける。HITM 観測の文脈では
-/// N=T 構成が uncontended (cross-partition shared なし) になり、scaling の
-/// ボトルネックが純粋に L1d/L2/SMT-pair / E-core に切り出される。設計の出所:
-/// `docs/reports/2026-05-12-partitioned-results.md` §Scaling と物理層のボトルネック。
-struct PartitionedWrapper {
-    inner: PartitionedCache<u64, u64>,
+/// `senba::concurrent::Cache` の VTune driver newtype。
+/// `--shards` は publishable surface の `with_shards` 経路で渡し、`0` の場合は
+/// `Cache::new` (= `next_pow2(cap/8)` auto-shard) に委譲する。
+struct SenbaConcurrentWrapper {
+    inner: SenbaConcurrent<u64, u64>,
 }
 
-impl ConcCache for PartitionedWrapper {
-    /// fallback (= `partitions=1`)。dispatch は `build_with_partitions` 経路。
-    fn build(capacity: usize, _shards: usize) -> Arc<Self> {
-        Arc::new(Self {
-            inner: PartitionedCache::new(capacity, 1),
-        })
-    }
-    fn build_with_partitions(capacity: usize, partitions: usize) -> Arc<Self> {
-        Arc::new(Self {
-            inner: PartitionedCache::new(capacity, partitions),
-        })
+impl ConcCache for SenbaConcurrentWrapper {
+    fn build(capacity: usize, shards: usize) -> Arc<Self> {
+        let inner = if shards == 0 {
+            SenbaConcurrent::new(capacity)
+        } else {
+            SenbaConcurrent::with_shards(capacity, shards)
+        };
+        Arc::new(Self { inner })
     }
     #[inline]
     fn get_hit(&self, key: &u64) -> bool {
@@ -490,11 +476,10 @@ fn run<C: ConcCache>(args: &Args) -> Stats {
     // 起動直後から collection は止めておく (-start-paused と二重防御)。
     ittapi::pause();
 
-    // ways は r1 のときだけ、partitions は partitioned のときだけ意味を持つ。
-    // 他 variant は default impl 経由で無視される。
+    // ways は r1 variant のときだけ、senba_concurrent は `--shards` を直接 lib
+    // 側の `with_shards` に渡す (`build` の default 経路で OK)。
     let cache = match args.variant {
         Variant::R1 { ways } => C::build_with_ways(args.cap, args.shards, ways),
-        Variant::Partitioned => C::build_with_partitions(args.cap, args.partitions),
         _ => C::build(args.cap, args.shards),
     };
     let barrier = Arc::new(Barrier::new(args.threads + 1));
@@ -561,16 +546,11 @@ fn main() {
         Variant::R1 { ways } => ways,
         _ => 1,
     };
-    let partitions = match args.variant {
-        Variant::Partitioned => args.partitions,
-        _ => 1,
-    };
     eprintln!(
-        "[bench_vtune_concurrent] variant={} ways={} partitions={} threads={} cap={} keys={} skew={} \
+        "[bench_vtune_concurrent] variant={} ways={} threads={} cap={} keys={} skew={} \
          warmup={} ops={} seed={} shards={}",
         args.variant.as_str(),
         ways,
-        partitions,
         args.threads,
         args.cap,
         args.keys,
@@ -589,7 +569,7 @@ fn main() {
         Variant::C17s => run::<ConcurrentSieveC17S<u64, u64, 64>>(&args),
         Variant::C18s => run::<ConcurrentSieveC18S<u64, u64, 64>>(&args),
         Variant::R1 { .. } => run::<ConcurrentSieveR1<u64, u64, 64>>(&args),
-        Variant::Partitioned => run::<PartitionedWrapper>(&args),
+        Variant::SenbaConcurrent => run::<SenbaConcurrentWrapper>(&args),
     };
 
     let total = s.hits + s.misses;
@@ -597,6 +577,8 @@ fn main() {
     let ns_per_op = s.elapsed_ns as f64 / total.max(1) as f64;
     let mops = (total as f64) / (s.elapsed_ns as f64 / 1e3);
 
+    // `partitions` column kept (always 1) for back-compat with the
+    // removed `partitioned` variant's CSV consumers.
     println!(
         "variant,ways,partitions,threads,shards,cap,keys,skew,warmup,ops,elapsed_ns,hits,misses,hit_ratio,ns_per_op,aggregate_mops"
     );
@@ -604,7 +586,7 @@ fn main() {
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.3},{:.3}",
         args.variant.as_str(),
         ways,
-        partitions,
+        1usize,
         args.threads,
         args.shards,
         args.cap,
