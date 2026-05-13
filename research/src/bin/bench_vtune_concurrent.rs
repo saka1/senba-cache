@@ -436,7 +436,7 @@ impl ConcCache for SenbaConcurrentWrapper {
     }
     #[inline]
     fn insert(&self, key: u64, value: u64) {
-        let _ = self.inner.insert(key, value);
+        self.inner.insert(key, value);
     }
 }
 

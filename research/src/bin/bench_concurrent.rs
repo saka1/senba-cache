@@ -326,7 +326,7 @@ where
     }
     #[inline]
     fn insert(&self, key: u64, value: V) {
-        let _ = self.inner.insert(key, value);
+        self.inner.insert(key, value);
     }
 }
 

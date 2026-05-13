@@ -54,11 +54,14 @@
 //!    K) is deferred. The pin held by any in-flight reader keeps the
 //!    deferred drop suspended until the reader's `V::clone` finishes.
 //!
-//! Race β (clone-mid-flight UAF on V) is structurally closed by the
-//! ManuallyDrop slot + epoch defer. Race γ (the symmetric UAF on K) is
-//! closed for `remove` (K is deferred) but remains latent on Path C while
-//! the public API still hands K back to the caller — closed in the
-//! follow-up commit that switches `insert` to a `()` return.
+//! Race β (clone-mid-flight UAF on V) and race γ (the symmetric UAF on K)
+//! are both structurally closed: writer_evict_and_install and `remove` use
+//! `ManuallyDrop::take` to move K and V out of the slot, and the deferred
+//! `on_evict` callback (or the symmetric `defer_drop_kv_if_needed` for
+//! `remove`) keeps the moved-out allocations alive past every in-flight
+//! reader pin. The bit-copy local a reader holds therefore always
+//! references valid memory until the reader's own `V::clone` (and `K::eq`)
+//! finishes.
 //!
 //! The runtime cost is `~3–5 ns` per reader-hit for the `epoch::pin` when
 //! `V: !Copy`; zero when `V: Copy` (the pin folds away via
@@ -134,7 +137,6 @@ fn defer_drop_if_needed<V: Send + 'static>(v: V) {
 /// captured in a single deferred closure (one `epoch::pin`, one queue
 /// entry). If neither has one, both are `mem::forget`'d.
 #[inline]
-#[allow(dead_code)]
 fn defer_drop_kv_if_needed<K, V>(k: K, v: V)
 where
     K: Send + 'static,
@@ -339,7 +341,7 @@ impl<K, V> Shard<K, V> {
 impl<K, V> Shard<K, V>
 where
     K: Hash + Eq + Send + 'static,
-    V: Clone + Send + Sync + 'static,
+    V: Clone + Send + 'static,
 {
     /// Spread the top 9 bits of `hash` over the 9 HASH bits of the tag.
     /// The HASH region is **not** contiguous (the ID region cuts through
@@ -490,14 +492,21 @@ where
         Probe::Miss
     }
 
-    pub(crate) fn insert(&self, key: K, value: V, hash: u64) -> Option<(K, V)> {
+    /// Insert `(key, value)`. On a Path C eviction `on_evict` is called with
+    /// the evicted (K, V). The call is deferred past in-flight reader pins
+    /// when `K` or `V` carries a destructor, and synchronous otherwise.
+    /// `on_evict` is never invoked on Path A (in-place update) or Path B
+    /// (warmup install).
+    pub(crate) fn insert<F>(&self, key: K, value: V, hash: u64, on_evict: F)
+    where
+        F: FnOnce(K, V) + Send + 'static,
+    {
         let needle = Self::needle_from_hash(hash);
         match self.try_path_a(&key, needle, value) {
             Ok(()) => {
                 drop(key);
-                None
             }
-            Err(value) => self.path_bc(key, value, needle),
+            Err(value) => self.path_bc(key, value, needle, on_evict),
         }
     }
 
@@ -612,21 +621,26 @@ where
         None
     }
 
-    fn path_bc(&self, key: K, value: V, needle: u16) -> Option<(K, V)> {
+    fn path_bc<F>(&self, key: K, value: V, needle: u16, on_evict: F)
+    where
+        F: FnOnce(K, V) + Send + 'static,
+    {
         let mut state = self.hot.writer.lock();
 
         if let Some((pos, id)) = self.writer_find(&key, needle) {
             self.writer_update_in_place(pos, id, key, value);
-            return None;
+            // `on_evict` is dropped here without being invoked (no eviction
+            // happened on a key-update path).
+            return;
         }
 
         let len = self.hot.len.load(Ordering::Relaxed);
         if len < self.capacity {
             self.writer_warmup_install(&mut state, len, key, value, needle);
-            return None;
+            return;
         }
 
-        Some(self.writer_evict_and_install(&mut state, key, value, needle))
+        self.writer_evict_and_install(&mut state, key, value, needle, on_evict);
     }
 
     fn writer_find(&self, key: &K, needle: u16) -> Option<(usize, usize)> {
@@ -809,13 +823,16 @@ where
         self.hot.len.store(len + 1, Ordering::Release);
     }
 
-    fn writer_evict_and_install(
+    fn writer_evict_and_install<F>(
         &self,
         state: &mut WriterState,
         key: K,
         value: V,
         needle: u16,
-    ) -> (K, V) {
+        on_evict: F,
+    ) where
+        F: FnOnce(K, V) + Send + 'static,
+    {
         let cap = self.capacity;
         debug_assert_eq!(self.hot.len.load(Ordering::Relaxed), cap);
         if state.hand >= cap {
@@ -845,11 +862,6 @@ where
         // SAFETY: odd version excludes readers / Path A.
         let evicted_key: K = unsafe { ManuallyDrop::take(&mut (*evict_entry_ptr).key) };
         let evicted_value: V = unsafe { ManuallyDrop::take(&mut (*evict_entry_ptr).value) };
-        // Clone the V to hand back to the caller. The original `V` (with
-        // the heap allocation the reader's bit-copy still references) is
-        // deferred at the end of this function so any in-flight reader
-        // finishes its own clone before the heap is freed.
-        let evicted_value_for_caller: V = evicted_value.clone();
 
         for i in evict_pos..(cap - 1) {
             let next_tag = self.read_live_tag_with_spin(i + 1);
@@ -887,13 +899,22 @@ where
 
         self.hot.path_c_epoch.fetch_add(1, Ordering::Release);
 
-        // Defer the original V's drop past every in-flight reader pin so
-        // any concurrent clone of the bit-copy finishes safely. K is
-        // returned to the caller in this commit (race γ remains latent
-        // until `insert` switches to a `()` return in the follow-up).
-        defer_drop_if_needed::<V>(evicted_value);
-
-        (evicted_key, evicted_value_for_caller)
+        // Hand the evicted (K, V) to the user callback. When either K or V
+        // has a destructor, defer the call past every in-flight reader pin
+        // so the bit-copies held by `try_candidate` finish their `K::eq`
+        // and `V::clone` against still-live allocations (race β + race γ).
+        // For Copy K/V we run the closure synchronously — there's no heap
+        // for a reader to UAF on.
+        if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
+            let guard = epoch::pin();
+            // SAFETY: `K, V: Send + 'static` and `F: Send + 'static` make
+            // the closure capture sound for off-thread reclaim.
+            unsafe {
+                guard.defer_unchecked(move || on_evict(evicted_key, evicted_value));
+            }
+        } else {
+            on_evict(evicted_key, evicted_value);
+        }
     }
 
     fn scan_evict(&self, lo: usize, hi: usize) -> Option<usize> {

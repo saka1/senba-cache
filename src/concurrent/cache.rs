@@ -1,11 +1,12 @@
 //! `senba::concurrent::Cache` — sharded, lock-free-reader concurrent SIEVE cache.
 //!
-//! Promoted from the `c17s` research variant
-//! (`research/src/experimental/sieve_c17s.rs`). The reader's hot path is the
-//! AVX2 SIMD tag scan + entry-version seqlock — no lock acquire on a hit.
-//! Writers take a per-shard `parking_lot::Mutex` for Path B (warmup install)
-//! and Path C (evict + shift + install); Path A (in-place value update of
-//! an already-present key) is lock-free via the entry version CAS.
+//! Built on the `sieve_r4` research engine
+//! (`research/src/experimental/sieve_r4.rs`). The reader's hot path is the
+//! AVX2 SIMD tag scan + entry-version seqlock — no lock acquire and no
+//! shared atomic write on a hit. Writers take a per-shard
+//! `parking_lot::Mutex` for Path B (warmup install) and Path C (evict +
+//! shift + install); Path A (in-place value update of an already-present
+//! key) is lock-free via the entry version CAS.
 //!
 //! See `docs/reports/2026-05-13-c17s-shard-heuristic.md` for the
 //! `next_pow2(cap/8)` auto-shard choice and the `MIN_PER_SHARD = 4` cliff
@@ -13,13 +14,20 @@
 //!
 //! ## Soundness model
 //!
-//! The entry arena stores `Arc<V>` rather than raw `V`; readers bump the
-//! refcount on the bit-copy they pulled out of `entries[id]` and writers
-//! defer their old `Arc<V>` drops through `crossbeam-epoch`. The reader's
-//! local epoch pin keeps the deferred drops alive until every in-flight
-//! `V::clone` finishes (see `shard.rs` module doc for the protocol). This
-//! lets the public API require only `V: Clone + Send + Sync + 'static`,
-//! matching `moka::sync::Cache<K, V>`.
+//! Each entry stores `key: ManuallyDrop<K>` and `value: ManuallyDrop<V>`.
+//! Readers bit-copy the live slot into a `ManuallyDrop<Entry<K,V>>` local,
+//! validate the seqlock (`v1 == v2`, even), then clone V directly off the
+//! deref'd `ManuallyDrop<V>`. Writers (Path A, Path C, `remove`) extract
+//! the old K / V via raw `ptr::read` or `ManuallyDrop::take` and defer
+//! their drop past in-flight reader pins via `crossbeam-epoch`. The pin
+//! held by a reader during `V::clone` (and `K::eq`) keeps the deferred
+//! allocations live, so the bit-copy local always references valid memory
+//! until the clone finishes. See `shard.rs` for the per-method protocol.
+//!
+//! Reader hit cost is `~3–5 ns` of `epoch::pin` overhead for `V: !Copy`
+//! and zero for `V: Copy` (the pin folds away via `needs_drop::<V>()`).
+//! See `docs/reports/2026-05-15-r4-vs-c17s.md` for the full sweep against
+//! the prior `Arc<V>`-based implementation.
 
 mod shard;
 
@@ -73,8 +81,8 @@ pub struct Cache<K, V, H: BuildHasher = Xxh3Build> {
 
 impl<K, V> Cache<K, V, Xxh3Build>
 where
-    K: Hash + Eq + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
+    K: Hash + Eq + Send + 'static,
+    V: Clone + Send + 'static,
 {
     /// Creates a cache with `capacity` total entries split across an
     /// automatically chosen power-of-two number of shards (see module doc).
@@ -93,8 +101,8 @@ where
 
 impl<K, V, H> Cache<K, V, H>
 where
-    K: Hash + Eq + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
+    K: Hash + Eq + Send + 'static,
+    V: Clone + Send + 'static,
     H: BuildHasher,
 {
     /// Cache with a user-supplied [`BuildHasher`] and auto-chosen shards.
@@ -187,14 +195,30 @@ where
         self.shards[self.shard_of_hash(h)].get_by_hash::<Q>(key, h)
     }
 
-    /// Inserts `key → value`. Returns the previously-evicted `(key,
-    /// value)` if the shard was full and SIEVE chose a victim, or `None`
-    /// otherwise (warmup install / Path A update of an existing key).
+    /// Inserts `key → value`. If the shard was full and SIEVE chose a
+    /// victim, the evicted `(K, V)` is dropped past every in-flight reader
+    /// pin via `crossbeam-epoch` — use [`Self::insert_with`] if you need
+    /// to observe the evicted pair instead.
     #[inline]
-    pub fn insert(&self, key: K, value: V) -> Option<(K, V)> {
+    pub fn insert(&self, key: K, value: V) {
+        self.insert_with(key, value, |_, _| {});
+    }
+
+    /// Like [`Self::insert`], but invokes `on_evict(evicted_key,
+    /// evicted_value)` on a Path C eviction. The callback runs inside the
+    /// shard's writer-mutex critical section (deferred past reader pins
+    /// when K or V carries a destructor; synchronous otherwise), so it
+    /// should not block — store the pair into a channel / vec and act on
+    /// it elsewhere. The callback is not invoked on warmup install (Path
+    /// B) or in-place key update (Path A).
+    #[inline]
+    pub fn insert_with<F>(&self, key: K, value: V, on_evict: F)
+    where
+        F: FnOnce(K, V) + Send + 'static,
+    {
         let h = self.hasher.hash_one(&key);
         let i = self.shard_of_hash(h);
-        self.shards[i].insert(key, value, h)
+        self.shards[i].insert(key, value, h, on_evict);
     }
 
     /// Removes the entry for `key` if present and returns its value.
@@ -230,8 +254,7 @@ mod tests {
         let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
         cache.insert(1, 10);
         cache.insert(2, 20);
-        let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((1, 10)));
+        cache.insert(3, 30);
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key(&1));
         assert!(cache.contains_key(&2));
@@ -244,8 +267,10 @@ mod tests {
         cache.insert(1, 10);
         cache.insert(2, 20);
         cache.get(&1);
-        let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((2, 20)));
+        cache.insert(3, 30);
+        assert!(cache.contains_key(&1));
+        assert!(!cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
     }
 
     #[test]
@@ -255,20 +280,21 @@ mod tests {
         cache.insert(2, 20);
         cache.get(&1);
         cache.get(&2);
-        let evicted = cache.insert(3, 30);
-        assert_eq!(evicted, Some((1, 10)));
+        cache.insert(3, 30);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
     }
 
     #[test]
     fn warm_up_to_steady_transition() {
         let cache: Cache<u64, u64> = Cache::with_shards(4, 1);
-        assert_eq!(cache.insert(1, 100), None);
-        assert_eq!(cache.insert(2, 200), None);
-        assert_eq!(cache.insert(3, 300), None);
-        assert_eq!(cache.insert(4, 400), None);
+        cache.insert(1, 100);
+        cache.insert(2, 200);
+        cache.insert(3, 300);
+        cache.insert(4, 400);
         assert_eq!(cache.len(), 4);
-        let evicted = cache.insert(5, 500);
-        assert!(evicted.is_some());
+        cache.insert(5, 500);
         assert_eq!(cache.len(), 4);
         assert_eq!(cache.get(&5), Some(500));
     }
@@ -341,12 +367,9 @@ mod tests {
         cache.insert(1, 10);
         cache.insert(2, 20);
         cache.insert(1, 11);
-        let evicted = cache.insert(3, 30);
-        assert_eq!(
-            evicted,
-            Some((2, 20)),
-            "update must set visited; otherwise key (1) would be evicted instead of (2)"
-        );
+        cache.insert(3, 30);
+        // update of key (1) must set visited; otherwise SIEVE would evict
+        // (1) instead of (2) on the next install.
         assert!(cache.contains_key(&1));
         assert!(!cache.contains_key(&2));
         assert!(cache.contains_key(&3));
@@ -382,8 +405,7 @@ mod tests {
         let ids_before: Vec<usize> = sh.live_ids();
         assert_eq!(sh.live_count(), 4);
         assert_eq!(ids_before, vec![0, 1, 2, 3]);
-        let evicted = cache.insert(99, 9900);
-        assert!(evicted.is_some());
+        cache.insert(99, 9900);
         assert_eq!(sh.live_count(), 4);
         let last_tag = sh.tag_at(3);
         let last_id = Shard::<u64, u64>::id_of_pub(last_tag);
@@ -399,15 +421,17 @@ mod tests {
     fn path_a_does_not_evict() {
         let cache: Cache<u64, u64> = Cache::with_shards(4, 1);
         for k in 0..4u64 {
-            assert_eq!(cache.insert(k, k), None);
+            cache.insert(k, k);
         }
         for _ in 0..100 {
             for k in 0..4u64 {
-                assert_eq!(
-                    cache.insert(k, k * 1000),
-                    None,
-                    "Path A update returned an evicted entry (fell through to Path C)"
-                );
+                // `insert_with` fires the closure only on a Path C eviction.
+                // Path A (in-place update of an already-present key) must
+                // not invoke it — a panic here would surface a fall-through
+                // bug.
+                cache.insert_with(k, k * 1000, |_, _| {
+                    panic!("Path A update fell through to Path C eviction");
+                });
             }
         }
         for k in 0..4u64 {
@@ -612,5 +636,163 @@ mod tests {
                 assert_eq!(v, k, "value for key {k} is corrupted");
             }
         }
+    }
+
+    #[test]
+    fn insert_with_callback_fires_on_eviction() {
+        use std::sync::{Arc, Mutex};
+        let evicted: Arc<Mutex<Vec<(i32, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        // Capacity reached; next install evicts the unvisited oldest (key 1).
+        {
+            let captured = Arc::clone(&evicted);
+            cache.insert_with(3, 30, move |k, v| {
+                captured.lock().unwrap().push((k, v));
+            });
+        }
+        let captured = evicted.lock().unwrap();
+        assert_eq!(captured.as_slice(), &[(1, 10)]);
+    }
+
+    #[test]
+    fn insert_with_callback_not_fired_on_warmup() {
+        use std::sync::{Arc, Mutex};
+        let evicted: Arc<Mutex<Vec<(i32, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cache: Cache<i32, i32> = Cache::with_shards(4, 1);
+        for k in 0..4i32 {
+            let captured = Arc::clone(&evicted);
+            cache.insert_with(k, k * 10, move |k, v| {
+                captured.lock().unwrap().push((k, v));
+            });
+        }
+        assert!(
+            evicted.lock().unwrap().is_empty(),
+            "Path B (warmup install) must not invoke the on_evict callback"
+        );
+    }
+
+    #[test]
+    fn insert_with_drops_evictee_when_dropped() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter {
+            counter: Arc<AtomicUsize>,
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cache: Cache<i32, DropCounter> = Cache::with_shards(2, 1);
+        cache.insert(
+            1,
+            DropCounter {
+                counter: Arc::clone(&drops),
+            },
+        );
+        cache.insert(
+            2,
+            DropCounter {
+                counter: Arc::clone(&drops),
+            },
+        );
+        // Eviction: closure does nothing — the evicted value is dropped at
+        // closure scope end (deferred past reader pins).
+        cache.insert_with(
+            3,
+            DropCounter {
+                counter: Arc::clone(&drops),
+            },
+            |_k, _v| {},
+        );
+        // Force the epoch GC to run any pending defers.
+        drop(cache);
+        for _ in 0..32 {
+            crossbeam_epoch::pin().flush();
+        }
+        // 3 inserts + 1 eviction-drop: at minimum 1 destructor must have fired.
+        assert!(
+            drops.load(Ordering::Relaxed) >= 1,
+            "evicted DropCounter never ran its destructor"
+        );
+    }
+
+    #[test]
+    fn insert_with_callback_panic_does_not_poison_shard() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        // First eviction: callback panics. parking_lot::Mutex doesn't
+        // poison on panic, so the shard must remain usable afterwards.
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            cache.insert_with(3, 30, |_, _| panic!("boom"));
+        }));
+        assert!(r.is_err(), "panicking callback did not propagate");
+
+        // Subsequent operations succeed against the same shard.
+        cache.insert(4, 40);
+        let mut alive: Vec<i32> = (0..5).filter(|k| cache.contains_key(k)).collect();
+        alive.sort();
+        assert!(alive.contains(&4), "shard is locked up after callback panic");
+        assert!(cache.len() <= 2);
+    }
+
+    #[test]
+    fn v_string_insert_with_under_contention() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let cap = 64usize;
+        let cache: Arc<Cache<u64, String>> = Arc::new(Cache::new(cap));
+        let eviction_calls = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|s| {
+            for tid in 0..4u64 {
+                let c = Arc::clone(&cache);
+                let evs = Arc::clone(&eviction_calls);
+                s.spawn(move || {
+                    for i in 0..5_000u64 {
+                        let k = (i ^ tid).wrapping_mul(0x9E37_79B9_7F4A_7C15) % 256;
+                        let v = format!("t{tid}-i{i}-k{k}");
+                        let evs_inner = Arc::clone(&evs);
+                        c.insert_with(k, v, move |_k, evicted| {
+                            // Touch the heap bytes — under a clone-mid-flight
+                            // UAF this would crash / ASan would fire.
+                            let _: u32 = evicted.bytes().map(u32::from).sum();
+                            evs_inner.fetch_add(1, Ordering::Relaxed);
+                        });
+                    }
+                });
+            }
+            for tid in 0..4u64 {
+                let c = Arc::clone(&cache);
+                s.spawn(move || {
+                    for i in 0..5_000u64 {
+                        let k = (i ^ tid).wrapping_mul(0xBF58_476D_1CE4_E5B9) % 256;
+                        if let Some(v) = c.get(&k) {
+                            assert!(v.starts_with('t'), "torn string: {:?}", v);
+                            let _: u32 = v.bytes().map(u32::from).sum();
+                        }
+                    }
+                });
+            }
+        });
+
+        assert!(cache.len() <= cap);
+        // We can't assert an exact eviction count, but with key-universe 256
+        // > cap 64 and 20k inserts the callback must have fired many times.
+        assert!(
+            eviction_calls.load(Ordering::Relaxed) > 100,
+            "expected the insert_with callback to fire frequently"
+        );
     }
 }

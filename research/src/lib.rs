@@ -47,6 +47,11 @@ where
 /// research-side cross-variant harness (`bench_concurrent`,
 /// `concurrent_test_suite!`). Gated to match the publishable type's own
 /// `x86_64 + non-miri` availability.
+///
+/// The trait still surfaces the legacy `Option<(K, V)>` insert return for
+/// compatibility with research variants that hand the evicted pair back;
+/// `senba::concurrent::Cache::insert` returns `()` and we always return
+/// `None` here.
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 impl<K, V> experimental::ConcurrentCacheImpl<K, V> for senba::concurrent::Cache<K, V>
 where
@@ -69,6 +74,7 @@ where
         self.get(key)
     }
     fn insert(&self, key: K, value: V) -> Option<(K, V)> {
-        self.insert(key, value)
+        Self::insert(self, key, value);
+        None
     }
 }
