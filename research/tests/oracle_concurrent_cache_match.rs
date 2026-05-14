@@ -7,9 +7,10 @@
 //! sides) after replaying the same trace.
 //!
 //! Run with: `cargo test -p senba-research oracle_concurrent_cache_match`.
-//! Gated to `x86_64 + non-miri` because `senba::concurrent` itself is.
+//! Gated to `non-miri` only — `senba::concurrent` now compiles on every
+//! arch with a runtime AVX2/scalar dispatcher.
 
-#![cfg(all(target_arch = "x86_64", not(miri)))]
+#![cfg(not(miri))]
 
 use senba::concurrent::Cache as ConcurrentCache;
 use senba_research::experimental::sieve_orig::SieveCache as Orig;

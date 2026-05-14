@@ -306,10 +306,6 @@ impl<K, V> Shard<K, V> {
             capacity <= MAX_PER_SHARD,
             "per-shard capacity ({capacity}) must be <= {MAX_PER_SHARD} (6-bit ID limit)"
         );
-        assert!(
-            std::is_x86_feature_detected!("avx2"),
-            "senba::concurrent::Cache: AVX2 required (compile-time gated to x86_64+non-miri but runtime CPU lacks AVX2)"
-        );
         let order_cap = ((capacity + LANE - 1) & !(LANE - 1)).max(LANE);
 
         let mut tags_vec: Vec<AtomicU16> = Vec::with_capacity(order_cap);
@@ -361,15 +357,15 @@ where
         LIVE | spread
     }
 
-    pub(crate) fn contains<Q>(&self, key: &Q, hash: u64) -> bool
+    pub(crate) fn contains<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> bool
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.get_by_hash::<Q>(key, hash).is_some()
+        self.get_by_hash::<Q>(key, hash, has_avx2_bmi1).is_some()
     }
 
-    pub(crate) fn get_by_hash<Q>(&self, key: &Q, hash: u64) -> Option<V>
+    pub(crate) fn get_by_hash<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -384,8 +380,7 @@ where
         let _guard = pin_for::<V>();
         for attempt in 0..MAX_READER_RETRY {
             let epoch_before = self.hot.path_c_epoch.load(Ordering::Acquire);
-            // SAFETY: AVX2 verified in `Shard::new`.
-            let (v, racing) = unsafe { self.find_get::<Q>(key, needle) };
+            let (v, racing) = self.find_get::<Q>(key, needle, has_avx2_bmi1);
             if let Some(v) = v {
                 return Some(v);
             }
@@ -400,12 +395,48 @@ where
         None
     }
 
-    /// AVX2 reader scan. EMPTY-lane detection is intentionally absent — Path A
-    /// never writes EMPTY, and Path C transients are caught via `path_c_epoch`.
-    /// The `pos < len` filter is similarly skipped (the pad zone is permanent
-    /// EMPTY so the LIVE-bit prefix in `SCAN_MASK` rejects it).
+    /// Reader scan dispatcher: per-arch SIMD fast path when the host
+    /// advertises it, scalar fallback otherwise. EMPTY-lane detection is
+    /// intentionally absent in every twin — Path A never writes EMPTY,
+    /// and Path C transients are caught via `path_c_epoch`. The
+    /// `pos < len` filter is similarly skipped (the pad zone is
+    /// permanent EMPTY so the LIVE-bit prefix in `SCAN_MASK` rejects it).
+    ///
+    /// Per-arch arms below are explicit so a future NEON twin can plug
+    /// in symmetric to the AVX2 arm. `has_avx2_bmi1` is the unified
+    /// "SIMD enabled" flag — on x86_64 it gates AVX2+BMI1, on aarch64 it
+    /// would gate NEON once implemented (today it is always `false`).
+    #[inline]
+    fn find_get<Q>(&self, key: &Q, needle: u16, has_avx2_bmi1: bool) -> (Option<V>, bool)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if has_avx2_bmi1 {
+                // SAFETY: `has_avx2_bmi1` was set from
+                // `is_x86_feature_detected!("avx2")` in
+                // `Cache::with_shards_and_hasher`. AVX2 implies BMI1 on
+                // every shipping x86_64 part. The detection result is
+                // valid for the process lifetime, so caching it is sound.
+                return unsafe { self.find_get_avx2::<Q>(key, needle) };
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Reserved insertion point for `find_get_neon`. Mirror the
+            // x86_64 arm above when the NEON twin lands. The detection
+            // flag is currently forced `false` in `cache.rs`, so this
+            // block falls through to the scalar twin today.
+        }
+        let _ = has_avx2_bmi1; // unused on non-x86_64 hosts
+        self.find_get_scalar::<Q>(key, needle)
+    }
+
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
-    unsafe fn find_get<Q>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
+    unsafe fn find_get_avx2<Q>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -444,6 +475,38 @@ where
                 mask = _blsr_u32(mask);
             }
             i += LANE;
+        }
+        (None, racing)
+    }
+
+    /// Portable twin of [`Self::find_get_avx2`]. Iterates `tags[..]`
+    /// (full length including pad lanes — the AVX2 twin scans the same
+    /// range; pad lanes are permanent EMPTY and rejected by the
+    /// `SCAN_MASK` LIVE prefix).
+    fn find_get_scalar<Q>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let limit = self.tags.len();
+        let mut racing = false;
+        for pos in 0..limit {
+            // Ordering: the AVX2 twin loads 16 tags via
+            // `_mm256_loadu_si256` (unordered). Synchronisation is done
+            // by `try_candidate` via its `Acquire` re-load of the tag
+            // and the entry version. A `Relaxed` load here matches the
+            // AVX2 path's lack of ordering on the initial scan; any
+            // candidate observed is re-validated inside `try_candidate`
+            // before any K::eq / V::clone runs.
+            let t = self.tags[pos].load(Ordering::Relaxed);
+            if (t & Self::SCAN_MASK) != needle {
+                continue;
+            }
+            match self.try_candidate::<Q>(pos, key, needle) {
+                Probe::Found(val) => return (Some(val), false),
+                Probe::Racing => racing = true,
+                Probe::Miss => {}
+            }
         }
         (None, racing)
     }
@@ -497,12 +560,12 @@ where
     /// when `K` or `V` carries a destructor, and synchronous otherwise.
     /// `on_evict` is never invoked on Path A (in-place update) or Path B
     /// (warmup install).
-    pub(crate) fn insert<F>(&self, key: K, value: V, hash: u64, on_evict: F)
+    pub(crate) fn insert<F>(&self, key: K, value: V, hash: u64, has_avx2_bmi1: bool, on_evict: F)
     where
         F: FnOnce(K, V) + Send + 'static,
     {
         let needle = Self::needle_from_hash(hash);
-        match self.try_path_a(&key, needle, value) {
+        match self.try_path_a(&key, needle, value, has_avx2_bmi1) {
             Ok(()) => {
                 drop(key);
             }
@@ -519,10 +582,9 @@ where
     /// Single-shot: on CAS contention or lookup miss we hand the value back
     /// to the caller, which falls through to `path_bc` under the mutex.
     /// `path_bc` is the definitive winner for any racing case.
-    fn try_path_a(&self, key: &K, needle: u16, value: V) -> Result<(), V> {
+    fn try_path_a(&self, key: &K, needle: u16, value: V, has_avx2_bmi1: bool) -> Result<(), V> {
         let mut value_holder = ManuallyDrop::new(value);
-        // SAFETY: AVX2 verified in `Shard::new`.
-        let Some((pos, id, v_snap)) = (unsafe { self.find_lockfree_for_path_a(key, needle) })
+        let Some((pos, id, v_snap)) = self.find_lockfree_for_path_a(key, needle, has_avx2_bmi1)
         else {
             let v = unsafe { ManuallyDrop::take(&mut value_holder) };
             return Err(v);
@@ -557,8 +619,40 @@ where
         Ok(())
     }
 
+    /// Path A pre-scan dispatcher: per-arch SIMD fast path when the host
+    /// advertises it, scalar fallback otherwise. See [`Self::find_get`]
+    /// for the dispatch contract and the aarch64 NEON insertion point.
+    #[inline]
+    fn find_lockfree_for_path_a(
+        &self,
+        key: &K,
+        needle: u16,
+        has_avx2_bmi1: bool,
+    ) -> Option<(usize, usize, u32)> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if has_avx2_bmi1 {
+                // SAFETY: see `Shard::find_get` — same provenance for the
+                // `has_avx2_bmi1` flag.
+                return unsafe { self.find_lockfree_for_path_a_avx2(key, needle) };
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Reserved insertion point for `find_lockfree_for_path_a_neon`.
+            // Mirror the x86_64 arm above when the NEON twin lands.
+        }
+        let _ = has_avx2_bmi1;
+        self.find_lockfree_for_path_a_scalar(key, needle)
+    }
+
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
-    unsafe fn find_lockfree_for_path_a(&self, key: &K, needle: u16) -> Option<(usize, usize, u32)> {
+    unsafe fn find_lockfree_for_path_a_avx2(
+        &self,
+        key: &K,
+        needle: u16,
+    ) -> Option<(usize, usize, u32)> {
         use std::arch::x86_64::*;
 
         let entries_base = self.entries_ptr();
@@ -569,8 +663,8 @@ where
         let limit = self.tags.len();
         let mut i = 0usize;
         while i < limit {
-            // SAFETY: identical bound to `find_get`; see that function for
-            // the full reasoning.
+            // SAFETY: identical bound to `find_get_avx2`; see that
+            // function for the full reasoning.
             let v = unsafe { _mm256_loadu_si256(tags_ptr.add(i) as *const __m256i) };
             let masked = _mm256_and_si256(v, mask_v);
             let cmp = _mm256_cmpeq_epi16(masked, needle_v);
@@ -590,6 +684,30 @@ where
                 mask = _blsr_u32(mask);
             }
             i += LANE;
+        }
+        None
+    }
+
+    /// Portable twin of [`Self::find_lockfree_for_path_a_avx2`]. The
+    /// double-load shape (Relaxed pre-filter → Acquire re-load) mirrors
+    /// the AVX2 path's `_mm256_loadu_si256` (unordered, used only for
+    /// candidate filtering) followed by the `Acquire` load at `t1` —
+    /// the second load is what pairs with the writer's `Release` stores
+    /// in `path_bc` for the seqlock contract.
+    fn find_lockfree_for_path_a_scalar(&self, key: &K, needle: u16) -> Option<(usize, usize, u32)> {
+        let entries_base = self.entries_ptr();
+        let limit = self.tags.len();
+        for pos in 0..limit {
+            let t = self.tags[pos].load(Ordering::Relaxed);
+            if (t & Self::SCAN_MASK) != needle {
+                continue;
+            }
+            let t1 = self.tags[pos].load(Ordering::Acquire);
+            if (t1 & Self::SCAN_MASK) == needle
+                && let Some(found) = self.try_path_a_candidate(pos, t1, key, entries_base)
+            {
+                return Some(found);
+            }
         }
         None
     }

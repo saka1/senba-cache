@@ -1027,30 +1027,22 @@ fn main() {
                 ("c9", ValueKind::String) => {
                     run_trial::<String, ConcurrentSieveC9<u64, String>>(&args, trace.clone())
                 }
-                ("moka", ValueKind::U64) => {
-                    run_trial::<u64, moka::sync::Cache<u64, u64, senba::Xxh3Build>>(
-                        &args,
-                        trace.clone(),
-                    )
-                }
-                ("moka", ValueKind::String) => {
-                    run_trial::<String, moka::sync::Cache<u64, String, senba::Xxh3Build>>(
-                        &args,
-                        trace.clone(),
-                    )
-                }
-                ("mini_moka", ValueKind::U64) => {
-                    run_trial::<u64, mini_moka::sync::Cache<u64, u64, senba::Xxh3Build>>(
-                        &args,
-                        trace.clone(),
-                    )
-                }
-                ("mini_moka", ValueKind::String) => {
-                    run_trial::<String, mini_moka::sync::Cache<u64, String, senba::Xxh3Build>>(
-                        &args,
-                        trace.clone(),
-                    )
-                }
+                ("moka", ValueKind::U64) => run_trial::<
+                    u64,
+                    moka::sync::Cache<u64, u64, senba::Xxh3Build>,
+                >(&args, trace.clone()),
+                ("moka", ValueKind::String) => run_trial::<
+                    String,
+                    moka::sync::Cache<u64, String, senba::Xxh3Build>,
+                >(&args, trace.clone()),
+                ("mini_moka", ValueKind::U64) => run_trial::<
+                    u64,
+                    mini_moka::sync::Cache<u64, u64, senba::Xxh3Build>,
+                >(&args, trace.clone()),
+                ("mini_moka", ValueKind::String) => run_trial::<
+                    String,
+                    mini_moka::sync::Cache<u64, String, senba::Xxh3Build>,
+                >(&args, trace.clone()),
                 ("c14s", v) => run_c14s(&args, v, trace.clone()),
                 ("c16s", v) => run_c16s(&args, v, trace.clone()),
                 ("c17s", v) => run_c17s(&args, v, trace.clone()),

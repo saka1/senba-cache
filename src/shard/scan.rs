@@ -19,7 +19,9 @@
 use std::borrow::Borrow;
 use std::num::NonZeroU16;
 
-use super::{Entry, LANE, Shard};
+use super::Shard;
+#[cfg(target_arch = "x86_64")]
+use super::{Entry, LANE};
 use crate::SlotSize;
 
 /// `find` returns `Option<(usize, NonZeroU16)>`. Wrapping the tag in

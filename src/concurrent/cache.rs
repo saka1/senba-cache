@@ -62,8 +62,11 @@ fn auto_shard(capacity: usize) -> usize {
 /// only when the lock-free Path A misses.
 ///
 /// **Experimental.** Available behind the `concurrent` Cargo feature. The
-/// implementation is `x86_64 + AVX2` only and is not exposed on other
-/// targets (the entire module compiles out).
+/// reader's tag scan uses AVX2+BMI1 when the host CPU advertises them and
+/// a portable scalar fallback otherwise; non-x86_64 targets always take
+/// the scalar path. Setting `SENBA_FORCE_SCALAR=1` in the environment
+/// forces the scalar path even on AVX2-capable x86_64 — used by CI to
+/// exercise the fallback on AVX2 runners without a separate codegen build.
 ///
 /// ```ignore
 /// use senba::concurrent::Cache;
@@ -77,6 +80,18 @@ pub struct Cache<K, V, H: BuildHasher = Xxh3Build> {
     /// `shards.len() - 1`, cached so `shard_of_hash` is a single AND.
     shard_mask: usize,
     hasher: H,
+    /// SIMD reader-path availability, resolved once in
+    /// `with_shards_and_hasher` so the dispatch in each shard call is a
+    /// single boolean load instead of a re-entry into
+    /// `is_x86_feature_detected!` on every op. On x86_64 this is set
+    /// from `is_x86_feature_detected!("avx2")` — BMI1 is implied by AVX2
+    /// on every x86_64 CPU shipped to date, so detecting AVX2 suffices.
+    /// On other architectures it is always `false` (the dispatchers in
+    /// `shard.rs` reserve explicit `#[cfg(target_arch = "aarch64")]`
+    /// arms for a future NEON twin, but no SIMD twin is wired up there
+    /// yet). `SENBA_FORCE_SCALAR=1` in the environment forces this to
+    /// `false` regardless of arch (CI hook for scalar coverage).
+    has_avx2_bmi1: bool,
 }
 
 impl<K, V> Cache<K, V, Xxh3Build>
@@ -129,10 +144,31 @@ where
             let cap_i = base + if i < extra { 1 } else { 0 };
             built.push(Shard::new(cap_i));
         }
+        let has_avx2_bmi1 = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2")
+                    && std::env::var_os("SENBA_FORCE_SCALAR").is_none()
+            }
+            // Reserved aarch64 arm: NEON is mandatory on aarch64, so once
+            // the NEON twins (`find_get_neon` / `find_lockfree_for_path_a_neon`)
+            // land in `shard.rs`, the body here becomes
+            // `std::env::var_os("SENBA_FORCE_SCALAR").is_none()`. The
+            // dispatchers already carry the symmetric insertion point.
+            #[cfg(target_arch = "aarch64")]
+            {
+                false
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                false
+            }
+        };
         Self {
             shards: built.into_boxed_slice(),
             shard_mask: shards - 1,
             hasher,
+            has_avx2_bmi1,
         }
     }
 
@@ -172,7 +208,7 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let h = self.hasher.hash_one(key);
-        self.shards[self.shard_of_hash(h)].contains::<Q>(key, h)
+        self.shards[self.shard_of_hash(h)].contains::<Q>(key, h, self.has_avx2_bmi1)
     }
 
     /// Returns a copy of the value for `key`, or `None` if absent. Sets
@@ -192,7 +228,7 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let h = self.hasher.hash_one(key);
-        self.shards[self.shard_of_hash(h)].get_by_hash::<Q>(key, h)
+        self.shards[self.shard_of_hash(h)].get_by_hash::<Q>(key, h, self.has_avx2_bmi1)
     }
 
     /// Inserts `key → value`. If the shard was full and SIEVE chose a
@@ -218,7 +254,7 @@ where
     {
         let h = self.hasher.hash_one(&key);
         let i = self.shard_of_hash(h);
-        self.shards[i].insert(key, value, h, on_evict);
+        self.shards[i].insert(key, value, h, self.has_avx2_bmi1, on_evict);
     }
 
     /// Removes the entry for `key` if present and returns its value.
@@ -746,7 +782,10 @@ mod tests {
         cache.insert(4, 40);
         let mut alive: Vec<i32> = (0..5).filter(|k| cache.contains_key(k)).collect();
         alive.sort();
-        assert!(alive.contains(&4), "shard is locked up after callback panic");
+        assert!(
+            alive.contains(&4),
+            "shard is locked up after callback panic"
+        );
         assert!(cache.len() <= 2);
     }
 
