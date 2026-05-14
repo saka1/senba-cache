@@ -33,6 +33,12 @@
 //! `--value string` 不可、parse 時に弾く。
 //!
 //! ## moka / mini-moka adapter の方針
+//! 構築は `Cache::builder().max_capacity(cap).initial_capacity(cap)
+//! .build_with_hasher(senba::Xxh3Build)`。 既定の `Cache::new` は
+//! `RandomState` (SipHash) + 遅延 grow になり、他 variant (Xxh3Build / 容量固定)
+//! と比べて hash cost と rehash で不利。フェアな比較のため、両 W-TinyLFU 系も
+//! senba と同じ hasher / 同じ initial capacity で構築する。
+//!
 //! `bench.rs` の adapter は HR を oracle として測るため毎 op 後に `sync()` /
 //! `run_pending_tasks()` を呼んでいるが、**この concurrent harness では呼ばない**。
 //! 理由:
@@ -346,15 +352,22 @@ where
     }
 }
 
-impl<V> ConcCache<V> for moka::sync::Cache<u64, V>
+// moka / mini-moka adapter は senba::Xxh3Build を hasher として渡し、
+// `initial_capacity(cap)` で internal cht を事前確保する。
+// 既定の `Cache::new(cap)` は `RandomState` (SipHash) + 遅延 grow で、
+// 同じ harness で他 variant (Xxh3Build + cap 固定容量) と比較すると hash cost と
+// rehash で 2〜3 倍量の余分な仕事をしていた (見直し前のレポート参照)。
+impl<V> ConcCache<V> for moka::sync::Cache<u64, V, senba::Xxh3Build>
 where
     V: Clone + Send + Sync + 'static,
 {
     fn build(capacity: usize, _shards: usize) -> Arc<Self> {
-        // moka の Cache 自体が内部で Arc を持っているため Arc<Cache> は二重 Arc
-        // になるが、harness を generic に保つために統一する。clone はどちらにせよ
-        // cheap (bench loop の hot path には居ない)。
-        Arc::new(moka::sync::Cache::new(capacity as u64))
+        Arc::new(
+            moka::sync::Cache::builder()
+                .max_capacity(capacity as u64)
+                .initial_capacity(capacity)
+                .build_with_hasher(senba::Xxh3Build),
+        )
     }
     #[inline]
     fn get_hit(&self, key: &u64) -> bool {
@@ -366,12 +379,17 @@ where
     }
 }
 
-impl<V> ConcCache<V> for mini_moka::sync::Cache<u64, V>
+impl<V> ConcCache<V> for mini_moka::sync::Cache<u64, V, senba::Xxh3Build>
 where
     V: Clone + Send + Sync + 'static,
 {
     fn build(capacity: usize, _shards: usize) -> Arc<Self> {
-        Arc::new(mini_moka::sync::Cache::new(capacity as u64))
+        Arc::new(
+            mini_moka::sync::Cache::builder()
+                .max_capacity(capacity as u64)
+                .initial_capacity(capacity)
+                .build_with_hasher(senba::Xxh3Build),
+        )
     }
     #[inline]
     fn get_hit(&self, key: &u64) -> bool {
@@ -1010,16 +1028,28 @@ fn main() {
                     run_trial::<String, ConcurrentSieveC9<u64, String>>(&args, trace.clone())
                 }
                 ("moka", ValueKind::U64) => {
-                    run_trial::<u64, moka::sync::Cache<u64, u64>>(&args, trace.clone())
+                    run_trial::<u64, moka::sync::Cache<u64, u64, senba::Xxh3Build>>(
+                        &args,
+                        trace.clone(),
+                    )
                 }
                 ("moka", ValueKind::String) => {
-                    run_trial::<String, moka::sync::Cache<u64, String>>(&args, trace.clone())
+                    run_trial::<String, moka::sync::Cache<u64, String, senba::Xxh3Build>>(
+                        &args,
+                        trace.clone(),
+                    )
                 }
                 ("mini_moka", ValueKind::U64) => {
-                    run_trial::<u64, mini_moka::sync::Cache<u64, u64>>(&args, trace.clone())
+                    run_trial::<u64, mini_moka::sync::Cache<u64, u64, senba::Xxh3Build>>(
+                        &args,
+                        trace.clone(),
+                    )
                 }
                 ("mini_moka", ValueKind::String) => {
-                    run_trial::<String, mini_moka::sync::Cache<u64, String>>(&args, trace.clone())
+                    run_trial::<String, mini_moka::sync::Cache<u64, String, senba::Xxh3Build>>(
+                        &args,
+                        trace.clone(),
+                    )
                 }
                 ("c14s", v) => run_c14s(&args, v, trace.clone()),
                 ("c16s", v) => run_c16s(&args, v, trace.clone()),
