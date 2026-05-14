@@ -81,18 +81,16 @@ jobs:
     # so the test suite naturally exercises the scalar twins for both
     # `find_get` and `find_lockfree_for_path_a`.
     #
-    # Target selection is explicit, not `--workspace --all-targets`:
-    # `bench_concurrent` and `bench_vtune_concurrent` research drivers
-    # import x86_64+non-miri-only experimental variants (sieve_c17s /
-    # c18s / r1 / r2h / r3) via `use` and can't compile on aarch64.
-    # `--workspace --tests` / `--benches` pulls these bins into test
-    # mode even though they carry no `#[cfg(test)]` blocks (Cargo
-    # `test = false` is not honoured by clippy `--tests`), so listing
-    # the arch-portable targets one by one is the only working shape.
-    #
-    # senba (publishable surface) gets the full `--all-targets` treatment.
-    # senba-research gets lib + 3 integration tests + 3 benches —
-    # everything except the two problem bins.
+    # Scope: `senba` (publishable surface) only — `senba-research` is
+    # intentionally excluded. Several experimental variants
+    # (`sieve_c17s`, `sieve_c18s`, `sieve_r1`, `sieve_r2h`, `sieve_r3`,
+    # `sieve_r4`) carry crate-level `#![cfg(target_arch = "x86_64")]`,
+    # and the `bench_concurrent` / `bench_vtune_concurrent` drivers
+    # `use` them. There's no clean way to ask cargo to compile the rest
+    # of the package while skipping those bins in test mode
+    # (`test = false` is not honoured by `clippy --tests`, and `--lib`
+    # still drags the bins in). ARM bench numbers are out of scope at
+    # this stage; if that changes, revisit.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -104,14 +102,7 @@ jobs:
         with:
           key: aarch64-native
       - run: cargo clippy -p senba --all-targets
-      - run: |
-          cargo clippy -p senba-research --lib \
-            --test oracle --test oracle_cache_match --test oracle_concurrent_cache_match \
-            --bench micro --bench sieve_cache_perf --bench sieve_concurrent_perf
       - run: cargo test -p senba --all-targets
-      - run: |
-          cargo test -p senba-research --lib \
-            --test oracle --test oracle_cache_match --test oracle_concurrent_cache_match
 
   doc:
     name: Doc
