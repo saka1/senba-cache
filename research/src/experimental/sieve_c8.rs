@@ -356,7 +356,11 @@ where
         None
     }
 
-    /// 1 候補に対する seqlock dance。スカラー / AVX2 path 共通。
+    /// 1 候補に対する seqlock dance。`find_get_avx2` 専用のヘルパ。
+    /// `find_get_scalar` は同じダンスを直接インライン展開しているため、
+    /// このヘルパは AVX2 path が cfg-out される非 x86_64 ターゲットでは
+    /// dead-code 化する。x86_64+non-miri 以外では消える。
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     #[inline]
     fn try_candidate(&self, pos: usize, key: &K, needle: u16) -> Option<V> {
         let t1 = self.tags[pos].load(Ordering::Acquire);

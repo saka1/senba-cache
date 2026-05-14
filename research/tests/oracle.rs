@@ -437,6 +437,10 @@ fn c16s_1shard_matches_orig_on_synthetic_zipf() {
 /// `sieve_orig` と eviction stream / cache contents が一致する。
 ///
 /// 設計詳細は `docs/reports/2026-05-11-c17s-design.md` 参照。
+///
+/// `sieve_c17s` は `#![cfg(all(target_arch = "x86_64", not(miri)))]` で
+/// gate された AVX2/BMI1 専用実装なので、テストも同 cfg で gate する。
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[test]
 fn c17s_1shard_matches_orig_on_synthetic_zipf() {
     use senba_research::experimental::sieve_c17s::ConcurrentSieveCache as C17s;
@@ -478,6 +482,9 @@ fn c17s_1shard_matches_orig_on_synthetic_zipf() {
 /// 同じ等価性を持つことが証明されている (V=String は stress test 側で実機検証)。
 ///
 /// 設計詳細は `docs/reports/2026-05-14-arc-less-concurrent-design.md` 参照。
+///
+/// `sieve_r4` は x86_64+non-miri 専用なので、テストも同 cfg で gate する。
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[test]
 fn r4_1shard_matches_orig_on_synthetic_zipf() {
     use senba_research::experimental::sieve_r4::ConcurrentSieveCache as R4;
@@ -518,6 +525,9 @@ fn r4_1shard_matches_orig_on_synthetic_zipf() {
 /// eviction stream / cache contents が一致する。
 ///
 /// 設計詳細は `docs/reports/2026-05-12-c18s-design.md` 参照。
+///
+/// `sieve_c18s` は x86_64+non-miri 専用なので、テストも同 cfg で gate する。
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[test]
 fn c18s_1shard_matches_orig_on_synthetic_zipf() {
     use senba_research::experimental::sieve_c18s::ConcurrentSieveCache as C18s;
@@ -559,6 +569,9 @@ fn c18s_1shard_matches_orig_on_synthetic_zipf() {
 /// bit-for-bit 等価になり、`sieve_orig` と eviction stream / cache contents が完全一致する。
 /// `ways>=2` では同一 key を別 thread が触ると別 shard に行く構造のため oracle は
 /// `ways=1` 限定 (設計 `docs/reports/2026-05-12-r1-design.md` §4.7)。
+///
+/// `sieve_r1` は x86_64+non-miri 専用なので、テストも同 cfg で gate する。
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[test]
 fn r1_ways1_matches_orig_on_synthetic_zipf() {
     use senba_research::experimental::sieve_r1::ConcurrentSieveR1 as R1;

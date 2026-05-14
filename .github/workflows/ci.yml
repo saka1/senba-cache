@@ -78,10 +78,21 @@ jobs:
     # weak-memory-ordering bugs in the scalar Path A double-load,
     # arch-specific alignment, atomic codegen differences. On aarch64
     # `has_avx2_bmi1` is forced `false` in `Cache::with_shards_and_hasher`,
-    # so the workspace test suite naturally exercises the scalar twins
-    # for both `find_get` and `find_lockfree_for_path_a`. Subsumes the
-    # earlier cross-compile job: `cargo test` runs `cargo build` runs
-    # `cargo check`, plus actually validates runtime behaviour.
+    # so the test suite naturally exercises the scalar twins for both
+    # `find_get` and `find_lockfree_for_path_a`.
+    #
+    # Target selection is explicit, not `--workspace --all-targets`:
+    # `bench_concurrent` and `bench_vtune_concurrent` research drivers
+    # import x86_64+non-miri-only experimental variants (sieve_c17s /
+    # c18s / r1 / r2h / r3) via `use` and can't compile on aarch64.
+    # `--workspace --tests` / `--benches` pulls these bins into test
+    # mode even though they carry no `#[cfg(test)]` blocks (Cargo
+    # `test = false` is not honoured by clippy `--tests`), so listing
+    # the arch-portable targets one by one is the only working shape.
+    #
+    # senba (publishable surface) gets the full `--all-targets` treatment.
+    # senba-research gets lib + 3 integration tests + 3 benches —
+    # everything except the two problem bins.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -92,8 +103,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: aarch64-native
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo clippy -p senba --all-targets
+      - run: |
+          cargo clippy -p senba-research --lib \
+            --test oracle --test oracle_cache_match --test oracle_concurrent_cache_match \
+            --bench micro --bench sieve_cache_perf --bench sieve_concurrent_perf
+      - run: cargo test -p senba --all-targets
+      - run: |
+          cargo test -p senba-research --lib \
+            --test oracle --test oracle_cache_match --test oracle_concurrent_cache_match
 
   doc:
     name: Doc
