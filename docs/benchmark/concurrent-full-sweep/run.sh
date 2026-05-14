@@ -19,7 +19,7 @@ DATA="$HERE/data"
 mkdir -p "$DATA"
 
 cargo build --release -p senba-research --bin bench_concurrent \
-    --features "senba/concurrent" >&2
+    --features "senba/concurrent,external-traces" >&2
 
 # --- knobs ------------------------------------------------------------------
 PHASE_ARG="all"
@@ -192,6 +192,31 @@ phase_twitter() {
 }
 
 # Phase D: ARC paper presets (mokabench) -----------------------------------
+# `next_pow2 N` echoes the smallest power-of-two ≥ N (clamped to ≥ 4).
+next_pow2() {
+  local n="$1"
+  local p=4
+  while [ "$p" -lt "$n" ]; do p=$(( p * 2 )); done
+  echo "$p"
+}
+# Per-preset shards: must satisfy MAX_PER_SHARD = 64, target next_pow2(cap/8)
+# (auto-shard sweet spot from `2026-05-13-c17s-shard-heuristic.md`),
+# floored by next_pow2(cap/64) (the 6-bit ID limit). dispatch macros in
+# bench_concurrent cover {4, 8, ..., 131072} so cap up to 8M works.
+arc_shards_for_cap() {
+  local cap="$1"
+  local target=$(( cap / 8 ))
+  [ "$target" -lt 1 ] && target=1
+  local floor=$(( (cap + 63) / 64 ))
+  local picked
+  picked=$(next_pow2 "$target")
+  local floor_p
+  floor_p=$(next_pow2 "$floor")
+  [ "$picked" -lt "$floor_p" ] && picked="$floor_p"
+  [ "$picked" -gt 131072 ] && picked=131072
+  echo "$picked"
+}
+
 phase_arc() {
   echo "[$(date +%H:%M:%S)] phase: arc" >&2
   local presets=(
@@ -204,9 +229,10 @@ phase_arc() {
   for entry in "${presets[@]}"; do
     local name="${entry%%:*}"
     local cap="${entry##*:}"
-    local ops warmup
+    local ops warmup shards_arc
     ops=$(scale_ops "$cap")
     warmup=$(scale_warmup "$cap")
+    shards_arc=$(arc_shards_for_cap "$cap")
     for value in $VALUE_LIST; do
       for variant in $VARIANTS; do
         for threads in $T_LIST; do
@@ -214,9 +240,9 @@ phase_arc() {
           local warmup_t=$(( warmup / threads * threads ))
           [ "$warmup_t" -lt "$threads" ] && warmup_t="$threads"
           for op_mix in $MIX_LIST; do
-            run_cell "arc/$name $variant T=$threads mix=$op_mix V=$value cap=$cap" \
+            run_cell "arc/$name $variant T=$threads mix=$op_mix V=$value cap=$cap shards=$shards_arc" \
               --variant "$variant" \
-              --shards "$SHARDS" --cap "$cap" --ops "$ops_t" --warmup "$warmup_t" \
+              --shards "$shards_arc" --cap "$cap" --ops "$ops_t" --warmup "$warmup_t" \
               --trials "$TRIALS" --seed 42 \
               --threads "$threads" --skew 1.0 --keys "$ZIPF_KEYS" \
               --op-mix "$op_mix" --value "$value" --ways 1 --partitions 1 \
