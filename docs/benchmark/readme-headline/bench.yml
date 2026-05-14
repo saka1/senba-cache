@@ -1,0 +1,57 @@
+# README headline benchmark.
+#
+# Provisions a c8i.2xlarge on AWS (Granite Rapids; 8 vCPU = 4 physical cores
+# with SMT), builds bench_concurrent, and sweeps threads ∈ {1,2,4} at α=1.0,
+# cap=4096, keys=100k, read-heavy mix, comparing senba_concurrent vs moka vs
+# mini_moka. Region / spot / cluster name are handled by run.sh; this file
+# pins everything that affects the headline numbers.
+
+resources:
+  infra: aws
+  instance_type: c8i.2xlarge
+  disk_size: 32
+
+workdir: ../../..
+
+setup: |
+  set -euxo pipefail
+  sudo apt-get update -y
+  sudo apt-get install -y --no-install-recommends \
+    build-essential pkg-config curl util-linux ca-certificates
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal
+  fi
+  source "$HOME/.cargo/env"
+  cargo build --release -p senba-research --bin bench_concurrent \
+    --features "senba/concurrent"
+
+run: |
+  set -euxo pipefail
+  source "$HOME/.cargo/env"
+
+  bin="./target/release/bench_concurrent"
+  out="$HOME/results.csv"
+
+  # Log CPU topology so the taskset mask assumption ("cpus 0-3 are physical
+  # cores, 4-7 are HT siblings") can be verified after the run.
+  lscpu -e > "$HOME/cpu-topology.txt"
+  cat "$HOME/cpu-topology.txt"
+
+  echo "variant,trial,ways,partitions,source,workload_param,op_mix,value,skew,keys,threads,cap,shards,ops,total_elapsed_ns,aggregate_mops,hit_ratio,p50_chunk_ns,p99_chunk_ns,thread_throughput_cv" > "$out"
+
+  # c8i.2xlarge: expected layout is cpus 0-3 = physical cores, 4-7 = HT
+  # siblings. Pin each T sweep to the first T cpus and cross-check against
+  # cpu-topology.txt.
+  for t in 1 2 4; do
+    mask=$(seq -s, 0 $((t-1)))
+    taskset -c "$mask" "$bin" \
+      --source zipf --skew 1.0 --cap 4096 --keys 100000 \
+      --op-mix read-heavy --value u64 \
+      --threads "$t" --shards 512 \
+      --variants senba_concurrent,moka,mini_moka \
+      --trials 3 --ops 2000000 --warmup 200000 \
+      | tail -n +2 >> "$out"
+  done
+
+  wc -l "$out"

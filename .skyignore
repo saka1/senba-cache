@@ -1,0 +1,20 @@
+# SkyPilot uses .skyignore XOR .gitignore (storage_utils.py:194-205) — once
+# this file exists, .gitignore is ignored. So everything that should not
+# reach the remote workdir must be listed here, including patterns that
+# .gitignore also has.
+
+# Build artifacts.
+/target
+
+# Local AWS CLI installer (also in .gitignore).
+/aws
+/awscliv2.zip
+
+# Submodules, local clones, per-developer Python venvs. Kept locally but
+# the remote build (cargo build -p senba-research --bin bench_concurrent
+# --features senba/concurrent) only needs Cargo.{toml,lock} + src/ +
+# research/.
+/.git
+/docs
+/external
+/scripts
