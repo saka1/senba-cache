@@ -48,6 +48,29 @@ jobs:
       # Run them locally with `cargo test -p senba-research --features external-traces`.
       - run: cargo test --workspace
 
+  test-scalar:
+    name: Test (scalar fallback, SENBA_FORCE_SCALAR=1)
+    runs-on: ubuntu-latest
+    env:
+      # Forces `senba::concurrent::Cache` to take the portable scalar tag
+      # scan even on AVX2-capable runners. `-C target-feature=-avx2` alone
+      # would NOT suffice — `is_x86_feature_detected!` queries the CPU at
+      # runtime, and the AVX2 functions carry `#[target_feature]` so their
+      # codegen is unaffected by the global flag. This env var is the
+      # single point of override in `Cache::with_shards_and_hasher`.
+      SENBA_FORCE_SCALAR: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: scalar
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+
   doc:
     name: Doc
     runs-on: ubuntu-slim

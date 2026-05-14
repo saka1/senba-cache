@@ -85,9 +85,7 @@ where
 fn bench_zipf1_u64_t4(c: &mut Criterion) {
     let mut g = perf_group(c, "sieve_concurrent_perf/zipf1_u64_t4");
     let trace = zipf_trace(1.0);
-    g.throughput(Throughput::Elements(
-        (TRACE_LEN_PER_THREAD * 4) as u64,
-    ));
+    g.throughput(Throughput::Elements((TRACE_LEN_PER_THREAD * 4) as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP), &trace, |b, trace| {
         b.iter_batched(
             || Arc::new(Cache::<u64, u64>::with_shards(CAP, SHARDS)),
@@ -102,9 +100,7 @@ fn bench_zipf1_u64_t4(c: &mut Criterion) {
 fn bench_zipf14_u64_t16(c: &mut Criterion) {
     let mut g = perf_group(c, "sieve_concurrent_perf/zipf14_u64_t16");
     let trace = zipf_trace(1.4);
-    g.throughput(Throughput::Elements(
-        (TRACE_LEN_PER_THREAD * 16) as u64,
-    ));
+    g.throughput(Throughput::Elements((TRACE_LEN_PER_THREAD * 16) as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP), &trace, |b, trace| {
         b.iter_batched(
             || Arc::new(Cache::<u64, u64>::with_shards(CAP, SHARDS)),
@@ -119,9 +115,7 @@ fn bench_zipf14_u64_t16(c: &mut Criterion) {
 fn bench_zipf1_string_t4(c: &mut Criterion) {
     let mut g = perf_group(c, "sieve_concurrent_perf/zipf1_string_t4");
     let trace = zipf_trace(1.0);
-    g.throughput(Throughput::Elements(
-        (TRACE_LEN_PER_THREAD * 4) as u64,
-    ));
+    g.throughput(Throughput::Elements((TRACE_LEN_PER_THREAD * 4) as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP), &trace, |b, trace| {
         b.iter_batched(
             || Arc::new(Cache::<u64, String>::with_shards(CAP, SHARDS)),
@@ -137,9 +131,7 @@ fn bench_zipf1_string_t4(c: &mut Criterion) {
 fn bench_zipf14_string_t16(c: &mut Criterion) {
     let mut g = perf_group(c, "sieve_concurrent_perf/zipf14_string_t16");
     let trace = zipf_trace(1.4);
-    g.throughput(Throughput::Elements(
-        (TRACE_LEN_PER_THREAD * 16) as u64,
-    ));
+    g.throughput(Throughput::Elements((TRACE_LEN_PER_THREAD * 16) as u64));
     g.bench_with_input(BenchmarkId::from_parameter(CAP), &trace, |b, trace| {
         b.iter_batched(
             || Arc::new(Cache::<u64, String>::with_shards(CAP, SHARDS)),

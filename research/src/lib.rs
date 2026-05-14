@@ -52,7 +52,7 @@ where
 /// compatibility with research variants that hand the evicted pair back;
 /// `senba::concurrent::Cache::insert` returns `()` and we always return
 /// `None` here.
-#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[cfg(not(miri))]
 impl<K, V> experimental::ConcurrentCacheImpl<K, V> for senba::concurrent::Cache<K, V>
 where
     K: std::hash::Hash + Eq + Copy + Send + Sync + 'static,
