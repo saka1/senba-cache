@@ -274,6 +274,20 @@ where
         self.shards[i].insert(key, value, h, self.has_avx2_bmi1, on_evict);
     }
 
+    /// Drops every entry and resets the cache to empty. Capacity, shard
+    /// count, hasher, and the AVX2 dispatch flag are preserved.
+    ///
+    /// Acquires each shard's writer mutex in turn. Concurrent readers
+    /// that are mid-`get` either complete their cloned return (the
+    /// moved-out K / V are kept alive past the reader's pin) or retry and
+    /// observe an empty ring. `clear` is not counted in
+    /// [`Self::stats`] evictions — it is an explicit bulk drop.
+    pub fn clear(&self) {
+        for s in self.shards.iter() {
+            s.clear();
+        }
+    }
+
     /// Removes the entry for `key` if present and returns its value.
     /// Cold path — takes the per-shard writer mutex.
     #[inline]
@@ -368,6 +382,72 @@ mod tests {
         assert_eq!(cache.peek("alpha"), Some(1));
         assert_eq!(cache.peek("beta"), Some(2));
         assert_eq!(cache.peek("missing"), None);
+    }
+
+    #[test]
+    fn clear_empties_cache() {
+        let cache: Cache<i32, i32> = Cache::with_shards(8, 2);
+        for i in 0..6 {
+            cache.insert(i, i * 10);
+        }
+        assert_eq!(cache.len(), 6);
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+        for i in 0..6 {
+            assert_eq!(cache.get(&i), None, "key {i} still resolves after clear");
+        }
+    }
+
+    #[test]
+    fn insert_after_clear_works() {
+        let cache: Cache<i32, i32> = Cache::with_shards(4, 1);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.clear();
+        cache.insert(3, 30);
+        cache.insert(4, 40);
+        assert_eq!(cache.get(&3), Some(30));
+        assert_eq!(cache.get(&4), Some(40));
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn clear_runs_destructors() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter {
+            counter: Arc<AtomicUsize>,
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cache: Cache<i32, DropCounter> = Cache::with_shards(4, 1);
+        for k in 0..3 {
+            cache.insert(
+                k,
+                DropCounter {
+                    counter: Arc::clone(&drops),
+                },
+            );
+        }
+        cache.clear();
+        // Force the epoch GC to flush any deferred drops.
+        for _ in 0..32 {
+            crossbeam_epoch::pin().flush();
+        }
+        drop(cache);
+        assert!(
+            drops.load(Ordering::Relaxed) >= 1,
+            "clear() never ran any destructor"
+        );
     }
 
     #[test]

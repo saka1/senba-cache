@@ -1175,6 +1175,40 @@ where
         Some(removed_value_for_caller)
     }
 
+    /// Drop every live entry and reset the shard to an empty state.
+    /// Acquires the writer mutex for the duration; concurrent readers
+    /// either complete their seqlock-validated clone before the take
+    /// (the moved-out K / V are kept alive past the reader's pin via
+    /// `defer_drop_kv_if_needed`) or retry past the `path_c_epoch` bump
+    /// and find every lane EMPTY.
+    pub(crate) fn clear(&self) {
+        let mut state = self.hot.writer.lock();
+        let len = self.hot.len.load(Ordering::Acquire);
+        for i in 0..len {
+            let t = self.tags[i].load(Ordering::Relaxed);
+            // I8 (live ids = tags[..len]) guarantees LIVE; assert in debug.
+            debug_assert!(t & LIVE != 0, "clear: tag at pos {i} is not LIVE");
+            let id = Self::id_of(t);
+            let entry_ptr = unsafe { self.entries_mut_ptr().add(id) as *mut Entry<K, V> };
+            // SAFETY: writer mutex excludes Path A / B / C / remove; the
+            // moved-out K and V flow into a deferred drop closure that the
+            // reader's pin keeps suspended, so any in-flight bit-copy
+            // local still references valid memory.
+            let k: K = unsafe { ManuallyDrop::take(&mut (*entry_ptr).key) };
+            let v: V = unsafe { ManuallyDrop::take(&mut (*entry_ptr).value) };
+            defer_drop_kv_if_needed::<K, V>(k, v);
+            self.tags[i].store(EMPTY, Ordering::Release);
+        }
+        self.hot.visited.store(0, Ordering::Relaxed);
+        self.hot.len.store(0, Ordering::Release);
+        // Bump so any racing reader scan retries and finds the EMPTY ring.
+        self.hot.path_c_epoch.fetch_add(1, Ordering::Release);
+
+        state.hand = 0;
+        state.free_ids.clear();
+        state.next_fresh_id = 0;
+    }
+
     #[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
         let len = self.hot.len.load(Ordering::Acquire);
