@@ -44,7 +44,7 @@ run: |
   # c8i.2xlarge: expected layout is cpus 0-3 = physical cores, 4-7 = HT
   # siblings. Pin each T sweep to the first T cpus and cross-check against
   # cpu-topology.txt.
-  for t in 1 2 4; do
+  for t in 1 2 3 4; do
     mask=$(seq -s, 0 $((t-1)))
     taskset -c "$mask" "$bin" \
       --source zipf --skew 1.0 --cap 4096 --keys 100000 \
