@@ -79,25 +79,31 @@ fn perf_group<'a>(
     name: &str,
 ) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
     let mut g = c.benchmark_group(name);
-    // Tuned for low-variance regression checking, not exploration. The numbers
-    // below were picked so that running the bench twice back-to-back with no
-    // code change reports "within noise threshold" on all three scenarios on a
-    // typical WSL2 / x86_64 dev machine. Total runtime ≈ 35–40s with eight
-    // scenarios.
+    // Tuned for low-variance regression checking, not exploration. Total
+    // runtime ≈ 90–100s with eight scenarios on a typical WSL2 / x86_64 dev
+    // machine. Earlier 60/4s/1s config showed ±6–8pp run-to-run swing on
+    // hot single-shard cells (insert_u64 cap=384, insert_u64_string cap=256)
+    // which prevented stable detection of true ~5% changes; the 200/8s/2s
+    // numbers below narrow CI ~1.8× and average out one more cycle of cache
+    // layout / freq scaling per sample.
     //
-    // - `sample_size(60)`: 2× the criterion default at this measurement_time,
-    //   roughly halving the CI width on the median (sqrt(N) scaling).
-    // - `measurement_time(4s)`: each sample averages more iterations, smoothing
-    //   per-sample jitter from CPU freq scaling / other processes.
-    // - `warm_up_time(1s)`: gives the JIT-free Rust binary time to settle into
-    //   a steady I/D-cache + branch-predictor state before timing starts.
-    // - `noise_threshold(0.02)`: changes within ±2% are formally classified as
-    //   noise. Criterion still prints the delta but won't say "regressed" /
-    //   "improved" until the median moves past this floor. The CLAUDE.md gate
-    //   (>5% on any scenario = investigate) sits comfortably above it.
-    g.sample_size(60)
-        .warm_up_time(Duration::from_secs(1))
-        .measurement_time(Duration::from_secs(4))
+    // - `sample_size(200)`: ~6× the criterion default. CI width ≈ 1/√N so
+    //   the median estimator narrows by ~√(200/60) ≈ 1.8× vs the old
+    //   config.
+    // - `measurement_time(8s)`: each sample averages more iterations,
+    //   smoothing per-sample jitter from CPU freq scaling / other
+    //   processes. With sample_size=200 this gives 40ms per sample, well
+    //   above the ~30× timer-overhead floor for our few-ms-per-iter loops.
+    // - `warm_up_time(2s)`: gives the JIT-free Rust binary time to settle
+    //   into a steady I/D-cache + branch-predictor state before timing
+    //   starts.
+    // - `noise_threshold(0.02)`: changes within ±2% are formally classified
+    //   as noise. Criterion still prints the delta but won't say "regressed"
+    //   / "improved" until the median moves past this floor. The CLAUDE.md
+    //   gate (>5% on any scenario = investigate) sits comfortably above it.
+    g.sample_size(200)
+        .warm_up_time(Duration::from_secs(2))
+        .measurement_time(Duration::from_secs(8))
         .noise_threshold(0.02);
     g
 }

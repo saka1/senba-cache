@@ -91,15 +91,27 @@ impl std::ops::DerefMut for AlignedTags {
 /// Shift the visited bitmap to mirror `tags.copy_within(pos+1..len, pos)`:
 /// bits at positions `[pos+1, 64)` move down by one to `[pos, 63)`, the
 /// original bit at `pos` is dropped, and the new bit at position `63` is 0
-/// (the source position 64 carried no bit). The `u128` intermediate sidesteps
-/// the `pos == 63` corner where `visited >> 64` would be UB on `u64`.
+/// (the source position 64 carried no bit).
+///
+/// Pure u64 form. `pos ∈ [0, 63]` ⟹ `1 << pos` is well-defined, and `>> 1`
+/// is safe so the previous `u128` reg-pair (`shld/shrd`) is gone. Avoiding
+/// u128 here removes 9 `shld/shrd` instructions across the 4 `Shard::insert`
+/// monomorphizations in the perf-gate bench (see
+/// `2026-05-16-find-evict-pos-cut-a-results.md` §1.3 asm survey).
+///
+/// Corner cases (verified by oracle + tests/eviction):
+/// - `pos == 0`: `pos_mask = 0`, `low = 0`, `high = visited >> 1`. Bit 0
+///   dropped, all higher bits shift down by one. ✓
+/// - `pos == 63`: `pos_mask = (1<<63) - 1`, `low = visited & [0,63)`,
+///   `high = (visited >> 1) & bit63 = 0` (`>> 1` clears the top bit anyway).
+///   Result `low` = `visited` with bit 63 cleared. ✓
 #[inline]
 fn shift_visited_down_in_place(visited: &mut u64, pos: usize) {
     debug_assert!(pos < 64);
-    let v = *visited as u128;
-    let low = v & ((1u128 << pos) - 1);
-    let high = (v >> (pos + 1)) << pos;
-    *visited = (low | high) as u64;
+    let pos_mask = (1u64 << pos).wrapping_sub(1); // bits [0, pos)
+    let low = *visited & pos_mask;
+    let high = (*visited >> 1) & !pos_mask;
+    *visited = low | high;
 }
 
 /// Per-shard SIEVE state. Equivalent to j8's `Inner<K, V>` parameterized by `S`.
