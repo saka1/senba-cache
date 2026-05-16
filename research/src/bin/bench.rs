@@ -244,6 +244,15 @@ struct Args {
     /// 単一 process 内では reseed_for_test() は最初の next_rand() 呼び出し前に
     /// 効くため、main 先頭で呼んでおく。default 0 (= 既存 SEED_CTR 経路)。
     rng_seed: u64,
+    /// Op-mix mode. `Gim` (default) preserves legacy bench.rs semantics
+    /// (get-if-miss-insert). `ReadHeavy` mirrors bench_concurrent's 95/5
+    /// read/write mix; only supported with `--source zipf`.
+    op_mix: OpMix,
+    /// Warmup ops run before the timed measurement window, no counting.
+    /// Default 0 (no warmup phase). Warmup is always `Gim` regardless of
+    /// `op_mix` — it just primes the cache. Trace must be long enough to
+    /// cover `warmup + len` ops.
+    warmup: usize,
 }
 
 struct Stats {
@@ -253,19 +262,84 @@ struct Stats {
     evictions: u64,
 }
 
-fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
+/// Trace item shape. Bench drivers iterate `&[Op]`, dispatch per op.
+///
+/// - `Gim(k)`: get; if miss, insert. The classic bench.rs single-pass
+///   semantics. Hits / misses both counted; evictions count when insert
+///   returns `Some` (capacity-driven displacement).
+/// - `Get(k)`: get only. Counts hit / miss but does **not** insert on miss.
+///   Used by read-heavy mode for the 19/20 of ops that don't write.
+/// - `Insert(k)`: unconditional insert. Counts eviction on `Some` return;
+///   does **not** touch hit/miss counters. Used by read-heavy mode for the
+///   1/20 of ops that write a Zipf-drawn key from a separate stream.
+#[derive(Clone, Copy)]
+enum Op {
+    Gim(u64),
+    Get(u64),
+    Insert(u64),
+}
+
+/// Op mix selection. Default is `Gim` (legacy bench.rs semantics,
+/// unchanged when `--op-mix` is not passed).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpMix {
+    Gim,
+    ReadHeavy,
+}
+
+/// Read-heavy mode emits one `Op::Insert` every `READ_HEAVY_INSERT_EVERY`
+/// ops (i.e. 5% writes). Matches `bench_concurrent.rs`'s constant so the
+/// serial and parallel cells in `docs/benchmark/readme-headline` are
+/// workload-identical.
+const READ_HEAVY_INSERT_EVERY: usize = 20;
+
+fn drive<C: CacheImpl<u64, u64>>(trace: &[Op], cap: usize, warmup: usize) -> Stats {
     let mut c = C::new(cap);
+    // Warmup phase: run the prefix without counting or timing. Warmup ops
+    // are always `Op::Gim` (caller-built); branching the others is just for
+    // signature symmetry.
+    for op in &trace[..warmup] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_none() {
+                    let _ = c.insert(k, k);
+                }
+            }
+            Op::Get(k) => {
+                let _ = c.get(&k);
+            }
+            Op::Insert(k) => {
+                let _ = c.insert(k, k);
+            }
+        }
+    }
     let mut hits = 0u64;
     let mut misses = 0u64;
     let mut evictions = 0u64;
     let t0 = Instant::now();
-    for &k in trace {
-        if c.get(&k).is_some() {
-            hits += 1;
-        } else {
-            misses += 1;
-            if c.insert(k, k).is_some() {
-                evictions += 1;
+    for op in &trace[warmup..] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                    if c.insert(k, k).is_some() {
+                        evictions += 1;
+                    }
+                }
+            }
+            Op::Get(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                }
+            }
+            Op::Insert(k) => {
+                if c.insert(k, k).is_some() {
+                    evictions += 1;
+                }
             }
         }
     }
@@ -279,19 +353,55 @@ fn drive<C: CacheImpl<u64, u64>>(trace: &[u64], cap: usize) -> Stats {
 
 /// senba::Cache 専用 driver。`with_shards` を呼ぶために CacheImpl 経由ではなく
 /// 具体型を直接構築する。`drive` と同じ計測ロジック。
-fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> Stats {
+fn drive_senba<S: senba::SlotSize>(
+    trace: &[Op],
+    cap: usize,
+    shards: usize,
+    warmup: usize,
+) -> Stats {
     let mut c = Senba::<u64, u64, S>::with_shards(cap, shards);
+    for op in &trace[..warmup] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_none() {
+                    let _ = c.insert(k, k);
+                }
+            }
+            Op::Get(k) => {
+                let _ = c.get(&k);
+            }
+            Op::Insert(k) => {
+                let _ = c.insert(k, k);
+            }
+        }
+    }
     let mut hits = 0u64;
     let mut misses = 0u64;
     let mut evictions = 0u64;
     let t0 = Instant::now();
-    for &k in trace {
-        if c.get(&k).is_some() {
-            hits += 1;
-        } else {
-            misses += 1;
-            if c.insert(k, k).is_some() {
-                evictions += 1;
+    for op in &trace[warmup..] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                    if c.insert(k, k).is_some() {
+                        evictions += 1;
+                    }
+                }
+            }
+            Op::Get(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                }
+            }
+            Op::Insert(k) => {
+                if c.insert(k, k).is_some() {
+                    evictions += 1;
+                }
             }
         }
     }
@@ -306,19 +416,50 @@ fn drive_senba<S: senba::SlotSize>(trace: &[u64], cap: usize, shards: usize) -> 
 /// c14s 専用 driver。`ConcurrentSieveCache` は `&self` API なので CacheImpl
 /// trait に乗せず直接駆動する (= mut state を持たない)。HR 集計のみが目的なので
 /// single-thread で十分。
-fn drive_conc_c14s<const SHARDS: usize>(trace: &[u64], cap: usize) -> Stats {
+fn drive_conc_c14s<const SHARDS: usize>(trace: &[Op], cap: usize, warmup: usize) -> Stats {
     let c = C14sCache::<u64, u64, SHARDS>::new(cap);
+    for op in &trace[..warmup] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_none() {
+                    let _ = c.insert(k, k);
+                }
+            }
+            Op::Get(k) => {
+                let _ = c.get(&k);
+            }
+            Op::Insert(k) => {
+                let _ = c.insert(k, k);
+            }
+        }
+    }
     let mut hits = 0u64;
     let mut misses = 0u64;
     let mut evictions = 0u64;
     let t0 = Instant::now();
-    for &k in trace {
-        if c.get(&k).is_some() {
-            hits += 1;
-        } else {
-            misses += 1;
-            if c.insert(k, k).is_some() {
-                evictions += 1;
+    for op in &trace[warmup..] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                    if c.insert(k, k).is_some() {
+                        evictions += 1;
+                    }
+                }
+            }
+            Op::Get(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                }
+            }
+            Op::Insert(k) => {
+                if c.insert(k, k).is_some() {
+                    evictions += 1;
+                }
             }
         }
     }
@@ -333,21 +474,53 @@ fn drive_conc_c14s<const SHARDS: usize>(trace: &[u64], cap: usize) -> Stats {
 /// c15s 専用 driver。`SAMPLE_BITS` を const generic で受け、driver 側で `&self`
 /// 駆動。TLS RNG は呼び出し側 (main) で `c15s_reseed` 済み前提。
 fn drive_conc_c15s<const SHARDS: usize, const SAMPLE_BITS: u32>(
-    trace: &[u64],
+    trace: &[Op],
     cap: usize,
+    warmup: usize,
 ) -> Stats {
     let c = C15sCache::<u64, u64, SHARDS, SAMPLE_BITS>::new(cap);
+    for op in &trace[..warmup] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_none() {
+                    let _ = c.insert(k, k);
+                }
+            }
+            Op::Get(k) => {
+                let _ = c.get(&k);
+            }
+            Op::Insert(k) => {
+                let _ = c.insert(k, k);
+            }
+        }
+    }
     let mut hits = 0u64;
     let mut misses = 0u64;
     let mut evictions = 0u64;
     let t0 = Instant::now();
-    for &k in trace {
-        if c.get(&k).is_some() {
-            hits += 1;
-        } else {
-            misses += 1;
-            if c.insert(k, k).is_some() {
-                evictions += 1;
+    for op in &trace[warmup..] {
+        match *op {
+            Op::Gim(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                    if c.insert(k, k).is_some() {
+                        evictions += 1;
+                    }
+                }
+            }
+            Op::Get(k) => {
+                if c.get(&k).is_some() {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                }
+            }
+            Op::Insert(k) => {
+                if c.insert(k, k).is_some() {
+                    evictions += 1;
+                }
             }
         }
     }
@@ -423,6 +596,8 @@ fn parse_args() -> Args {
     let mut arc_preset: Option<String> = None;
     let mut repeat: u32 = 1;
     let mut rng_seed: u64 = 0;
+    let mut op_mix = OpMix::Gim;
+    let mut warmup: usize = 0;
 
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -456,6 +631,15 @@ fn parse_args() -> Args {
             "--arc-preset" => arc_preset = Some(val().clone()),
             "--repeat" => repeat = val().parse().expect("--repeat is u32 >= 1"),
             "--rng-seed" => rng_seed = val().parse().expect("--rng-seed is u64"),
+            "--op-mix" => {
+                let v = val();
+                op_mix = match v.as_str() {
+                    "gim" => OpMix::Gim,
+                    "read-heavy" => OpMix::ReadHeavy,
+                    other => panic!("--op-mix must be gim|read-heavy, got: {other}"),
+                };
+            }
+            "--warmup" => warmup = val().parse().expect("--warmup is usize"),
             "-h" | "--help" => {
                 eprintln!(
                     "usage: bench --source <zipf|file|twitter|twitter-string|libcachesim-csv|arc> [--skew F --keys N --seed N --len N | --path P] --capacity C1,C2,... --variant orig,v0\n  --arc-preset <s3|oltp|ds1|p1..p14|s1|s2|concat|merge-p|merge-s>  ARC trace の path / capacity 配列を一括解決\n  --repeat <N>  trace を N 周流す (default 1)"
@@ -502,6 +686,8 @@ fn parse_args() -> Args {
         variants,
         repeat,
         rng_seed,
+        op_mix,
+        warmup,
     }
 }
 
@@ -524,8 +710,15 @@ fn build_trace(args: &Args) -> Vec<u64> {
             let n = args.len.expect("--len required for --source zipf");
             assert!(args.keys > 0, "--keys required for --source zipf");
             assert!(args.skew.is_finite(), "--skew required for --source zipf");
+            // Generate enough get-side keys to cover both the warmup
+            // prefix and the measurement window. For read-heavy mode,
+            // measurement only consumes ~95% of these (the other 5% slots
+            // pull from `ins_gen` instead), so a few get keys go unused —
+            // accepted as a generation no-op so the call shape stays
+            // uniform across op_mix modes.
+            let total = n + args.warmup;
             ZipfGen::new(args.skew, args.keys, args.seed)
-                .take(n)
+                .take(total)
                 .collect()
         }
         "file" => {
@@ -535,7 +728,7 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .expect("--path required for --source file");
             let it = file::from_path(p).expect("open trace");
             match args.len {
-                Some(n) => it.take(n).collect(),
+                Some(n) => it.take(n + args.warmup).collect(),
                 None => it.collect(),
             }
         }
@@ -549,7 +742,7 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .expect("--path required for --source twitter");
             let it = file::twitter_csv_from_path(p).expect("open trace");
             match args.len {
-                Some(n) => it.take(n).collect(),
+                Some(n) => it.take(n + args.warmup).collect(),
                 None => it.collect(),
             }
         }
@@ -564,7 +757,7 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .expect("--path required for --source arc");
             let it = file::arc_from_path(p).expect("open trace");
             match args.len {
-                Some(n) => it.take(n).collect(),
+                Some(n) => it.take(n + args.warmup).collect(),
                 None => it.collect(),
             }
         }
@@ -577,12 +770,54 @@ fn build_trace(args: &Args) -> Vec<u64> {
                 .expect("--path required for --source libcachesim-csv");
             let it = file::libcachesim_csv_from_path(p).expect("open trace");
             match args.len {
-                Some(n) => it.take(n).collect(),
+                Some(n) => it.take(n + args.warmup).collect(),
                 None => it.collect(),
             }
         }
         other => panic!("unknown --source: {other}"),
     }
+}
+
+/// Tag a flat `[u64]` get-key trace as `Op::Gim` for warmup and follow
+/// `args.op_mix` for the measurement window. Read-heavy mode emits one
+/// `Op::Insert` every `READ_HEAVY_INSERT_EVERY` ops, pulling insert keys
+/// from a separate `ZipfGen` (seed XOR'd with a fixed constant matching
+/// `bench_concurrent.rs`).
+fn build_op_trace(get_trace: &[u64], args: &Args) -> Vec<Op> {
+    let warmup = args.warmup;
+    assert!(
+        get_trace.len() >= warmup,
+        "trace too short for warmup: got {}, need >= warmup {warmup}",
+        get_trace.len()
+    );
+    let mut out = Vec::with_capacity(get_trace.len());
+    for &k in &get_trace[..warmup] {
+        out.push(Op::Gim(k));
+    }
+    let measure = &get_trace[warmup..];
+    match args.op_mix {
+        OpMix::Gim => {
+            for &k in measure {
+                out.push(Op::Gim(k));
+            }
+        }
+        OpMix::ReadHeavy => {
+            assert!(
+                args.source == "zipf",
+                "--op-mix read-heavy requires --source zipf (insert stream comes from a separate ZipfGen)"
+            );
+            let mut ins_gen =
+                ZipfGen::new(args.skew, args.keys, args.seed ^ 0x00C0_FFEE_DEAD_BEEF_u64);
+            for (i, &k) in measure.iter().enumerate() {
+                if i.is_multiple_of(READ_HEAVY_INSERT_EVERY) {
+                    out.push(Op::Insert(ins_gen.next().unwrap()));
+                } else {
+                    out.push(Op::Get(k));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn run_string_keys(args: &Args) {
@@ -648,7 +883,7 @@ fn main() {
     }
     let trace_once = build_trace(&args);
     // --repeat: trace を N 周分連結。default 1 なので clone コストはゼロ。
-    let trace: Vec<u64> = if args.repeat == 1 {
+    let get_trace: Vec<u64> = if args.repeat == 1 {
         trace_once
     } else {
         let mut v = Vec::with_capacity(trace_once.len() * args.repeat as usize);
@@ -657,107 +892,117 @@ fn main() {
         }
         v
     };
+    // Translate get-side keys into the `Op` stream. Warmup prefix is always
+    // `Op::Gim`; measurement section follows `op_mix` (read-heavy inserts
+    // pull from a separately-seeded `ZipfGen` to avoid hammering the cache
+    // with the exact key stream we are measuring against).
+    let trace: Vec<Op> = build_op_trace(&get_trace, &args);
+    // Measurement-window length (excludes warmup). Used for CSV emit so
+    // plot.py's `Mops = len / elapsed_ns` math stays correct.
+    let measure_len = trace.len() - args.warmup;
 
     println!("variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions");
     for v in &args.variants {
         for &cap in &args.capacities {
             let s = match v.as_str() {
-                "orig" => drive::<Orig<u64, u64>>(&trace, cap),
+                "orig" => drive::<Orig<u64, u64>>(&trace, cap, args.warmup),
                 // 2026-05-05: ベースラインは orig vs j7 のみ。過去 variant は
                 // モジュール自体は残置 (`src/sieve_*.rs` + `src/lib.rs`)、必要な
                 // 比較が再発したらここを復活させる。
-                // "v0" => drive::<V0<u64, u64>>(&trace, cap),
-                // "v3" => drive::<V3<u64, u64>>(&trace, cap),
-                // "j3" => drive::<J3<u64, u64>>(&trace, cap),
-                // "j4" => drive::<J4<u64, u64>>(&trace, cap),
-                // "j4_n1" => drive::<J4<u64, u64, 1>>(&trace, cap),
-                // "j4_n2" => drive::<J4<u64, u64, 2>>(&trace, cap),
-                // "j4_n4" => drive::<J4<u64, u64, 4>>(&trace, cap),
-                // "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap),
-                // "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap),
-                // "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap),
-                // "j4_n64" => drive::<J4<u64, u64, 64>>(&trace, cap),
-                // "j4_n128" => drive::<J4<u64, u64, 128>>(&trace, cap),
-                // "j5" => drive::<J5<u64, u64>>(&trace, cap),
-                // "j5_n1" => drive::<J5<u64, u64, 1>>(&trace, cap),
-                // "j5_n2" => drive::<J5<u64, u64, 2>>(&trace, cap),
-                // "j5_n4" => drive::<J5<u64, u64, 4>>(&trace, cap),
-                // "j5_n8" => drive::<J5<u64, u64, 8>>(&trace, cap),
-                // "j5_n16" => drive::<J5<u64, u64, 16>>(&trace, cap),
-                // "j5_n32" => drive::<J5<u64, u64, 32>>(&trace, cap),
-                // "j5_n64" => drive::<J5<u64, u64, 64>>(&trace, cap),
-                // "j5_n128" => drive::<J5<u64, u64, 128>>(&trace, cap),
-                // "j5_n256" => drive::<J5<u64, u64, 256>>(&trace, cap),
-                // "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap),
-                // "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap),
-                // "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap),
-                // "j6" => drive::<J6<u64, u64>>(&trace, cap),
-                // "j6_n1" => drive::<J6<u64, u64, 1>>(&trace, cap),
-                // "j6_n2" => drive::<J6<u64, u64, 2>>(&trace, cap),
-                // "j6_n4" => drive::<J6<u64, u64, 4>>(&trace, cap),
-                // "j6_n8" => drive::<J6<u64, u64, 8>>(&trace, cap),
-                // "j6_n16" => drive::<J6<u64, u64, 16>>(&trace, cap),
-                // "j6_n32" => drive::<J6<u64, u64, 32>>(&trace, cap),
-                // "j6_n64" => drive::<J6<u64, u64, 64>>(&trace, cap),
-                // "j6_n128" => drive::<J6<u64, u64, 128>>(&trace, cap),
-                // "j6_n256" => drive::<J6<u64, u64, 256>>(&trace, cap),
-                // "j6_n512" => drive::<J6<u64, u64, 512>>(&trace, cap),
-                // "j6_n1024" => drive::<J6<u64, u64, 1024>>(&trace, cap),
-                // "j6_n2048" => drive::<J6<u64, u64, 2048>>(&trace, cap),
-                "j7" => drive::<J7<u64, u64>>(&trace, cap),
-                "j7_n1" => drive::<J7<u64, u64, 1>>(&trace, cap),
-                "j7_n2" => drive::<J7<u64, u64, 2>>(&trace, cap),
-                "j7_n4" => drive::<J7<u64, u64, 4>>(&trace, cap),
-                "j7_n8" => drive::<J7<u64, u64, 8>>(&trace, cap),
-                "j7_n16" => drive::<J7<u64, u64, 16>>(&trace, cap),
-                "j7_n32" => drive::<J7<u64, u64, 32>>(&trace, cap),
-                "j7_n64" => drive::<J7<u64, u64, 64>>(&trace, cap),
-                "j7_n128" => drive::<J7<u64, u64, 128>>(&trace, cap),
-                "j7_n256" => drive::<J7<u64, u64, 256>>(&trace, cap),
-                "j7_n512" => drive::<J7<u64, u64, 512>>(&trace, cap),
-                "j7_n1024" => drive::<J7<u64, u64, 1024>>(&trace, cap),
-                "j7_n2048" => drive::<J7<u64, u64, 2048>>(&trace, cap),
+                // "v0" => drive::<V0<u64, u64>>(&trace, cap, args.warmup),
+                // "v3" => drive::<V3<u64, u64>>(&trace, cap, args.warmup),
+                // "j3" => drive::<J3<u64, u64>>(&trace, cap, args.warmup),
+                // "j4" => drive::<J4<u64, u64>>(&trace, cap, args.warmup),
+                // "j4_n1" => drive::<J4<u64, u64, 1>>(&trace, cap, args.warmup),
+                // "j4_n2" => drive::<J4<u64, u64, 2>>(&trace, cap, args.warmup),
+                // "j4_n4" => drive::<J4<u64, u64, 4>>(&trace, cap, args.warmup),
+                // "j4_n8" => drive::<J4<u64, u64, 8>>(&trace, cap, args.warmup),
+                // "j4_n16" => drive::<J4<u64, u64, 16>>(&trace, cap, args.warmup),
+                // "j4_n32" => drive::<J4<u64, u64, 32>>(&trace, cap, args.warmup),
+                // "j4_n64" => drive::<J4<u64, u64, 64>>(&trace, cap, args.warmup),
+                // "j4_n128" => drive::<J4<u64, u64, 128>>(&trace, cap, args.warmup),
+                // "j5" => drive::<J5<u64, u64>>(&trace, cap, args.warmup),
+                // "j5_n1" => drive::<J5<u64, u64, 1>>(&trace, cap, args.warmup),
+                // "j5_n2" => drive::<J5<u64, u64, 2>>(&trace, cap, args.warmup),
+                // "j5_n4" => drive::<J5<u64, u64, 4>>(&trace, cap, args.warmup),
+                // "j5_n8" => drive::<J5<u64, u64, 8>>(&trace, cap, args.warmup),
+                // "j5_n16" => drive::<J5<u64, u64, 16>>(&trace, cap, args.warmup),
+                // "j5_n32" => drive::<J5<u64, u64, 32>>(&trace, cap, args.warmup),
+                // "j5_n64" => drive::<J5<u64, u64, 64>>(&trace, cap, args.warmup),
+                // "j5_n128" => drive::<J5<u64, u64, 128>>(&trace, cap, args.warmup),
+                // "j5_n256" => drive::<J5<u64, u64, 256>>(&trace, cap, args.warmup),
+                // "j5_n512" => drive::<J5<u64, u64, 512>>(&trace, cap, args.warmup),
+                // "j5_n1024" => drive::<J5<u64, u64, 1024>>(&trace, cap, args.warmup),
+                // "j5_n2048" => drive::<J5<u64, u64, 2048>>(&trace, cap, args.warmup),
+                // "j6" => drive::<J6<u64, u64>>(&trace, cap, args.warmup),
+                // "j6_n1" => drive::<J6<u64, u64, 1>>(&trace, cap, args.warmup),
+                // "j6_n2" => drive::<J6<u64, u64, 2>>(&trace, cap, args.warmup),
+                // "j6_n4" => drive::<J6<u64, u64, 4>>(&trace, cap, args.warmup),
+                // "j6_n8" => drive::<J6<u64, u64, 8>>(&trace, cap, args.warmup),
+                // "j6_n16" => drive::<J6<u64, u64, 16>>(&trace, cap, args.warmup),
+                // "j6_n32" => drive::<J6<u64, u64, 32>>(&trace, cap, args.warmup),
+                // "j6_n64" => drive::<J6<u64, u64, 64>>(&trace, cap, args.warmup),
+                // "j6_n128" => drive::<J6<u64, u64, 128>>(&trace, cap, args.warmup),
+                // "j6_n256" => drive::<J6<u64, u64, 256>>(&trace, cap, args.warmup),
+                // "j6_n512" => drive::<J6<u64, u64, 512>>(&trace, cap, args.warmup),
+                // "j6_n1024" => drive::<J6<u64, u64, 1024>>(&trace, cap, args.warmup),
+                // "j6_n2048" => drive::<J6<u64, u64, 2048>>(&trace, cap, args.warmup),
+                "j7" => drive::<J7<u64, u64>>(&trace, cap, args.warmup),
+                "j7_n1" => drive::<J7<u64, u64, 1>>(&trace, cap, args.warmup),
+                "j7_n2" => drive::<J7<u64, u64, 2>>(&trace, cap, args.warmup),
+                "j7_n4" => drive::<J7<u64, u64, 4>>(&trace, cap, args.warmup),
+                "j7_n8" => drive::<J7<u64, u64, 8>>(&trace, cap, args.warmup),
+                "j7_n16" => drive::<J7<u64, u64, 16>>(&trace, cap, args.warmup),
+                "j7_n32" => drive::<J7<u64, u64, 32>>(&trace, cap, args.warmup),
+                "j7_n64" => drive::<J7<u64, u64, 64>>(&trace, cap, args.warmup),
+                "j7_n128" => drive::<J7<u64, u64, 128>>(&trace, cap, args.warmup),
+                "j7_n256" => drive::<J7<u64, u64, 256>>(&trace, cap, args.warmup),
+                "j7_n512" => drive::<J7<u64, u64, 512>>(&trace, cap, args.warmup),
+                "j7_n1024" => drive::<J7<u64, u64, 1024>>(&trace, cap, args.warmup),
+                "j7_n2048" => drive::<J7<u64, u64, 2048>>(&trace, cap, args.warmup),
                 // j8 は per_shard <= 64 (= MAX_PER_SHARD) を Inner::new で assert する。
                 // 例: cap=4096 + j8_n64 ⇒ per_shard=64 で OK、cap=4096 + j8_n32 ⇒ per_shard=128 で panic。
-                "j8" => drive::<J8<u64, u64>>(&trace, cap),
-                "j8_n16" => drive::<J8<u64, u64, 16>>(&trace, cap),
-                "j8_n32" => drive::<J8<u64, u64, 32>>(&trace, cap),
-                "j8_n64" => drive::<J8<u64, u64, 64>>(&trace, cap),
-                "j8_n128" => drive::<J8<u64, u64, 128>>(&trace, cap),
-                "j8_n256" => drive::<J8<u64, u64, 256>>(&trace, cap),
-                "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap),
-                "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap),
-                "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap),
+                "j8" => drive::<J8<u64, u64>>(&trace, cap, args.warmup),
+                "j8_n16" => drive::<J8<u64, u64, 16>>(&trace, cap, args.warmup),
+                "j8_n32" => drive::<J8<u64, u64, 32>>(&trace, cap, args.warmup),
+                "j8_n64" => drive::<J8<u64, u64, 64>>(&trace, cap, args.warmup),
+                "j8_n128" => drive::<J8<u64, u64, 128>>(&trace, cap, args.warmup),
+                "j8_n256" => drive::<J8<u64, u64, 256>>(&trace, cap, args.warmup),
+                "j8_n512" => drive::<J8<u64, u64, 512>>(&trace, cap, args.warmup),
+                "j8_n1024" => drive::<J8<u64, u64, 1024>>(&trace, cap, args.warmup),
+                "j8_n2048" => drive::<J8<u64, u64, 2048>>(&trace, cap, args.warmup),
                 // senba::Cache<u64, u64> (Slot32 default)。`senba` は `Cache::new(cap)`
                 // が SHARDS を自動選択する canonical 経路 (next_pow2(ceil(cap/64)))。
                 // `senba_nNNN` は SHARDS を pin してスイープするための bench 専用
                 // variant — per-shard 上限は 64 (tag 内 6-bit ID) なので、変な N を
                 // 指定すると assert で落ちる / per-shard が小さすぎて HR が劣化する。
-                "senba" => drive::<Senba<u64, u64>>(&trace, cap),
-                "senba_n16" => drive_senba::<senba::Slot32>(&trace, cap, 16),
-                "senba_n32" => drive_senba::<senba::Slot32>(&trace, cap, 32),
-                "senba_n64" => drive_senba::<senba::Slot32>(&trace, cap, 64),
-                "senba_n128" => drive_senba::<senba::Slot32>(&trace, cap, 128),
-                "senba_n256" => drive_senba::<senba::Slot32>(&trace, cap, 256),
-                "senba_n512" => drive_senba::<senba::Slot32>(&trace, cap, 512),
-                "senba_n1024" => drive_senba::<senba::Slot32>(&trace, cap, 1024),
-                "senba_n2048" => drive_senba::<senba::Slot32>(&trace, cap, 2048),
+                "senba" => drive::<Senba<u64, u64>>(&trace, cap, args.warmup),
+                "senba_n16" => drive_senba::<senba::Slot32>(&trace, cap, 16, args.warmup),
+                "senba_n32" => drive_senba::<senba::Slot32>(&trace, cap, 32, args.warmup),
+                "senba_n64" => drive_senba::<senba::Slot32>(&trace, cap, 64, args.warmup),
+                "senba_n128" => drive_senba::<senba::Slot32>(&trace, cap, 128, args.warmup),
+                "senba_n256" => drive_senba::<senba::Slot32>(&trace, cap, 256, args.warmup),
+                "senba_n512" => drive_senba::<senba::Slot32>(&trace, cap, 512, args.warmup),
+                "senba_n1024" => drive_senba::<senba::Slot32>(&trace, cap, 1024, args.warmup),
+                "senba_n2048" => drive_senba::<senba::Slot32>(&trace, cap, 2048, args.warmup),
                 // W-TinyLFU 比較。HR と ns/op のみ意味あり、evictions は 0 固定。
                 // `mini_moka` は後方互換 alias (sync 実装に解決)。
-                "mini_moka" | "mini_moka_sync" => drive::<MiniMokaSync<u64>>(&trace, cap),
+                "mini_moka" | "mini_moka_sync" => {
+                    drive::<MiniMokaSync<u64>>(&trace, cap, args.warmup)
+                }
                 // 単スレ公平比較用: unsync 版 (内部 atomic / write log 無し)。
-                "mini_moka_unsync" => drive::<MiniMokaUnsync<u64>>(&trace, cap),
+                "mini_moka_unsync" => drive::<MiniMokaUnsync<u64>>(&trace, cap, args.warmup),
                 // 単スレ baseline: jeromefroe/lru-rs。Xxh3Build 注入済み。
-                "lru" => drive::<LruAdapter<u64>>(&trace, cap),
+                "lru" => drive::<LruAdapter<u64>>(&trace, cap, args.warmup),
                 // moka 0.12 (adaptive window sizing 付き W-TinyLFU)。
-                "moka" => drive::<Moka>(&trace, cap),
+                "moka" => drive::<Moka>(&trace, cap, args.warmup),
                 // c14s / c15s_* (並行 variant) の HR 計測 — single-thread で十分
                 // (HR は probabilistic だが thread 数に依存しない)。SHARDS=64 固定。
                 // c15s_* は TLS RNG を `--rng-seed` で deterministic 化する想定。
-                "c14s_n64" => drive_conc_c14s::<64>(&trace, cap),
-                "c15s_16_n64" => drive_conc_c15s::<64, 4>(&trace, cap),
-                "c15s_8_n64" => drive_conc_c15s::<64, 3>(&trace, cap),
-                "c15s_4_n64" => drive_conc_c15s::<64, 2>(&trace, cap),
+                "c14s_n64" => drive_conc_c14s::<64>(&trace, cap, args.warmup),
+                "c15s_16_n64" => drive_conc_c15s::<64, 4>(&trace, cap, args.warmup),
+                "c15s_8_n64" => drive_conc_c15s::<64, 3>(&trace, cap, args.warmup),
+                "c15s_4_n64" => drive_conc_c15s::<64, 2>(&trace, cap, args.warmup),
                 other => panic!("unknown variant: {other}"),
             };
             println!(
@@ -765,7 +1010,7 @@ fn main() {
                 args.source,
                 args.skew,
                 args.keys,
-                trace.len(),
+                measure_len,
                 s.elapsed_ns,
                 s.hits,
                 s.misses,

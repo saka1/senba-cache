@@ -66,7 +66,8 @@ run: |
   echo "trial,variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions" > "$out_serial"
   for trial in 1 2 3; do
     taskset -c 0 "$bin_serial" \
-      --source zipf --skew 1.0 --keys 100000 --len 2000000 \
+      --source zipf --skew 1.0 --keys 100000 \
+      --len 2400000 --warmup 240000 --op-mix read-heavy \
       --capacity 4096 \
       --variant senba,mini_moka_unsync,lru \
       | tail -n +2 \

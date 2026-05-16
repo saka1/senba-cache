@@ -448,7 +448,8 @@ def write_summary(df: pd.DataFrame, df_serial: pd.DataFrame | None = None) -> No
             f.write("\n## Single-thread (1 core, taskset -c 0)\n\n")
             f.write(
                 "senba::Cache vs mini-moka (unsync) vs lru-rs. "
-                "Zipf α=1.0, cap=4096, 100k keys, 2M ops, value=u64, 3 trials.\n\n"
+                "Zipf α=1.0, cap=4096, 100k keys, read-heavy (95% get / 5% insert), "
+                "value=u64, 2.4M ops + 240k warmup, 3 trials.\n\n"
             )
             f.write("| variant | Mops | hit ratio | senba ratio |\n")
             f.write("| --- | --- | --- | --- |\n")
