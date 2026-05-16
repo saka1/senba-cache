@@ -40,6 +40,8 @@ fi
 # SkyPilot registers the cluster name as an SSH config alias, so plain rsync
 # works (there is no `sky rsync` subcommand).
 rsync -Pavz "$CLUSTER":~/results.csv data/results.csv
+rsync -Pavz "$CLUSTER":~/results_serial.csv data/results_serial.csv
 rsync -Pavz "$CLUSTER":~/cpu-topology.txt data/cpu-topology.txt
 
 echo "wrote $(wc -l < data/results.csv) lines to data/results.csv"
+echo "wrote $(wc -l < data/results_serial.csv) lines to data/results_serial.csv"

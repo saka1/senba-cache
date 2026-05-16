@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """README headline benchmark plot.
 
-Input  : data/results.csv (run.sh output)
+Input  : data/results.csv + data/results_serial.csv (run.sh outputs)
 Outputs (figures/):
-  - throughput.png     : Mops vs threads, headline chart for README
-  - latency.png        : p50 / p99 chunk latency vs threads (log y)
-  - hit_ratio.png      : hit ratio vs threads — parity check on this workload
-  - summary.md         : per-cell mean Mops + ratio vs moka / mini_moka
+  - throughput.png         : Mops vs threads, concurrent headline chart
+  - latency.png            : p50 / p99 chunk latency vs threads (log y)
+  - hit_ratio.png          : hit ratio vs threads — parity check
+  - serial_throughput.png  : single-thread Mops, senba::Cache vs mini-moka / lru
+  - serial_hit_ratio.png   : single-thread hit ratio parity check
+  - summary.md             : per-cell means, ratios, and 1T → 4T scaling
 
 Run    : uv run --project scripts python docs/benchmark/readme-headline/plot.py
 """
@@ -23,6 +25,7 @@ from matplotlib import rcParams
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data" / "results.csv"
+SERIAL_DATA = HERE / "data" / "results_serial.csv"
 FIG = HERE / "figures"
 FIG.mkdir(exist_ok=True)
 
@@ -38,6 +41,18 @@ COLORS = {
     "senba_concurrent": "#e8543a",
     "moka": "#4c78a8",
     "mini_moka": "#9aa0a6",
+}
+
+SERIAL_VARIANTS = ["senba", "mini_moka_unsync", "lru"]
+SERIAL_LABELS = {
+    "senba": "senba::Cache",
+    "mini_moka_unsync": "mini-moka (unsync)",
+    "lru": "lru-rs",
+}
+SERIAL_COLORS = {
+    "senba": "#e8543a",
+    "mini_moka_unsync": "#9aa0a6",
+    "lru": "#4c78a8",
 }
 
 # Shared style tuned for README rendering on GitHub (light bg, ~720px wide).
@@ -69,6 +84,20 @@ def load() -> pd.DataFrame:
     df = pd.read_csv(DATA)
     if df.empty:
         sys.exit("results.csv has no data rows")
+    return df
+
+
+def load_serial() -> pd.DataFrame | None:
+    if not SERIAL_DATA.exists():
+        print(f"note: {SERIAL_DATA} not found; skipping serial plots", file=sys.stderr)
+        return None
+    df = pd.read_csv(SERIAL_DATA)
+    if df.empty:
+        print(f"note: {SERIAL_DATA} has no data rows; skipping serial plots", file=sys.stderr)
+        return None
+    # bench.rs emits totals — derive throughput / hit ratio per row.
+    df["aggregate_mops"] = df["len"] * 1000.0 / df["elapsed_ns"]
+    df["hit_ratio"] = df["hits"] / (df["hits"] + df["misses"])
     return df
 
 
@@ -260,7 +289,98 @@ def plot_hit_ratio(df: pd.DataFrame) -> None:
     print(f"wrote {out}", file=sys.stderr)
 
 
-def write_summary(df: pd.DataFrame) -> None:
+def plot_serial_throughput(df: pd.DataFrame) -> None:
+    means = [_mean(df, "aggregate_mops", v) for v in SERIAL_VARIANTS]
+    x = np.arange(len(SERIAL_VARIANTS))
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.0))
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+
+    bars = ax.bar(
+        x,
+        means,
+        0.55,
+        color=[SERIAL_COLORS[v] for v in SERIAL_VARIANTS],
+        edgecolor="white",
+        linewidth=0.6,
+    )
+    for bar, m in zip(bars, means):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(means) * 0.012,
+            f"{m:.1f}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="#222",
+        )
+
+    ax.set_ylim(0, max(means) * 1.12)
+    ax.set_xticks(x)
+    ax.set_xticklabels([SERIAL_LABELS[v] for v in SERIAL_VARIANTS])
+    ax.set_ylabel("throughput  (million ops / sec)")
+    ax.set_title(
+        "Single-thread cache throughput — read-heavy Zipf α=1.0, cap=4096",
+        loc="left",
+        pad=10,
+        fontweight="bold",
+    )
+
+    fig.tight_layout()
+    out = FIG / "serial_throughput.png"
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    print(f"wrote {out}", file=sys.stderr)
+
+
+def plot_serial_hit_ratio(df: pd.DataFrame) -> None:
+    means = [_mean(df, "hit_ratio", v) for v in SERIAL_VARIANTS]
+    x = np.arange(len(SERIAL_VARIANTS))
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.0))
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+
+    bars = ax.bar(
+        x,
+        means,
+        0.55,
+        color=[SERIAL_COLORS[v] for v in SERIAL_VARIANTS],
+        edgecolor="white",
+        linewidth=0.6,
+    )
+    for bar, m in zip(bars, means):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.012,
+            f"{m:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="#222",
+        )
+
+    ax.set_ylim(0.0, 1.0)
+    ax.set_yticks(np.linspace(0.0, 1.0, 6))
+    ax.set_xticks(x)
+    ax.set_xticklabels([SERIAL_LABELS[v] for v in SERIAL_VARIANTS])
+    ax.set_ylabel("hit ratio")
+    ax.set_title(
+        "Single-thread hit ratio — Zipf α=1.0, cap=4096, 100k keys",
+        loc="left",
+        pad=10,
+        fontweight="bold",
+    )
+
+    fig.tight_layout()
+    out = FIG / "serial_hit_ratio.png"
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    print(f"wrote {out}", file=sys.stderr)
+
+
+def write_summary(df: pd.DataFrame, df_serial: pd.DataFrame | None = None) -> None:
     threads = sorted(df["threads"].unique())
     rows = []
     for t in threads:
@@ -317,6 +437,28 @@ def write_summary(df: pd.DataFrame) -> None:
         f.write(f"- senba::concurrent : {s1:.2f} → {s4:.2f} Mops ({s4 / s1:.2f}x)\n")
         f.write(f"- moka              : {mo1:.2f} → {mo4:.2f} Mops ({mo4 / mo1:.2f}x)\n")
         f.write(f"- mini-moka         : {mi1:.2f} → {mi4:.2f} Mops ({mi4 / mi1:.2f}x)\n")
+
+        if df_serial is not None:
+            s_mops = _mean(df_serial, "aggregate_mops", "senba")
+            mi_mops = _mean(df_serial, "aggregate_mops", "mini_moka_unsync")
+            lr_mops = _mean(df_serial, "aggregate_mops", "lru")
+            s_hit = _mean(df_serial, "hit_ratio", "senba")
+            mi_hit = _mean(df_serial, "hit_ratio", "mini_moka_unsync")
+            lr_hit = _mean(df_serial, "hit_ratio", "lru")
+            f.write("\n## Single-thread (1 core, taskset -c 0)\n\n")
+            f.write(
+                "senba::Cache vs mini-moka (unsync) vs lru-rs. "
+                "Zipf α=1.0, cap=4096, 100k keys, 2M ops, value=u64, 3 trials.\n\n"
+            )
+            f.write("| variant | Mops | hit ratio | senba ratio |\n")
+            f.write("| --- | --- | --- | --- |\n")
+            f.write(f"| senba::Cache       | {s_mops:.2f} | {s_hit:.4f} | 1.00x |\n")
+            f.write(
+                f"| mini-moka (unsync) | {mi_mops:.2f} | {mi_hit:.4f} | {s_mops / mi_mops:.2f}x |\n"
+            )
+            f.write(
+                f"| lru-rs             | {lr_mops:.2f} | {lr_hit:.4f} | {s_mops / lr_mops:.2f}x |\n"
+            )
     print(f"wrote {out}", file=sys.stderr)
 
 
@@ -325,7 +467,11 @@ def main() -> None:
     plot_throughput(df)
     plot_latency(df)
     plot_hit_ratio(df)
-    write_summary(df)
+    df_serial = load_serial()
+    if df_serial is not None:
+        plot_serial_throughput(df_serial)
+        plot_serial_hit_ratio(df_serial)
+    write_summary(df, df_serial)
 
 
 if __name__ == "__main__":

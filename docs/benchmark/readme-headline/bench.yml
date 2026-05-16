@@ -23,7 +23,8 @@ setup: |
       | sh -s -- -y --default-toolchain stable --profile minimal
   fi
   source "$HOME/.cargo/env"
-  cargo build --release -p senba-research --bin bench_concurrent \
+  cargo build --release -p senba-research \
+    --bin bench_concurrent --bin bench \
     --features "senba/concurrent"
 
 run: |
@@ -55,3 +56,22 @@ run: |
   done
 
   wc -l "$out"
+
+  # Single-thread library comparison: senba::Cache vs mini-moka (unsync) vs
+  # lru-rs. Same workload as the T=1 cell of the concurrent sweep above, also
+  # pinned to cpu 0 so the two figures sit on the same axis in the README.
+  # bench.rs emits no trial column, so prepend it via sed.
+  bin_serial="./target/release/bench"
+  out_serial="$HOME/results_serial.csv"
+  echo "trial,variant,source,skew,keys,len,capacity,elapsed_ns,hits,misses,evictions" > "$out_serial"
+  for trial in 1 2 3; do
+    taskset -c 0 "$bin_serial" \
+      --source zipf --skew 1.0 --keys 100000 --len 2000000 \
+      --capacity 4096 \
+      --variant senba,mini_moka_unsync,lru \
+      | tail -n +2 \
+      | sed "s/^/${trial},/" \
+      >> "$out_serial"
+  done
+
+  wc -l "$out_serial"
