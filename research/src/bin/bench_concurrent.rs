@@ -594,10 +594,7 @@ fn parse_args() -> Args {
         }
     }
 
-    assert!(
-        threads > 0 && threads.is_power_of_two(),
-        "--threads must be power of two"
-    );
+    assert!(threads > 0, "--threads must be > 0");
     assert!(
         ops.is_multiple_of(threads),
         "--ops must be divisible by --threads"

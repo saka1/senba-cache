@@ -51,7 +51,7 @@ run: |
       --op-mix read-heavy --value u64 \
       --threads "$t" --shards 512 \
       --variants senba_concurrent,moka,mini_moka \
-      --trials 3 --ops 2000000 --warmup 200000 \
+      --trials 3 --ops 2400000 --warmup 240000 \
       | tail -n +2 >> "$out"
   done
 
