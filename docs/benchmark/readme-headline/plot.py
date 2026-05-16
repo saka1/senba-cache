@@ -419,7 +419,7 @@ def write_summary(df: pd.DataFrame, df_serial: pd.DataFrame | None = None) -> No
             "AWS c8i.2xlarge (Granite Rapids), 4 physical cores + SMT. "
             "Threads pinned to cpus 0..T-1 (one per physical core; SMT siblings 4-7 unused). "
             "Zipf α=1.0, cap=4096, keys=100k, read-heavy, value=u64. "
-            "3 trials per cell, 2M ops + 200k warmup each.\n\n"
+            "3 trials per cell, 2.4M ops + 240k warmup each.\n\n"
         )
         cols = list(rt.columns)
         f.write("| " + " | ".join(cols) + " |\n")
