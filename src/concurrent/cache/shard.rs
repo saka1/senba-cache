@@ -380,7 +380,35 @@ where
         let _guard = pin_for::<V>();
         for attempt in 0..MAX_READER_RETRY {
             let epoch_before = self.hot.path_c_epoch.load(Ordering::Acquire);
-            let (v, racing) = self.find_get::<Q>(key, needle, has_avx2_bmi1);
+            let (v, racing) = self.find_get::<Q, true>(key, needle, has_avx2_bmi1);
+            if let Some(v) = v {
+                return Some(v);
+            }
+            let epoch_after = self.hot.path_c_epoch.load(Ordering::Acquire);
+            if !racing && epoch_before == epoch_after {
+                return None;
+            }
+            if attempt + 1 < MAX_READER_RETRY {
+                hint::spin_loop();
+            }
+        }
+        None
+    }
+
+    /// Like [`Self::get_by_hash`] but never sets the SIEVE visited bit.
+    /// Hits return a clone of V without promoting the entry's eviction
+    /// resistance. Otherwise identical (same seqlock + epoch retry).
+    pub(crate) fn peek_by_hash<Q>(&self, key: &Q, hash: u64, has_avx2_bmi1: bool) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        const MAX_READER_RETRY: usize = 4;
+        let needle = Self::needle_from_hash(hash);
+        let _guard = pin_for::<V>();
+        for attempt in 0..MAX_READER_RETRY {
+            let epoch_before = self.hot.path_c_epoch.load(Ordering::Acquire);
+            let (v, racing) = self.find_get::<Q, false>(key, needle, has_avx2_bmi1);
             if let Some(v) = v {
                 return Some(v);
             }
@@ -407,7 +435,12 @@ where
     /// "SIMD enabled" flag — on x86_64 it gates AVX2+BMI1, on aarch64 it
     /// would gate NEON once implemented (today it is always `false`).
     #[inline]
-    fn find_get<Q>(&self, key: &Q, needle: u16, has_avx2_bmi1: bool) -> (Option<V>, bool)
+    fn find_get<Q, const PROMOTE: bool>(
+        &self,
+        key: &Q,
+        needle: u16,
+        has_avx2_bmi1: bool,
+    ) -> (Option<V>, bool)
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -420,7 +453,7 @@ where
                 // `Cache::with_shards_and_hasher`. AVX2 implies BMI1 on
                 // every shipping x86_64 part. The detection result is
                 // valid for the process lifetime, so caching it is sound.
-                return unsafe { self.find_get_avx2::<Q>(key, needle) };
+                return unsafe { self.find_get_avx2::<Q, PROMOTE>(key, needle) };
             }
         }
         #[cfg(target_arch = "aarch64")]
@@ -431,12 +464,16 @@ where
             // block falls through to the scalar twin today.
         }
         let _ = has_avx2_bmi1; // unused on non-x86_64 hosts
-        self.find_get_scalar::<Q>(key, needle)
+        self.find_get_scalar::<Q, PROMOTE>(key, needle)
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,bmi1")]
-    unsafe fn find_get_avx2<Q>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
+    unsafe fn find_get_avx2<Q, const PROMOTE: bool>(
+        &self,
+        key: &Q,
+        needle: u16,
+    ) -> (Option<V>, bool)
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -466,7 +503,7 @@ where
                 let bit = mask.trailing_zeros() as usize;
                 let lane = bit >> 1;
                 let pos = i + lane;
-                match self.try_candidate::<Q>(pos, key, needle) {
+                match self.try_candidate::<Q, PROMOTE>(pos, key, needle) {
                     Probe::Found(val) => return (Some(val), false),
                     Probe::Racing => racing = true,
                     Probe::Miss => {}
@@ -483,7 +520,7 @@ where
     /// (full length including pad lanes — the AVX2 twin scans the same
     /// range; pad lanes are permanent EMPTY and rejected by the
     /// `SCAN_MASK` LIVE prefix).
-    fn find_get_scalar<Q>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
+    fn find_get_scalar<Q, const PROMOTE: bool>(&self, key: &Q, needle: u16) -> (Option<V>, bool)
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -502,7 +539,7 @@ where
             if (t & Self::SCAN_MASK) != needle {
                 continue;
             }
-            match self.try_candidate::<Q>(pos, key, needle) {
+            match self.try_candidate::<Q, PROMOTE>(pos, key, needle) {
                 Probe::Found(val) => return (Some(val), false),
                 Probe::Racing => racing = true,
                 Probe::Miss => {}
@@ -512,7 +549,7 @@ where
     }
 
     #[inline]
-    fn try_candidate<Q>(&self, pos: usize, key: &Q, needle: u16) -> Probe<V>
+    fn try_candidate<Q, const PROMOTE: bool>(&self, pos: usize, key: &Q, needle: u16) -> Probe<V>
     where
         K: Borrow<Q>,
         Q: Eq + ?Sized,
@@ -546,9 +583,11 @@ where
         // V::clone on the deref'd ManuallyDrop fields.
         if <K as Borrow<Q>>::borrow(&*buf.key) == key {
             let v: V = (*buf.value).clone();
-            let mask = Self::vbit_mask(pos);
-            if self.hot.visited.load(Ordering::Relaxed) & mask == 0 {
-                self.hot.visited.fetch_or(mask, Ordering::Relaxed);
+            if PROMOTE {
+                let mask = Self::vbit_mask(pos);
+                if self.hot.visited.load(Ordering::Relaxed) & mask == 0 {
+                    self.hot.visited.fetch_or(mask, Ordering::Relaxed);
+                }
             }
             return Probe::Found(v);
         }

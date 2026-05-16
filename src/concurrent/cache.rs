@@ -231,6 +231,23 @@ where
         self.shards[self.shard_of_hash(h)].get_by_hash::<Q>(key, h, self.has_avx2_bmi1)
     }
 
+    /// Like [`Self::get`] but **does not** set the SIEVE visited bit.
+    /// Returns a clone of the value on hit, or `None` on miss.
+    ///
+    /// Use this for non-promoting lookups (metrics probes, expiry checks,
+    /// debugging) where observing an entry should not affect its eviction
+    /// resistance. Unlike `get`, `peek` is not counted in [`Self::stats`]
+    /// hits/misses — it is a pure probe.
+    #[inline]
+    pub fn peek<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let h = self.hasher.hash_one(key);
+        self.shards[self.shard_of_hash(h)].peek_by_hash::<Q>(key, h, self.has_avx2_bmi1)
+    }
+
     /// Inserts `key → value`. If the shard was full and SIEVE chose a
     /// victim, the evicted `(K, V)` is dropped past every in-flight reader
     /// pin via `crossbeam-epoch` — use [`Self::insert_with`] if you need
@@ -317,6 +334,53 @@ mod tests {
         cache.get(&1);
         cache.get(&2);
         cache.insert(3, 30);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+    }
+
+    #[test]
+    fn peek_finds_existing_without_promoting() {
+        let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        // peek does not set VISITED: the oldest unvisited (1) is still the
+        // SIEVE victim on the next Path C, just like if no probe happened.
+        assert_eq!(cache.peek(&1), Some(10));
+        cache.insert(3, 30);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+    }
+
+    #[test]
+    fn peek_returns_none_for_missing() {
+        let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
+        cache.insert(1, 10);
+        assert_eq!(cache.peek(&99), None);
+    }
+
+    #[test]
+    fn peek_via_borrow_q() {
+        let cache: Cache<String, u64> = Cache::with_shards(4, 1);
+        cache.insert("alpha".to_string(), 1);
+        cache.insert("beta".to_string(), 2);
+        assert_eq!(cache.peek("alpha"), Some(1));
+        assert_eq!(cache.peek("beta"), Some(2));
+        assert_eq!(cache.peek("missing"), None);
+    }
+
+    #[test]
+    fn get_promotes_but_peek_does_not() {
+        // Parallel to `visited_entry_survives_first_pass` but with peek
+        // substituted for get — the entry should NOT survive because peek
+        // never set the visited bit.
+        let cache: Cache<i32, i32> = Cache::with_shards(2, 1);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.peek(&1);
+        cache.insert(3, 30);
+        // 1 was the older unvisited → evicted (mirroring the no-probe case).
         assert!(!cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
