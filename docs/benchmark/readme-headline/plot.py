@@ -5,6 +5,7 @@ Input  : data/results.csv (run.sh output)
 Outputs (figures/):
   - throughput.png     : Mops vs threads, headline chart for README
   - latency.png        : p50 / p99 chunk latency vs threads (log y)
+  - hit_ratio.png      : hit ratio vs threads — parity check on this workload
   - summary.md         : per-cell mean Mops + ratio vs moka / mini_moka
 
 Run    : uv run --project scripts python docs/benchmark/readme-headline/plot.py
@@ -195,6 +196,70 @@ def plot_latency(df: pd.DataFrame) -> None:
     print(f"wrote {out}", file=sys.stderr)
 
 
+def plot_hit_ratio(df: pd.DataFrame) -> None:
+    threads = sorted(df["threads"].unique())
+    x = np.arange(len(threads))
+    w = 0.26
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.0))
+    ax.set_axisbelow(True)
+    ax.grid(axis="x", visible=False)
+
+    series = {v: [] for v in VARIANTS}
+    for t in threads:
+        sub = df[df["threads"] == t]
+        for v in VARIANTS:
+            series[v].append(_mean(sub, "hit_ratio", v))
+
+    for k, v in enumerate(VARIANTS):
+        offset = (k - 1) * w
+        bars = ax.bar(
+            x + offset,
+            series[v],
+            w,
+            label=LABELS[v],
+            color=COLORS[v],
+            edgecolor="white",
+            linewidth=0.6,
+        )
+        for bar, m in zip(bars, series[v]):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.012,
+                f"{m:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color="#222",
+            )
+
+    ax.set_ylim(0.0, 1.0)
+    ax.set_yticks(np.linspace(0.0, 1.0, 6))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{t} thread" + ("" if t == 1 else "s") for t in threads])
+    ax.set_ylabel("hit ratio")
+    ax.set_title(
+        "Hit ratio — read-heavy Zipf α=1.0, cap=4096, 100k keys",
+        loc="left",
+        pad=10,
+        fontweight="bold",
+    )
+    ax.legend(
+        loc="upper left",
+        frameon=False,
+        fontsize=10,
+        ncol=3,
+        bbox_to_anchor=(0.0, -0.12),
+    )
+
+    fig.tight_layout(rect=(0, 0.02, 1, 0.97))
+    out = FIG / "hit_ratio.png"
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    print(f"wrote {out}", file=sys.stderr)
+
+
 def write_summary(df: pd.DataFrame) -> None:
     threads = sorted(df["threads"].unique())
     rows = []
@@ -259,6 +324,7 @@ def main() -> None:
     df = load()
     plot_throughput(df)
     plot_latency(df)
+    plot_hit_ratio(df)
     write_summary(df)
 
 
